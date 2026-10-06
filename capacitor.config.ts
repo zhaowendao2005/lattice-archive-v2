@@ -1,7 +1,7 @@
 import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
-  appId: 'com.example.latticearchive',
+  appId: 'app.lemon4360.cassava3192',
   appName: 'lattice-archive',
   webDir: 'dist',
   server: {

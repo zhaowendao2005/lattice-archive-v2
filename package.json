@@ -12,10 +12,12 @@
     "electron:rebuild-sqlite": "pnpm --dir electron exec electron-rebuild -f -w better-sqlite3",
     "electron:run": "npx cap run @capawesome/capacitor-electron",
     "electron:pack": "pnpm build && pnpm cap:sync && pnpm electron:build && pnpm --dir electron run pack",
+    "ios:cloud-build": "node scripts/cloud-build-ios.mjs",
     "postinstall": "pnpm --dir electron install"
   },
   "dependencies": {
     "@capacitor/core": "^8.5.2",
+    "@capacitor/ios": "^8.5.2",
     "@lucide/vue": "^1.52.0",
     "@vueuse/core": "^15.0.0",
     "class-variance-authority": "^0.7.1",

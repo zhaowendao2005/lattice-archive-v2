@@ -78,6 +78,18 @@ pnpm electron:rebuild-sqlite
 pnpm electron:pack
 ```
 
+### 6. 一键触发 iOS 云端编译与签名打包 (生成 .ipa)
+无需频繁触发 Git CI，支持本地命令手动触发，实时回传编译日志并自动下载 IPA：
+```bash
+pnpm ios:cloud-build
+```
+- **自动化特性**：
+  - 自动检测并推送本地更改至远端。
+  - 自动触发 GitHub Actions 云端 macOS 虚拟机构建与苹果原生签名。
+  - 控制台**实时流式输出**构建进度与阶段状态。
+  - 构建完成后**自动将完整日志写入 `logs/` 目录**（失败时突出显示关键堆栈）。
+  - 成功时**自动将 `.ipa` 下载至本地 `dist-ios/` 目录**。
+
 ---
 
 ## 💡 架构设计亮点
