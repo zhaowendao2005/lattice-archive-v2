@@ -48,11 +48,10 @@ jobs:
           P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
           BUILD_PROVISION_PROFILE_BASE64: ${{ secrets.BUILD_PROVISION_PROFILE_BASE64 }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          CERTIFICATE_PATH: ${{ runner.temp }}/build_certificate.p12
+          PP_PATH: ${{ runner.temp }}/build_pp.mobileprovision
+          KEYCHAIN_PATH: ${{ runner.temp }}/app-signing.keychain-db
         run: |
-          CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
-          PP_PATH=$RUNNER_TEMP/build_pp.mobileprovision
-          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
-
           # 1. 使用 Node.js 精确还原 Base64 二进制文件 (避免 macOS BSD base64 命令行差异)
           node -e '
             const fs = require("fs");
