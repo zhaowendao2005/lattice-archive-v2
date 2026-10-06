@@ -95,14 +95,26 @@ jobs:
       # ===== Xcode Archive =====
       - name: 执行 xcodebuild Archive
         run: |
+          if [ -d "ios/App/App.xcworkspace" ]; then
+            TARGET_ARG="-workspace ios/App/App.xcworkspace"
+          else
+            TARGET_ARG="-project ios/App/App.xcodeproj"
+          fi
+          echo "🎯 目标工程参数: $TARGET_ARG"
+
+          echo "🔍 查看工程 Schemes 列表:"
+          xcodebuild -list $TARGET_ARG
+
           xcodebuild archive \
-            -workspace ios/App/App.xcworkspace \
+            $TARGET_ARG \
             -scheme App \
             -configuration ${{ inputs.configuration }} \
             -destination 'generic/platform=iOS' \
             -archivePath build/App.xcarchive \
-            DEVELOPMENT_TEAM=RH32X4Y4ZN \
-            -allowProvisioningUpdates
+            CODE_SIGN_STYLE="Manual" \
+            DEVELOPMENT_TEAM="RH32X4Y4ZN" \
+            CODE_SIGN_IDENTITY="iPhone Distribution: peter doyle (RH32X4Y4ZN)" \
+            PROVISIONING_PROFILE_SPECIFIER="00008122-0012395E2186801CYUEDSS"
 
       # ===== 导出 IPA =====
       - name: 导出 IPA 安装包
@@ -110,8 +122,11 @@ jobs:
           xcodebuild -exportArchive \
             -archivePath build/App.xcarchive \
             -exportOptionsPlist ExportOptions.plist \
-            -exportPath output \
-            -allowProvisioningUpdates
+            -exportPath output
+
+          echo "✅ 产物目录内容:"
+          ls -lh output
+
 
       # ===== 安全清理 =====
       - name: 清理钥匙串与敏感凭证
