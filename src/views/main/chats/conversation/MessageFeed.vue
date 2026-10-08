@@ -6,7 +6,7 @@ const chatStore = useChatStore();
 </script>
 
 <template>
-  <div class="relative flex-1 overflow-y-auto px-5 py-5">
+  <div class="relative min-h-0 flex-1 overflow-y-auto px-5 py-5">
     <!-- 低对比度结构背景：保留几何层次，但不干扰消息阅读 -->
     <div
       aria-hidden="true"

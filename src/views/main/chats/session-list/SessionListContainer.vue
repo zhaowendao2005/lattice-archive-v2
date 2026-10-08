@@ -7,7 +7,7 @@ const chatStore = useChatStore();
 </script>
 
 <template>
-  <section class="w-80 min-w-[280px] max-w-[340px] shrink-0 flex flex-col border-r border-border">
+  <section class="w-80 min-w-[280px] max-w-[340px] min-h-0 shrink-0 flex flex-col border-r border-border">
     <div class="shrink-0 px-4 pt-4 pb-3 space-y-3">
       <div class="flex items-baseline justify-between">
         <h1 class="text-base font-semibold tracking-tight">会话</h1>

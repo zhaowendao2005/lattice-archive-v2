@@ -5,7 +5,7 @@ import MessageInput from './MessageInput.vue';
 </script>
 
 <template>
-  <section class="flex-1 min-w-0 flex flex-col overflow-hidden">
+  <section class="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
     <ConversationHeader />
     <MessageFeed />
     <MessageInput />

@@ -12,7 +12,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <main class="flex-1 min-w-0 flex overflow-hidden">
+  <main class="flex-1 min-w-0 min-h-0 flex overflow-hidden">
     <SessionListContainer />
     <ConversationContainer />
   </main>
