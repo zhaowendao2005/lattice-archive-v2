@@ -1,18 +1,23 @@
-
-@import url('https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&display=swap');
 @import "tw-animate-css";
 @import "shadcn-vue/tailwind.css";
 @import "tailwindcss";
 
 @theme inline {
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'Cascadia Code', Consolas, monospace;
+
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-surface-sub: var(--surface-sub);
   --color-card: var(--card);
   --color-card-foreground: var(--card-foreground);
   --color-popover: var(--popover);
   --color-popover-foreground: var(--popover-foreground);
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-brand-soft: var(--brand-soft);
   --color-secondary: var(--secondary);
   --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--muted);
@@ -24,11 +29,7 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
-  --color-chart-1: var(--chart-1);
-  --color-chart-2: var(--chart-2);
-  --color-chart-3: var(--chart-3);
-  --color-chart-4: var(--chart-4);
-  --color-chart-5: var(--chart-5);
+
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar-primary: var(--sidebar-primary);
@@ -37,97 +38,195 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
+
+  /* 圆角阶梯 */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-bubble: 16px;
+  --radius-pill: 9999px;
+  --radius: 8px;
 }
 
 @layer base {
-  .theme {
-    --font-sans: 'Geist Variable', sans-serif;
-    --font-heading: var(--font-sans)}
+  /* 瑞士科技蔚蓝 (Swiss Tech Blue)：干净通透的现代工程蓝 */
   :root {
-    --background: oklch(1 0 0);
-    --foreground: oklch(0.145 0 0);
+    color-scheme: light dark;
+
+    --background: oklch(0.975 0.006 240);
+    --foreground: oklch(0.20 0.02 245);
+    --surface-sub: oklch(0.985 0.004 240);
     --card: oklch(1 0 0);
-    --card-foreground: oklch(0.145 0 0);
+    --card-foreground: var(--foreground);
     --popover: oklch(1 0 0);
-    --popover-foreground: oklch(0.145 0 0);
-    --primary: oklch(0.205 0 0);
-    --primary-foreground: oklch(0.985 0 0);
-    --secondary: oklch(0.97 0 0);
-    --secondary-foreground: oklch(0.205 0 0);
-    --muted: oklch(0.97 0 0);
-    --muted-foreground: oklch(0.556 0 0);
-    --accent: oklch(0.97 0 0);
-    --accent-foreground: oklch(0.205 0 0);
-    --destructive: oklch(0.577 0.245 27.325);
-    --border: oklch(0.922 0 0);
-    --input: oklch(0.922 0 0);
-    --ring: oklch(0.708 0 0);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
-    --radius: 0.625rem;
-    --sidebar: oklch(0.985 0 0);
-    --sidebar-foreground: oklch(0.145 0 0);
-    --sidebar-primary: oklch(0.205 0 0);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.97 0 0);
-    --sidebar-accent-foreground: oklch(0.205 0 0);
-    --sidebar-border: oklch(0.922 0 0);
-    --sidebar-ring: oklch(0.708 0 0)
+    --popover-foreground: var(--foreground);
+
+    /* 主色/我方气泡：深邃纯粹的科技蓝 */
+    --primary: oklch(0.48 0.19 250);
+    --primary-foreground: oklch(0.99 0.005 240);
+
+    /* 品牌高亮/焦点/未读：高饱和蔚蓝 */
+    --brand: oklch(0.55 0.20 248);
+    --brand-foreground: oklch(1 0 0);
+    --brand-soft: oklch(0.94 0.035 245);
+
+    --secondary: oklch(0.95 0.01 240);
+    --secondary-foreground: var(--foreground);
+    --muted: oklch(0.96 0.008 240);
+    --muted-foreground: oklch(0.52 0.03 245);
+    --accent: oklch(0.935 0.02 240);
+    --accent-foreground: var(--foreground);
+    --destructive: oklch(0.55 0.2 27);
+    --destructive-foreground: oklch(1 0 0);
+
+    --border: oklch(0.90 0.01 240);
+    --input: oklch(0.88 0.015 240);
+    --ring: var(--brand);
+
+    --sidebar: var(--background);
+    --sidebar-foreground: var(--foreground);
+    --sidebar-primary: var(--primary);
+    --sidebar-primary-foreground: var(--primary-foreground);
+    --sidebar-accent: var(--accent);
+    --sidebar-accent-foreground: var(--accent-foreground);
+    --sidebar-border: var(--border);
+    --sidebar-ring: var(--ring);
+
+    /* 默认平台尺寸令牌 (Windows Standard) */
+    --hit-target: 40px;
+    --control-h: 40px;
+    --content-pad: 16px;
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
   }
-  .dark {
-    --background: oklch(0.145 0 0);
-    --foreground: oklch(0.985 0 0);
-    --card: oklch(0.205 0 0);
-    --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.205 0 0);
-    --popover-foreground: oklch(0.985 0 0);
-    --primary: oklch(0.922 0 0);
-    --primary-foreground: oklch(0.205 0 0);
-    --secondary: oklch(0.269 0 0);
-    --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.269 0 0);
-    --muted-foreground: oklch(0.708 0 0);
-    --accent: oklch(0.269 0 0);
-    --accent-foreground: oklch(0.985 0 0);
-    --destructive: oklch(0.704 0.191 22.216);
-    --border: oklch(1 0 0 / 10%);
-    --input: oklch(1 0 0 / 15%);
-    --ring: oklch(0.556 0 0);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
-    --sidebar: oklch(0.205 0 0);
-    --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: oklch(0.488 0.243 264.376);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.269 0 0);
-    --sidebar-accent-foreground: oklch(0.985 0 0);
-    --sidebar-border: oklch(1 0 0 / 10%);
-    --sidebar-ring: oklch(0.556 0 0)
+
+  @media (prefers-color-scheme: dark) {
+    :root:not(.light) {
+      --background: oklch(0.15 0.02 245);
+      --foreground: oklch(0.94 0.01 240);
+      --surface-sub: oklch(0.18 0.02 245);
+      --card: oklch(0.20 0.025 245);
+      --popover: oklch(0.22 0.025 245);
+
+      --primary: oklch(0.60 0.18 248);
+      --primary-foreground: oklch(0.14 0.02 245);
+
+      --brand: oklch(0.65 0.18 248);
+      --brand-foreground: oklch(0.12 0.02 245);
+      --brand-soft: oklch(0.28 0.05 245);
+
+      --secondary: oklch(0.25 0.02 245);
+      --muted: oklch(0.24 0.02 245);
+      --muted-foreground: oklch(0.68 0.03 240);
+      --accent: oklch(0.28 0.03 245);
+      --destructive: oklch(0.65 0.19 25);
+
+      --border: oklch(0.28 0.025 245);
+      --input: oklch(0.32 0.03 245);
+    }
   }
-  * {
-    @apply border-border outline-ring/50;
+
+  :root.dark {
+    --background: oklch(0.15 0.02 245);
+    --foreground: oklch(0.94 0.01 240);
+    --surface-sub: oklch(0.18 0.02 245);
+    --card: oklch(0.20 0.025 245);
+    --popover: oklch(0.22 0.025 245);
+
+    --primary: oklch(0.60 0.18 248);
+    --primary-foreground: oklch(0.14 0.02 245);
+
+    --brand: oklch(0.65 0.18 248);
+    --brand-foreground: oklch(0.12 0.02 245);
+    --brand-soft: oklch(0.28 0.05 245);
+
+    --secondary: oklch(0.25 0.02 245);
+    --muted: oklch(0.24 0.02 245);
+    --muted-foreground: oklch(0.68 0.03 240);
+    --accent: oklch(0.28 0.03 245);
+    --destructive: oklch(0.65 0.19 25);
+
+    --border: oklch(0.28 0.025 245);
+    --input: oklch(0.32 0.03 245);
   }
-  body {
-    @apply bg-background text-foreground;
-    @apply font-sans;
+
+  /* 平台尺寸阶梯适配 */
+  body[data-platform="ios"] {
+    --hit-target: 44px;
+    --control-h: 44px;
+    --content-pad: 16px;
+  }
+  body[data-platform="ipados"] {
+    --hit-target: 44px;
+    --control-h: 40px;
+    --content-pad: 20px;
+  }
+  body[data-platform="windows-standard"] {
+    --hit-target: 40px;
+    --control-h: 40px;
+    --content-pad: 16px;
+  }
+  body[data-platform="windows-compact"] {
+    --hit-target: 32px;
+    --control-h: 32px;
+    --content-pad: 12px;
+  }
+
+  /* WebKit 原生客户端级交互治理 */
+  *, *::before, *::after {
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    scrollbar-width: thin;
+    scrollbar-color: var(--input) transparent;
+  }
+
+  html, body, #app {
+    height: 100%;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  button:not(:disabled) {
+    cursor: pointer;
+  }
+
+  .selectable-text, input, textarea {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  /* 移动端 input 获焦防视口强制放大（表单控件不要再写字号原子类覆盖它） */
+  input, textarea, select {
+    font-size: 16px;
+  }
+  @media (min-width: 768px) {
+    input, textarea, select {
+      font-size: 14px;
+    }
   }
 }
 
-@layer base {
-  * {
-    @apply border-border;
-  }
-  body {
-    @apply bg-background text-foreground;
-  }
+/* 平台自适应高频类 */
+.token-control-height { height: var(--control-h); min-height: var(--control-h); }
+.token-hit-target { min-width: var(--hit-target); min-height: var(--hit-target); }
+.token-pad { padding: var(--content-pad); }
+
+/* 对话气泡贴角 */
+.radius-bubble-peer {
+  border-radius: var(--radius-bubble);
+  border-top-left-radius: var(--radius-xs);
+}
+.radius-bubble-self {
+  border-radius: var(--radius-bubble);
+  border-top-right-radius: var(--radius-xs);
 }
