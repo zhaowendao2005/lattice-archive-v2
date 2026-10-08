@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue';
-import { Archive, MessagesSquare, PanelLeft, Settings, SlidersHorizontal } from '@lucide/vue';
+import { Archive, MessagesSquare, PanelLeft, Settings } from '@lucide/vue';
 import { useAppStore } from '@/stores/app/stores/appStore';
 import { useAuthStore } from '@/stores/auth/stores/authStore';
 import { useChatStore } from '@/stores/chat/stores/chatStore';
