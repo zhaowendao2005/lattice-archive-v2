@@ -1,7 +1,13 @@
 <script setup lang="ts">
+import { useRouter } from 'vue-router';
 import { useAuthStore } from '@/stores/auth/stores/authStore';
 
 const authStore = useAuthStore();
+const router = useRouter();
+
+function switchAccount() {
+  router.push({ name: 'auth-login' });
+}
 </script>
 
 <template>
@@ -28,7 +34,7 @@ const authStore = useAuthStore();
           <button
             type="button"
             class="token-control-height px-3 rounded-lg border border-border text-xs font-medium hover:bg-muted transition-colors"
-            @click="authStore.openModal('login')"
+            @click="switchAccount"
           >
             切换账号
           </button>

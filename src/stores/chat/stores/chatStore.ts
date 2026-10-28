@@ -10,6 +10,7 @@ export const useChatStore = defineStore('chat', {
     searchKeyword: '',
     draftInput: '',
     isLoading: false,
+    isSessionListCollapsed: false,
   }),
 
   getters: {
@@ -67,6 +68,10 @@ export const useChatStore = defineStore('chat', {
 
     setSearchKeyword(keyword: string) {
       this.searchKeyword = keyword;
+    },
+
+    toggleSessionList() {
+      this.isSessionListCollapsed = !this.isSessionListCollapsed;
     },
 
     setDraftInput(text: string) {

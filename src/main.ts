@@ -2,6 +2,7 @@ import { createApp } from 'vue';
 import { createPinia } from 'pinia';
 import './style.css';
 import App from './App.vue';
+import router from './router';
 
 // 拦截 WebKit 双击放大与多指缩放手势，保证 Native 客户端软件级交互触感
 if (typeof window !== 'undefined') {
@@ -24,7 +25,7 @@ if (typeof window !== 'undefined') {
 }
 
 const app = createApp(App);
-const pinia = createPinia();
 
-app.use(pinia);
+app.use(createPinia());
+app.use(router);
 app.mount('#app');

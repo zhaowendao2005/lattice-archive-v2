@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Archive, Ellipsis } from '@lucide/vue';
+import { Archive, ArrowRightFromLine, Ellipsis } from '@lucide/vue';
 import { Button } from '@/components/ui/button';
 import { useChatStore } from '@/stores/chat/stores/chatStore';
 
@@ -8,9 +8,22 @@ const chatStore = useChatStore();
 
 <template>
   <header class="h-14 shrink-0 flex items-center justify-between gap-3 px-5 border-b border-border">
-    <div class="min-w-0">
-      <h2 class="text-sm font-semibold truncate">{{ chatStore.activeSession?.title ?? '未选择会话' }}</h2>
-      <p class="text-xs text-muted-foreground truncate">{{ chatStore.activeSession?.tags.join('  ') }}</p>
+    <div class="min-w-0 flex items-center gap-2">
+      <Button
+        v-if="chatStore.isSessionListCollapsed"
+        variant="ghost"
+        size="icon"
+        class="token-hit-target shrink-0 text-muted-foreground"
+        aria-label="展开会话列表"
+        title="展开会话列表"
+        @click="chatStore.toggleSessionList()"
+      >
+        <ArrowRightFromLine :stroke-width="1.75" />
+      </Button>
+      <div class="min-w-0">
+        <h2 class="text-sm font-semibold truncate">{{ chatStore.activeSession?.title ?? '未选择会话' }}</h2>
+        <p class="text-xs text-muted-foreground truncate">{{ chatStore.activeSession?.tags.join('  ') }}</p>
+      </div>
     </div>
 
     <div class="shrink-0 flex items-center gap-1">

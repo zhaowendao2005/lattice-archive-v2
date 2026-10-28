@@ -22,7 +22,7 @@
 
 ```text
 src/stores/
-├── app/                           # 应用全局环境域（平台类型、尺寸令牌、侧栏展开态、活动Tab）
+├── app/                           # 应用全局环境域（平台类型、尺寸令牌、侧栏展开态、主题）
 │   └── stores/appStore.ts
 ├── chat/                          # 核心业务域：聊天与消息
 │   ├── data-sources/
@@ -32,10 +32,17 @@ src/stores/
 │   └── mocks/
 │       └── chatMock.ts           # (c) Mock 类：成组业务模拟数据
 ├── auth/                          # 登录与用户认证域
-│   └── stores/authStore.ts
+│   ├── data-sources/
+│   │   └── authSessionStorage.ts # 会话持久化：localStorage / sessionStorage 读写
+│   └── stores/
+│       ├── authStore.ts          # 会话身份、表单草稿、账户菜单
+│       └── wallpaperStore.ts     # 登录页壁纸轮替索引与自动播放
 └── archive/                       # 收藏与归档域
     └── stores/archiveStore.ts
 ```
+
+**注意**：主 Tab 与会话/设置子页的选择态**不在此目录**——它们是路由（见 `frontend-architecture.md` 第五节）。
+`appStore` 内禁止再出现 `activeTab` / `activeSettingsTab` 之类的位置字段。
 
 ---
 
@@ -60,3 +67,23 @@ src/stores/
   1. **成组业务内聚**：同一组业务的 Mock 数据必须收敛在同一个文件中，禁止碎片化散落。
   2. **标准化注释要求**：每个 Mock 对象必须清晰标注业务归属、字段含义与拟真说明。
   3. **接线即删铁律**：**一旦该块业务通过 Data Source 接通真实服务，必须立即物理删除对应的 Mock 文件与引用**，禁止残留无用的 Mock 垫层。
+
+---
+
+## 四、 零 ref 铁律的补充说明（路由化之后）
+
+**"这个状态该进路由吗"与"这个状态能放在组件里吗"是两个独立问题。**
+
+* 路由只决定状态的**归属层级**（URL vs store），从不豁免视图层的零 ref 约束；
+* 反例：登录页的「显示密码」开关、注册表单草稿——看似一次性，但放入 store 后
+  才能在 登录 ↔ 注册 往返时不丢失已填内容；放组件内 ref 则随卸载清零。
+
+---
+
+## 五、 会话持久化的边界
+
+* 会话身份的**内存态**在 `authStore.user`，**落盘**只在 Data Source 层
+  （`auth/data-sources/authSessionStorage.ts`）完成，Store 不直接操作 `localStorage`；
+* 勾选「保持登录」写 `localStorage`（30 天有效），未勾选写 `sessionStorage`（关闭即失效），
+  使该复选框具备真实语义；
+* 读取失败（隐私模式 / 存储被禁用 / 内容损坏）一律**静默降级为未登录**，不得阻断应用启动。

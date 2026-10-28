@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia';
-import { ref, computed } from 'vue';
+import { computed, ref } from 'vue';
 import type { ArchiveItem, PlatformInfo } from '../types/database';
 import { dbService } from '../services/database';
 

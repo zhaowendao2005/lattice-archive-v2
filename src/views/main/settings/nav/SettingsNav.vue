@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { Code2, Database, Laptop, Palette, SlidersHorizontal } from '@lucide/vue';
-import { useAppStore, type SettingsSubTab } from '@/stores/app/stores/appStore';
+import type { Component } from 'vue';
 
-const appStore = useAppStore();
+export type SettingsSubTab = 'platform' | 'appearance' | 'developer' | 'general' | 'storage';
 
 interface NavItem {
   key: SettingsSubTab;
   label: string;
-  icon: any;
+  icon: Component;
 }
 
 const NAV_ITEMS: NavItem[] = [
@@ -27,21 +27,27 @@ const NAV_ITEMS: NavItem[] = [
     </div>
 
     <nav class="flex-1 overflow-y-auto px-2 pb-2 space-y-1">
-      <button
+      <RouterLink
         v-for="item in NAV_ITEMS"
         :key="item.key"
-        type="button"
-        :class="[
-          'w-full token-control-height flex items-center rounded-lg px-3 text-sm transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring',
-          appStore.activeSettingsTab === item.key
-            ? 'bg-accent text-foreground font-medium'
-            : 'text-muted-foreground hover:bg-accent/60 hover:text-foreground'
-        ]"
-        @click="appStore.setActiveSettingsTab(item.key)"
+        :to="{ name: `settings-${item.key}` }"
+        custom
+        #default="{ navigate, isActive }"
       >
-        <component :is="item.icon" class="size-4 shrink-0" :stroke-width="1.75" />
-        <span class="ml-2.5 truncate text-left">{{ item.label }}</span>
-      </button>
+        <button
+          type="button"
+          :class="[
+            'w-full token-control-height flex items-center rounded-lg px-3 text-sm transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring',
+            isActive
+              ? 'bg-accent text-foreground font-medium'
+              : 'text-muted-foreground hover:bg-accent/60 hover:text-foreground'
+          ]"
+          @click="navigate"
+        >
+          <component :is="item.icon" class="size-4 shrink-0" :stroke-width="1.75" />
+          <span class="ml-2.5 truncate text-left">{{ item.label }}</span>
+        </button>
+      </RouterLink>
     </nav>
   </aside>
 </template>

@@ -13,6 +13,24 @@ dist-ssr
 dist-ios
 *.local
 
+# Electron 平台构建/同步产物（electron/.gitignore 已覆盖，此处保留兜底）
+electron/app
+electron/build
+electron/generated
+electron/vendor
+
+# 调试与性能压测产物
+.playwright-cli/
+.playwright/
+playwright-report/
+test-results/
+blob-report/
+*.trace
+trace.zip
+*.cpuprofile
+*.heapsnapshot
+.perf/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

@@ -6,11 +6,11 @@ const chatStore = useChatStore();
 </script>
 
 <template>
-  <div class="relative min-h-0 flex-1 overflow-y-auto px-5 py-5">
+  <div class="relative min-h-0 flex-1 overflow-y-auto px-5 pt-5 pb-2">
     <!-- 低对比度结构背景：保留几何层次，但不干扰消息阅读 -->
     <div
       aria-hidden="true"
-      class="pointer-events-none absolute inset-0 bg-cover bg-center opacity-35"
+      class="pointer-events-none absolute inset-0 bg-cover bg-center opacity-25"
       style="background-image: url('/backgrounds/isometric-structure.png');"
     />
 
