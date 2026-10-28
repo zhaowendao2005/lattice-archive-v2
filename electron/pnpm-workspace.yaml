@@ -1,0 +1,5 @@
+# ⚠️ 由 scripts/platform.mjs 生成，请勿手工编辑（改策略改 SAFE_BUILD_SCRIPTS 后重跑）。
+# pnpm >= 10 默认不执行依赖的安装脚本；这里声明允许执行的依赖，
+# 缺省或写成非布尔值会让 `pnpm install` 以 ERR_PNPM_IGNORED_BUILDS 失败。
+allowBuilds:
+  electron-winstaller: true

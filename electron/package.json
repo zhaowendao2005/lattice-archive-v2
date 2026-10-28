@@ -3,11 +3,14 @@
   "private": true,
   "version": "0.0.0",
   "description": "Electron platform project for lattice-archive.",
+  "author": "lattice-archive",
   "main": "build/main.js",
   "scripts": {
     "build": "tsc",
     "start": "electron .",
-    "pack": "npm run build && capacitor-electron vendor && electron-builder --config electron-builder.config.js"
+    "info": "node ../scripts/platform.mjs info",
+    "doctor": "node ../scripts/platform.mjs doctor",
+    "pack": "node ../scripts/platform.mjs pack --skip-web --skip-sync"
   },
   "devDependencies": {
     "@electron/rebuild": "^4.2.0",

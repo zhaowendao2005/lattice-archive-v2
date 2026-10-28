@@ -4,16 +4,23 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "preinstall": "node scripts/platform.mjs sync-policy",
+    "postinstall": "pnpm --dir electron install",
     "dev": "vite",
     "build": "vue-tsc -b && vite build",
     "preview": "vite preview",
+    "platform:info": "node scripts/platform.mjs info",
+    "platform:doctor": "node scripts/platform.mjs doctor",
+    "platform:sync-policy": "node scripts/platform.mjs sync-policy",
     "cap:sync": "npx cap sync @capawesome/capacitor-electron",
     "electron:build": "pnpm --dir electron run build",
     "electron:rebuild-sqlite": "pnpm --dir electron exec electron-rebuild -f -w better-sqlite3",
     "electron:run": "npx cap run @capawesome/capacitor-electron",
-    "electron:pack": "pnpm build && pnpm cap:sync && pnpm electron:build && pnpm --dir electron run pack",
-    "ios:cloud-build": "node scripts/cloud-build-ios.mjs",
-    "postinstall": "pnpm --dir electron install"
+    "electron:pack": "node scripts/platform.mjs pack",
+    "electron:pack:mac": "node scripts/platform.mjs pack --target=mac",
+    "electron:pack:win": "node scripts/platform.mjs pack --target=win",
+    "electron:pack:linux": "node scripts/platform.mjs pack --target=linux",
+    "ios:cloud-build": "node scripts/cloud-build-ios.mjs"
   },
   "dependencies": {
     "@capacitor/core": "^8.5.2",

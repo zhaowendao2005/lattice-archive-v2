@@ -22,6 +22,9 @@ lattice-archive/
 ├── capacitor.config.ts        # Capacitor 根配置
 ├── components.json            # shadcn-vue 组件配置
 ├── package.json               # 根项目依赖与运行脚本
+├── scripts/
+│   ├── platform.mjs           # 跨平台策略与打包入口（info / doctor / pack）
+│   └── cloud-build-ios.mjs    # iOS 云端构建流水线
 ├── electron/                  # Electron 桌面端主工程
 │   ├── main.ts                # Electron 主进程入口与 IPC 处理
 │   ├── preload.ts             # Preload 安全上下文桥接脚本
@@ -92,11 +95,47 @@ pnpm ios:cloud-build
 
 ---
 
+## 🧭 跨平台（macOS / Windows）
+
+同一个人在 macOS 与 Windows 上开发，所有「跟系统有关」的判断集中在 **`scripts/platform.mjs`** 一个文件里，不再散落 `if (process.platform === 'win32')`。
+
+```bash
+pnpm install          # preinstall 自动生成 pnpm 策略，postinstall 再装 electron/ 子工程
+pnpm platform:doctor  # 换机器 / 系统升级后先跑自检
+```
+
+| 命令 | 说明 |
+| --- | --- |
+| `pnpm platform:info` | 当前系统解析出的策略：放行脚本 / better-sqlite3 / 本机打包参数 |
+| `pnpm platform:doctor` | 环境自检（Node / pnpm / 策略文件 / electron / sqlite 加载 / 工具链 / 打包器），✗ 时非 0 退出 |
+| `pnpm platform:sync-policy` | 重新生成 `electron/pnpm-workspace.yaml`（一般由 preinstall 自动做）|
+| `pnpm electron:pack[:mac\|win\|linux]` | 打包，自动拼装 electron-builder 参数（`-- --dry-run` 只打印计划，`-- --arch=x64` 指定架构，`-- --skip-web` 跳过前端构建）|
+
+它实际按系统切换的东西：
+
+| | macOS | Windows |
+| --- | --- | --- |
+| 打包目标 | `dmg + zip`（可 `--arch=universal`）| `nsis + portable` |
+| 交叉打包 | 打 Windows 包需 wine | 无法打 macOS 包（签名/公证依赖 macOS）|
+| 原生模块重编译 | 依据是否存在 Node-API 预编译产物判定（13.x 无需重编译）| 同左 |
+| 本地 iOS 同步 | 可用 | 不可用（云端构建仍可触发）|
+
+**关于安装脚本放行（`allowBuilds`）为什么不分系统**：pnpm 在启动时就加载 `pnpm-workspace.yaml`，之后才跑 `preinstall`，所以脚本无法为「本次安装」切换配置；而仓库只能提交一份文件。`electron-winstaller` 的脚本只是按宿主架构拷贝 7z 二进制（纯 `copyFile`，无编译，两端实测安全），因此统一放行，保证哪个平台首次 `pnpm install` 都不会因 `ERR_PNPM_IGNORED_BUILDS` 失败。
+
+> ⚠️ 新增带安装脚本的依赖时，先确认它在两个平台都安全；否则就不能再统一放行，需改为按平台生成且该文件不再提交。
+
+---
+
 ## 💡 架构设计亮点
 
 1. **双环境自适应（Isomorphic Fallback）**：
    `src/services/database.ts` 会自动探测当前环境。在 Electron 环境下调用真实的本地 SQLite 数据库文件（位于系统用户数据目录）；在浏览器单纯启动 `pnpm dev` 时自动无缝回退到轻量本地模拟层，避免开发时报错。
 2. **安全隔离（Sandbox & Context Isolation）**：
    遵守 Electron 最新安全规范，主进程与渲染进程严格隔离，无 Node 原生注入风险，通过 `preload.ts` 对接。
-3. **原生 C++ 模块针对 Electron ABI 构建**：
-   已配置 `@electron/rebuild`，解决 Windows / Node.js 22 环境下 `better-sqlite3` 与 Electron 的 ABI 兼容编译问题。
+3. **原生 C++ 模块与 Electron ABI**：
+   `better-sqlite3` 自 13.x 起改为 Node-API 预编译产物（`prebuilds/<platform>-<arch>.node`），
+   与 Electron ABI 无关，因此无需重编译即被主进程加载；`@electron/rebuild` 保留为兜底，
+   `pnpm platform:doctor` 会在缺少对应预编译产物时提示执行 `pnpm electron:rebuild-sqlite`。
+4. **跨平台一致性**：
+   安装脚本放行、原生模块重编译判定、打包目标与架构统一由 `scripts/platform.mjs`
+   决策，macOS 与 Windows 使用同一套命令（见上文「跨平台」）。
