@@ -10,8 +10,10 @@
 - **桌面运行平台 (Desktop Platform)**: [`@capawesome/capacitor-electron`](https://capawesome.io/docs/sdks/capacitor/electron)
 - **前端框架 (Frontend Framework)**: [Vue 3](https://vuejs.org/) + [TypeScript](https://www.typescriptlang.org/) + [Vite](https://vite.dev/)
 - **UI 体系 (UI Components & Styling)**: [shadcn-vue](https://shadcn-vue.com/) + [Tailwind CSS v4](https://tailwindcss.com/)
+- **高性能管理表格 (Admin Data Grid)**: [VXE-Table](https://vxetable.cn/)（服务端搜索/分页/排序、固定操作列、路由级按需加载）
 - **全局状态管理 (State Management)**: [Pinia](https://pinia.vuejs.org/)
 - **本地嵌入式数据库 (Local Database)**: [`better-sqlite3`](https://github.com/WiseLibs/better-sqlite3)（启用 WAL 模式，集成于 Electron 主进程并通过安全的 IPC/Preload 桥接）
+- **远端聚合服务 (Remote Backend)**: Cloudflare Worker（同源托管前端静态资源 + `/api/auth/*` + `/api/admin/*`）+ D1 + Turnstile，启用结构化 Logs/Traces
 
 ---
 
@@ -19,10 +21,14 @@
 
 ```text
 lattice-archive/
+├── AGENTS.md                  # 面向 AI/协作者的仓库入口说明
+├── .rules/                    # 强制性架构规范（前端/状态/设计/远端 Worker）
 ├── capacitor.config.ts        # Capacitor 根配置
 ├── components.json            # shadcn-vue 组件配置
+├── deploy.config.json         # 远端 D1 部署模式（rebuild / migrate）
 ├── package.json               # 根项目依赖与运行脚本
 ├── scripts/
+│   ├── deploy.mjs             # 一键部署编排（构建 → D1 模式 → Worker 发布）
 │   ├── platform.mjs           # 跨平台策略与打包入口（info / doctor / pack）
 │   └── cloud-build-ios.mjs    # iOS 云端构建流水线
 ├── electron/                  # Electron 桌面端主工程
@@ -34,10 +40,21 @@ lattice-archive/
 │   └── package.json           # Electron 独立运行时依赖
 ├── src/                       # Vue 3 前端工程
 │   ├── components/ui/         # shadcn-vue 原子 UI 组件库
+│   ├── router/                # 路由表与守卫（含远端会话握手）
 │   ├── services/database.ts   # 统一数据库服务 (含 Electron 与 Web Fallback)
-│   ├── stores/archive.ts      # Pinia 状态 Store
-│   ├── types/database.ts      # 数据库与 IPC 类型定义
-│   ├── App.vue                # 现代化归档系统前端界面
+│   ├── stores/                # Pinia 业务域（每域三层：data-sources / stores / mocks）
+│   │   ├── auth/              # 鉴权域：远端 API、会话持久化、Turnstile 桥接
+│   │   └── admin/             # 管理域：用户列表、搜索分页、增删弹窗状态
+│   ├── views/                 # 页面与视图（零本地 ref）
+│   │   ├── auth/              # 用户登录 / 注册 / TurnstileWidget
+│   │   └── admin/             # 管理员登录 / 概览 / VXE 用户管理
+│   ├── worker/remote/         # Cloudflare Worker：静态资源 + /api/auth/* + /api/admin/*
+│   │   ├── auth/              # routes / service / repository / crypto / turnstile
+│   │   ├── admin/             # 管理员鉴权与用户增删查
+│   │   ├── shared/            # JSON 响应、CORS、结构化日志
+│   │   ├── migrations/        # D1 schema 迁移
+│   │   └── wrangler.jsonc     # Worker 配置（ASSETS + D1 + Turnstile）
+│   ├── App.vue                # 应用外壳
 │   ├── main.ts                # Vue 初始化入口
 │   └── style.css              # Tailwind CSS v4 与设计 Token
 ```
@@ -139,3 +156,99 @@ pnpm platform:doctor  # 换机器 / 系统升级后先跑自检
 4. **跨平台一致性**：
    安装脚本放行、原生模块重编译判定、打包目标与架构统一由 `scripts/platform.mjs`
    决策，macOS 与 Windows 使用同一套命令（见上文「跨平台」）。
+5. **鉴权与建连（Auth & Session Handshake）**：
+   登录 / 注册 / 管理员登录均先通过 Turnstile 服务端校验，再执行 PBKDF2 密码比对；
+   会话只落库 Token 的 SHA-256 摘要，客户端冷启动时由路由守卫向 `/api/auth/session/connect`
+   握手确认有效性，失效即静默清理并打回登录页。规则见 `.rules/remote-worker.md`。
+6. **管理员用户管理（Admin User Lifecycle）**：
+   `/admin/users` 是管理面板第一模块，VXE-Table 通过 `/api/admin/users` 完成真实 D1 用户搜索、分页、新增与删除；
+   管理接口逐次验证远端管理员会话，删除用户时原子清理其远端会话，不返回密码哈希等敏感字段。
+
+---
+
+## ☁️ 远端聚合服务器（单个 Worker：前端 + API）
+
+前端静态资源与 `/api/auth/*`、`/api/admin/*` 由**同一个 Worker** 提供，不依赖 Pages：
+
+- 生产地址：`https://lattice-v2.zhaowendao2005.workers.dev`
+- 配置：`src/worker/remote/wrangler.jsonc`（`assets.directory = ../../../dist`，`/api/*` 优先进入 Worker，其余路径回退 SPA）
+- 数据：Cloudflare D1 `lattice-v2-d1`（`users` / `sessions`）
+
+| 命令 | 作用 |
+| --- | --- |
+| `pnpm worker:migrate:local` / `worker:migrate:remote` | 应用 D1 迁移 |
+| `pnpm worker:dev` | 本地 Worker（`local` 环境，允许 `localhost` hostname） |
+| `pnpm dev` | Vite 开发服务器，`/api` 自动代理到 `127.0.0.1:8787` |
+| `pnpm worker:types` | 由 Wrangler 生成 `Env` 绑定类型 |
+| `pnpm deploy` | 一键部署：自动构建 → 按当前模式处理远端 D1 → 随 Worker 发布 |
+| `pnpm deploy:rebuild` | 强制重建模式部署 |
+| `pnpm deploy:migrate` | 强制迁移模式部署 |
+
+本地密钥放在 `src/worker/remote/.dev.vars`（已忽略），生产密钥用 `wrangler secret put TURNSTILE_SECRET` 管理；前端 Sitekey 通过 `VITE_TURNSTILE_SITEKEY` 注入。
+
+### 管理员账户配置（部署时自动同步）
+
+管理员凭证在 `src/worker/remote/.dev.vars` 中配置，模板见 `src/worker/remote/.dev.vars.example`：
+
+```dotenv
+TURNSTILE_SECRET=...
+ADMIN_EMAIL=operator@lattice.dev
+ADMIN_PASSWORD=至少 8 位的强密码
+ADMIN_NAME=System Operator
+```
+
+- `pnpm deploy` / `deploy:rebuild` / `deploy:migrate` 都会在数据库就绪后，用 `ADMIN_EMAIL` + `ADMIN_PASSWORD` 生成 PBKDF2 哈希并 **upsert 管理员账户**（改密码后重新部署即可生效）；
+- `ADMIN_*` 只被部署脚本读取，**不会**上传为 Worker Secret（部署时自动过滤，仅上传 `TURNSTILE_SECRET` 等运行时密钥）；
+- 本地开发库可单独播种：`pnpm worker:seed:local`；
+- 部署脚本会校验 `.dev.vars` 必须包含 `TURNSTILE_SECRET`，缺失时立即中止（避免把空/旧密钥带上线）；
+- 预览而不执行：`node scripts/deploy.mjs --mode=rebuild --dry-run`（会跳过种子与部署）。
+
+> ⚠️ `.dev.vars` 含明文密码，已由 `.gitignore` 排除；**不要**把真实值写进 `.dev.vars.example` 或提交历史。
+
+### 用户管理（管理员面板第一模块）
+
+管理员登录后默认进入 `/admin/users`，可通过 VXE-Table 管理远端普通用户：
+
+- 按用户名或邮箱搜索，服务端分页（20 / 50 / 100 条）及用户名、邮箱、创建时间排序；
+- 通过弹窗新增普通用户，沿用 PBKDF2 密码存储，不切换当前管理员会话；
+- 二次确认后删除用户及其全部远端会话；管理员账户不会出现在可操作列表中；
+- 删除只影响远端账户和会话，不会清除用户设备上的本地归档。
+
+| 接口 | 用途 |
+| --- | --- |
+| `GET /api/admin/users?page=1&pageSize=20&search=...&sort=created_at&direction=desc` | 查询普通用户 |
+| `POST /api/admin/users` | 新增普通用户（`name` / `email` / `password`） |
+| `DELETE /api/admin/users/:id` | 删除普通用户及其会话 |
+
+以上接口都要求 `Authorization: Bearer <session-token>` 并在服务端逐次校验管理员角色。该功能复用现有 `users` / `sessions` 表，无需新增迁移；部署时应使用 `pnpm deploy:migrate` 保留线上数据。
+
+### 远端 D1 的两种部署模式
+
+`pnpm deploy` 每次都会先执行完整构建，再按当前模式处理远端数据库，最后部署 Worker。
+模式由根目录 `deploy.config.json` 的 `d1Mode` 决定（也可用命令参数或环境变量临时覆盖）：
+
+```json
+{
+  "d1Mode": "rebuild",
+  "databaseName": "lattice-v2-d1",
+  "rebuildLocation": "apac"
+}
+```
+
+| 模式 | 行为 | 数据 | 适用场景 |
+| --- | --- | --- | --- |
+| `rebuild`（当前默认） | 删除远端 D1 → 按迁移模板重新创建 → 回写新的 `database_id` → 应用迁移 | **全部清空，不迁移** | 结构大改、希望从零开始，或按需重置数据库 |
+| `migrate` | 只执行尚未应用的迁移 | 保留 | 日常迭代、线上已有真实用户数据 |
+
+切换方式（任选其一，优先级从高到低）：
+
+```bash
+pnpm deploy:rebuild          # 本次强制重建
+pnpm deploy:migrate          # 本次强制迁移
+D1_MODE=migrate pnpm deploy  # 环境变量覆盖
+# 或直接修改 deploy.config.json 里的 d1Mode
+```
+
+> ⚠️ 重建模式会永久删除 `lattice-v2-d1` 的所有账户与会话（含管理员账户），并生成新的数据库 ID，脚本会自动把新 ID 写回 `src/worker/remote/wrangler.jsonc`（该文件会因此产生 diff）。仅在明确需要重置时使用。
+>
+> 只想预览流程而不执行破坏性操作时，可运行 `node scripts/deploy.mjs --mode=rebuild --dry-run`。

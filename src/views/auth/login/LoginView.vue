@@ -4,22 +4,19 @@ import { ArrowRight, Eye, EyeOff, ShieldCheck } from '@lucide/vue';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useAuthStore } from '@/stores/auth/stores/authStore';
+import TurnstileWidget from '@/views/auth/components/TurnstileWidget.vue';
 
 const authStore = useAuthStore();
 const router = useRouter();
 
-/**
- * 演示环境无真实鉴权，提交即建立本地会话。
- * CTA 不做 disabled 处理（避免主行动点视觉发灰、且无法告知失败原因），
- * 而是在提交时校验并聚焦到第一个缺失字段。
- */
-function handleSubmit() {
-  if (authStore.canSubmitLogin) {
-    authStore.loginAsUser();
-    router.push({ name: 'chats' });
+async function handleSubmit() {
+  if (!authStore.emailInput.trim() || !authStore.passwordInput) {
+    authStore.setAuthError('请输入邮箱和密码');
+    document.getElementById(authStore.emailInput.trim() ? 'login-password' : 'login-email')?.focus();
     return;
   }
-  document.getElementById(authStore.emailInput.trim() ? 'login-password' : 'login-email')?.focus();
+  if (!authStore.turnstileToken) { authStore.setAuthError('请先完成人机安全验证'); return; }
+  if (await authStore.submitLogin()) await router.push({ name: 'chats' });
 }
 </script>
 
@@ -34,7 +31,7 @@ function handleSubmit() {
 
     <form class="space-y-3.5 lg:space-y-4 [@media(max-height:560px)]:space-y-3" @submit.prevent="handleSubmit">
       <div>
-        <label for="login-email" class="mb-1.5 block text-xs font-medium text-foreground">邮箱或账号</label>
+        <label for="login-email" class="mb-1.5 block text-xs font-medium text-foreground">邮箱</label>
         <Input
           id="login-email"
           :model-value="authStore.emailInput"
@@ -83,12 +80,15 @@ function handleSubmit() {
         <span class="text-xs text-muted-foreground">30 天内保持登录状态</span>
       </label>
 
+      <div v-if="authStore.authError" role="alert" class="rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive">{{ authStore.authError }}</div>
+      <TurnstileWidget action="login" />
       <Button
         type="submit"
         size="lg"
         class="mt-1 h-11 w-full rounded-xl text-sm shadow-sm"
       >
         进入工作区
+        <span v-if="authStore.isSubmitting" class="sr-only">正在验证</span>
         <ArrowRight class="size-4" :stroke-width="2" />
       </Button>
     </form>

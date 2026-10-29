@@ -42,7 +42,12 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/admin/AdminLayout.vue'),
     meta: { requiresAdmin: true },
     children: [
-      { path: '', redirect: '/admin/overview' },
+      { path: '', redirect: '/admin/users' },
+      {
+        path: 'users',
+        name: 'admin-users',
+        component: () => import('@/views/admin/users/AdminUsersView.vue'),
+      },
       {
         path: 'overview',
         name: 'admin-overview',
@@ -90,10 +95,14 @@ const router = createRouter({
 });
 
 /** 访问守卫：会话身份来自 authStore，未登录不得进入工作区，非管理员不得进入控制台。 */
-router.beforeEach((to) => {
+router.beforeEach(async (to) => {
   const auth = useAuthStore();
+  await auth.initializeSessionConnection();
   if (to.meta.requiresAdmin && !auth.isAdmin) return { name: 'admin-login' };
   if (to.meta.requiresAuth && !auth.isLoggedIn) return { name: 'auth-login' };
+  if (auth.isLoggedIn && (to.name === 'auth-login' || to.name === 'auth-register')) {
+    return { name: auth.isAdmin ? 'admin-users' : 'chats' };
+  }
   return true;
 });
 

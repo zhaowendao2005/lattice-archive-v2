@@ -53,6 +53,12 @@ importers:
       vue-router:
         specifier: ^4.6.4
         version: 4.6.4(vue@3.5.43(typescript@6.0.3))
+      vxe-pc-ui:
+        specifier: 4.20.33
+        version: 4.20.33(vue@3.5.43(typescript@6.0.3))
+      vxe-table:
+        specifier: 4.16.14
+        version: 4.16.14(vue@3.5.43(typescript@6.0.3))
     devDependencies:
       '@capacitor/cli':
         specifier: ^8.5.2
@@ -785,6 +791,11 @@ packages:
     peerDependencies:
       vue: ^3.5.0
 
+  '@vxe-ui/core@4.5.3':
+    resolution: {integrity: sha512-wdcgCIix9EbPrcUF4AfiJFGEFRn87FSDTk2yCYcsxdpAPqwaaBF7zC9ZFIrrGvhYkTOhNjtISVgiFjpvFOITMg==}
+    peerDependencies:
+      vue: ^3.2.0
+
   '@xmldom/xmldom@0.9.12':
     resolution: {integrity: sha512-5AXjrcMClTryPe9LgZrygpB1lj7s0S9E0+W+AHaVKAVyHanafK86iPSvG5xHVSp/jC+VH1UXu0TAEmY279xH7A==}
     engines: {node: '>=14.6'}
@@ -1154,6 +1165,9 @@ packages:
 
   dom-serializer@2.0.0:
     resolution: {integrity: sha512-wIkAryiqt/nV5EQKqQpo3SToSOV9J0DnbJqwK7Wv/Trc92zIAYZ4FlMu+JPFW1DfGFt81ZTCGgDEabffXeLyJg==}
+
+  dom-zindex@1.0.8:
+    resolution: {integrity: sha512-n6UB0BU5pltbvMWNu3zZqnLO35uFvOjTBO/s2GiPbdnfhyVGYLhLxynou/B2QSQEPJR4d398/0jbUZHLNiOmfA==}
 
   domelementtype@2.3.0:
     resolution: {integrity: sha512-OLETBj6w0OsagBwdXnPdN0cnMfF9opN69co+7ZrbfPGrdpPVNBUj02spi6B1N7wChLQiPn4CSH/zJvXw56gmHw==}
@@ -2588,6 +2602,12 @@ packages:
       typescript:
         optional: true
 
+  vxe-pc-ui@4.20.33:
+    resolution: {integrity: sha512-gYA3tp0Hp5TeTaRKY5/S9RSJGjHni94bMlBCyucUj4TurHqklPTsoUWhICLkJ5wqvYnwMWDbO2eFtuJAlxIXgQ==}
+
+  vxe-table@4.16.14:
+    resolution: {integrity: sha512-ih226hjZW+pGLZ1PDrrts97nrEfmecuv+mI2+ftUD8tu4J2t2XCF4N2IfRWg1m9ows+ITP6xCjWRaEDoGT80VA==}
+
   web-worker@1.5.0:
     resolution: {integrity: sha512-RiMReJrTAiA+mBjGONMnjVDP2u3p9R1vkcGz6gDIrOMT3oGuYwX2WRMYI9ipkphSuE5XKEhydbhNEJh4NY9mlw==}
 
@@ -2614,6 +2634,9 @@ packages:
   xcode@3.0.1:
     resolution: {integrity: sha512-kCz5k7J7XbJtjABOvkc5lJmkiDh8VhjVCGNiqdKCscmVpdVUpEAyXv1xmCLkQJ5dsHqx3IPO4XW+NTDhU/fatA==}
     engines: {node: '>=10.0.0'}
+
+  xe-utils@4.1.4:
+    resolution: {integrity: sha512-bzLJZkRaLX8BPTXjZkxZWq40XshK06/4kdfKhZehsa4V3juQbvaTS9302mdL2keM88EmL9sAlrfPLDn/2npBfg==}
 
   xml2js@0.6.2:
     resolution: {integrity: sha512-T4rieHaC1EXcES0Kxxj4JWgaUQHDk+qwHcYOCFHfiwKz7tOVPLq7Hjq9dM1WCMhylqMEfP7hMcOIChvotiZegA==}
@@ -3102,7 +3125,7 @@ snapshots:
     dependencies:
       '@hono/node-server': 2.1.3(hono@4.13.13)
       ajv: 8.20.0
-      ajv-formats: 3.0.1(ajv@8.20.0)
+      ajv-formats: 3.0.1
       content-type: 1.0.5
       cors: 2.8.6
       cross-spawn: 7.0.6
@@ -3438,6 +3461,12 @@ snapshots:
     dependencies:
       vue: 3.5.43(typescript@6.0.3)
 
+  '@vxe-ui/core@4.5.3(vue@3.5.43(typescript@6.0.3))':
+    dependencies:
+      dom-zindex: 1.0.8
+      vue: 3.5.43(typescript@6.0.3)
+      xe-utils: 4.1.4
+
   '@xmldom/xmldom@0.9.12': {}
 
   accepts@2.0.0:
@@ -3451,8 +3480,8 @@ snapshots:
 
   acorn@8.19.0: {}
 
-  ajv-formats@3.0.1(ajv@8.20.0):
-    optionalDependencies:
+  ajv-formats@3.0.1:
+    dependencies:
       ajv: 8.20.0
 
   ajv@6.15.0:
@@ -3755,6 +3784,8 @@ snapshots:
       domelementtype: 2.3.0
       domhandler: 5.0.3
       entities: 4.5.0
+
+  dom-zindex@1.0.8: {}
 
   domelementtype@2.3.0: {}
 
@@ -5186,6 +5217,18 @@ snapshots:
     optionalDependencies:
       typescript: 6.0.3
 
+  vxe-pc-ui@4.20.33(vue@3.5.43(typescript@6.0.3)):
+    dependencies:
+      '@vxe-ui/core': 4.5.3(vue@3.5.43(typescript@6.0.3))
+    transitivePeerDependencies:
+      - vue
+
+  vxe-table@4.16.14(vue@3.5.43(typescript@6.0.3)):
+    dependencies:
+      vxe-pc-ui: 4.20.33(vue@3.5.43(typescript@6.0.3))
+    transitivePeerDependencies:
+      - vue
+
   web-worker@1.5.0: {}
 
   which@2.0.2:
@@ -5211,6 +5254,8 @@ snapshots:
     dependencies:
       simple-plist: 1.3.1
       uuid: 7.0.3
+
+  xe-utils@4.1.4: {}
 
   xml2js@0.6.2:
     dependencies:

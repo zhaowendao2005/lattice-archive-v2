@@ -14,4 +14,10 @@ export default defineConfig({
       '@': path.resolve(import.meta.dirname, './src'),
     },
   },
+  server: {
+    // 本地开发时前端由 Vite 提供，/api 代理到同一 Worker 的本地实例
+    proxy: {
+      '/api': 'http://127.0.0.1:8787',
+    },
+  },
 })

@@ -57,6 +57,7 @@
 | **表单面板** | 纯色 `bg-card`，**不透明、不禁毛玻璃**（玻璃只用于图片侧） |
 | **壁纸裁切** | 必须按用途分套出图：`panel-*`（4:5 竖，桌面）、`band-*`（~1.45:1 横，窄屏）、`thumb-*`（指示点） |
 | **主体保护** | 每张图必须标定 `object-position`，确保 cover 裁切下不切掉塔尖 / 灭点 |
+| **人机验证** | Turnstile 只用一个无装饰挂载容器（`flex min-h-[65px] items-center justify-center`），**不要**再加边框/底色/内边距，避免与 SDK 自带卡片形成双框；错误提示用 `bg-destructive/10 text-destructive border-destructive/20` |
 | **蒙版** | 双层：底部渐浓保文案可读 + 基础压暗；强度按图像明暗逐张调校（亮部天光需更深） |
 | **轮替** | 交叉淡入 1400ms + 缓慢推近（Ken Burns）；进度条用**纯 CSS 动画**，禁用 60fps JS 状态 |
 | **矮屏退化** | `max-height:560px` 时图带压到 64px、隐藏页脚与副标题，优先保证首个输入框与提交按钮可见 |
@@ -94,3 +95,13 @@
 3. **事件级防御（JS 入口注入）**：
    * 拦截 iOS WebKit 多指手势：`gesturestart`, `gesturechange`, `gestureend` 监听并执行 `e.preventDefault()`。
    * 拦截极速双击：监听 `touchend` 间隔小于 300ms 时阻止默认动作。
+
+---
+
+## 六、管理表格与弹窗
+
+* 管理表格使用 VXE-Table，但颜色不得沿用库内硬编码色值；通过 CSS 变量映射到 `--card`、`--foreground`、`--muted`、`--border`、`--accent`、`--brand` 等语义令牌，覆盖表头、斑马纹、悬停及固定列。
+* 表格工具栏、分页和表格本体保持扁平结构；固定操作列在窄屏保留，其余列由表格自身横向滚动，不得撑宽页面。
+* 表格加载、空态与错误提示均有明确中文文案；错误提示使用 `bg-destructive/10 text-destructive border-destructive/20`。
+* 弹窗使用 `rounded-xl border-border bg-card shadow-xl`，遮罩使用 `bg-background/80 backdrop-blur-sm`，不得在暗色模式使用会发白的 `bg-foreground` 遮罩。
+* 删除按钮使用 `text-destructive`；确认弹窗必须点名目标邮箱并说明远端会话同时失效。

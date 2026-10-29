@@ -6,17 +6,21 @@ import { Input } from '@/components/ui/input';
 import { useAuthStore } from '@/stores/auth/stores/authStore';
 import AuthFormShell from '@/views/auth/components/AuthFormShell.vue';
 import AuthWallpaperPanel from '@/views/auth/components/AuthWallpaperPanel.vue';
+import TurnstileWidget from '@/views/auth/components/TurnstileWidget.vue';
+
+
 
 const authStore = useAuthStore();
 const router = useRouter();
 
-function handleSubmit() {
-  if (authStore.canSubmitAdminLogin) {
-    authStore.loginAsAdmin();
-    router.push({ name: 'admin-overview' });
+async function handleSubmit() {
+  if (!authStore.adminEmailInput.trim() || !authStore.adminPasswordInput) {
+    authStore.setAuthError('请输入管理员账号和密码');
+    document.getElementById(authStore.adminEmailInput.trim() ? 'admin-password' : 'admin-email')?.focus();
     return;
   }
-  document.getElementById(authStore.adminEmailInput.trim() ? 'admin-password' : 'admin-email')?.focus();
+  if (!authStore.turnstileToken) { authStore.setAuthError('请先完成人机安全验证'); return; }
+  if (await authStore.submitAdminLogin()) await router.push({ name: 'admin-users' });
 }
 </script>
 
@@ -78,6 +82,8 @@ function handleSubmit() {
             </div>
           </div>
 
+          <div v-if="authStore.authError" role="alert" class="rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive">{{ authStore.authError }}</div>
+          <TurnstileWidget action="admin_login" />
           <Button
             type="submit"
             size="lg"

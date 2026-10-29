@@ -33,10 +33,18 @@ src/stores/
 │       └── chatMock.ts           # (c) Mock 类：成组业务模拟数据
 ├── auth/                          # 登录与用户认证域
 │   ├── data-sources/
-│   │   └── authSessionStorage.ts # 会话持久化：localStorage / sessionStorage 读写
+│   │   ├── authSessionStorage.ts   # 会话持久化：token + user + expiresAt 读写
+│   │   ├── authRemoteDataSource.ts # 远端聚合服务器 API 单例（register/login/connect/logout）
+│   │   └── turnstileBridge.ts      # Turnstile SDK 加载、渲染、reset 与 widget 句柄
 │   └── stores/
-│       ├── authStore.ts          # 会话身份、表单草稿、账户菜单
-│       └── wallpaperStore.ts     # 登录页壁纸轮替索引与自动播放
+│       ├── authStore.ts            # 会话身份、表单草稿、请求态、错误态、Turnstile Token
+│       └── wallpaperStore.ts       # 登录页壁纸轮替索引与自动播放
+├── admin/                         # 管理员业务域
+│   ├── types.ts                    # 管理用户与服务端分页契约
+│   ├── data-sources/
+│   │   └── adminUsersRemoteDataSource.ts # 管理用户 API 单例
+│   └── stores/
+│       └── adminUsersStore.ts      # 用户列表、搜索分页、弹窗、表单与删除目标
 └── archive/                       # 收藏与归档域
     └── stores/archiveStore.ts
 ```
@@ -59,7 +67,35 @@ src/stores/
 * **定位**：纯粹负责该业务域内页面的响应式状态存储、计算属性（Getters）与交互动作（Actions）。
 * **职责**：
   * 暴露给 `views/` 组件订阅；
-  * 聚合管理选中态、搜索关键词、分页游标、界面激活状态等。
+  * 聚合管理选中态、搜索关键词、分页游标、界面激活状态等；
+  * 网络请求的加载态（如 `isSubmitting`）、错误文案（如 `authError`）与一次性校验令牌（如 `turnstileToken`）属于页面状态，必须落在 Store，视图层只读。
+
+### 2.1 鉴权域的数据流（强制）
+
+```text
+View（零 ref）
+  → authStore action（submitLogin / submitRegister / submitAdminLogin / logout）
+    → authRemoteDataSource（唯一的远端 API 入口）
+      → Remote Worker /api/auth/*
+```
+
+* **接线即删**：接通远端鉴权后，禁止保留 `DEFAULT_USER` 之类的静态身份/登录兜底；
+* **DOM 句柄不进视图**：Turnstile 的脚本注入、`render`、`reset`、`remove` 与 widgetId 统一由 `turnstileBridge` 单例管理，视图只挂载固定容器；
+* **失败可回滚**：登录/注册请求在 `finally` 中重置一次性 Turnstile 令牌；退出登录即使远端不可达也必须先清理本地会话。
+
+### 2.2 管理用户域的数据流（强制）
+
+```text
+Admin View（零 ref）
+  → adminUsersStore action（load / create / remove / applySearch）
+    → adminUsersRemoteDataSource
+      → Remote Worker /api/admin/users
+```
+
+* 搜索草稿、已生效搜索词、分页、排序、加载/错误态、新增/删除弹窗及删除目标全部归 Store；
+* 管理员 Token 只从 `authStore` 获取，不在 `adminUsersStore` 复制或另行持久化；401 必须清理失效会话；
+* 列表请求使用版本号丢弃过期响应；离开页面时使在途请求失效，并清理密码、删除目标和列表敏感状态；
+* 删除成功以服务端结果为准，随后重新拉取当前有效页，禁止仅在前端移除一行作为成功依据。
 
 ### 3. Mock 类 (模拟数据规范)
 * **定位**：服务于页面前端独立开发与渲染的原型数据。
@@ -82,8 +118,11 @@ src/stores/
 
 ## 五、 会话持久化的边界
 
-* 会话身份的**内存态**在 `authStore.user`，**落盘**只在 Data Source 层
-  （`auth/data-sources/authSessionStorage.ts`）完成，Store 不直接操作 `localStorage`；
-* 勾选「保持登录」写 `localStorage`（30 天有效），未勾选写 `sessionStorage`（关闭即失效），
+* 会话的**内存态**在 `authStore`（`user` / `sessionToken` / `sessionExpiresAt` / `isConnectedToServer`），
+  **落盘**只在 Data Source 层（`auth/data-sources/authSessionStorage.ts`）完成，Store 不直接操作 `localStorage`；
+* 持久化结构必须是 `{ token, user, expiresAt }`，缺失 token 或已过期一律视为未登录；
+* 勾选「保持登录」写 `localStorage`（服务端 30 天有效），未勾选写 `sessionStorage`（关闭即失效），
   使该复选框具备真实语义；
+* **有效性以远端为准**：应用冷启动 / 进入受保护路由前，由路由守卫调用
+  `initializeSessionConnection()` 向 `/api/auth/session/connect` 校验 Token；失败时清理本地会话并打回登录页；
 * 读取失败（隐私模式 / 存储被禁用 / 内容损坏）一律**静默降级为未登录**，不得阻断应用启动。

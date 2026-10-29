@@ -1,0 +1,44 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "lattice-v2",
+  "main": "index.ts",
+  "assets": {
+    "directory": "../../../dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "compatibility_date": "2026-10-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true, "invocation_logs": true, "head_sampling_rate": 1 },
+    "traces": { "enabled": true, "head_sampling_rate": 1 }
+  },
+  "workers_dev": true,
+  "vars": {
+    "TURNSTILE_HOSTNAMES": "lattice-v2.zhaowendao2005.workers.dev",
+    "ALLOWED_ORIGINS": "https://lattice-v2.zhaowendao2005.workers.dev,capacitor://localhost,http://localhost"
+  },
+  "env": {
+    "local": {
+      "assets": {
+        "directory": "../../../dist",
+        "binding": "ASSETS",
+        "not_found_handling": "single-page-application",
+        "run_worker_first": ["/api/*"]
+      },
+      "vars": {
+        "TURNSTILE_HOSTNAMES": "localhost,127.0.0.1",
+        "ALLOWED_ORIGINS": "http://localhost:5173,http://127.0.0.1:5173,capacitor://localhost,http://localhost"
+      },
+      "d1_databases": [
+        { "binding": "AUTH_DB", "database_name": "lattice-v2-d1", "database_id": "77de0f1f-d4ce-4e54-a754-8ee593b549a0", "migrations_dir": "migrations" }
+      ]
+    }
+  },
+  "secrets": { "required": ["TURNSTILE_SECRET"] },
+  "d1_databases": [
+    { "binding": "AUTH_DB", "database_name": "lattice-v2-d1", "database_id": "77de0f1f-d4ce-4e54-a754-8ee593b549a0", "migrations_dir": "migrations" }
+  ]
+}

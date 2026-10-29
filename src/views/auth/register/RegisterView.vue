@@ -4,22 +4,20 @@ import { ArrowRight, Eye, EyeOff } from '@lucide/vue';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useAuthStore } from '@/stores/auth/stores/authStore';
+import TurnstileWidget from '@/views/auth/components/TurnstileWidget.vue';
 
 const authStore = useAuthStore();
 const router = useRouter();
 
-function handleSubmit() {
-  if (authStore.canSubmitRegister) {
-    authStore.registerAndLogin();
-    router.push({ name: 'chats' });
+async function handleSubmit() {
+  if (!authStore.registerName.trim() || !authStore.registerEmail.trim() || authStore.registerPassword.length < 8) {
+    authStore.setAuthError('请完整填写用户名、有效邮箱和至少 8 位密码');
+    const missing = !authStore.registerName.trim() ? 'reg-name' : !authStore.registerEmail.trim() ? 'reg-email' : 'reg-password';
+    document.getElementById(missing)?.focus();
     return;
   }
-  const missing = !authStore.registerName.trim()
-    ? 'reg-name'
-    : !authStore.registerEmail.trim()
-      ? 'reg-email'
-      : 'reg-password';
-  document.getElementById(missing)?.focus();
+  if (!authStore.turnstileToken) { authStore.setAuthError('请先完成人机安全验证'); return; }
+  if (await authStore.submitRegister()) await router.push({ name: 'chats' });
 }
 </script>
 
@@ -28,7 +26,7 @@ function handleSubmit() {
     <header class="mb-6 lg:mb-7 [@media(max-height:560px)]:mb-3">
       <h1 class="text-2xl font-semibold leading-tight tracking-tight text-foreground sm:text-[28px]">创建账号</h1>
       <p class="mt-2 text-sm leading-relaxed text-muted-foreground [@media(max-height:560px)]:hidden">
-        注册一个本地账户，数据将保存在你自己的设备上。
+        注册账户以连接远端归档工作区。
       </p>
     </header>
 
@@ -70,7 +68,7 @@ function handleSubmit() {
             :model-value="authStore.registerPassword"
             :type="authStore.isUserPasswordVisible ? 'text' : 'password'"
             autocomplete="new-password"
-            placeholder="包含数字与字母"
+            placeholder="设置密码"
             class="h-11 rounded-xl border-input bg-muted/50 px-3.5 pr-11 focus-visible:bg-card"
             @update:model-value="authStore.setRegisterPassword($event as string)"
           />
@@ -86,6 +84,8 @@ function handleSubmit() {
         </div>
       </div>
 
+      <div v-if="authStore.authError" role="alert" class="rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive">{{ authStore.authError }}</div>
+      <TurnstileWidget action="register" />
       <Button
         type="submit"
         size="lg"

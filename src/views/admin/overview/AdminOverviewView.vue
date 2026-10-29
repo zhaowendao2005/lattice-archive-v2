@@ -1,55 +1,20 @@
 <script setup lang="ts">
-import { computed } from 'vue';
-import { useRouter } from 'vue-router';
-import { ArrowLeft, Database, Users } from '@lucide/vue';
+import { ArrowRight, KeyRound, ShieldCheck, UsersRound } from '@lucide/vue';
 import { Button } from '@/components/ui/button';
 import { useAuthStore } from '@/stores/auth/stores/authStore';
-import { useChatStore } from '@/stores/chat/stores/chatStore';
-
-const authStore = useAuthStore();
-const chatStore = useChatStore();
-const router = useRouter();
-
-const stats = computed(() => [
-  { label: '会话总数', value: chatStore.sessions.length, icon: Database },
-  { label: '当前账户', value: authStore.user?.name ?? '—', icon: Users },
-]);
+const auth = useAuthStore();
 </script>
 
 <template>
-  <div class="h-full overflow-y-auto">
-    <div class="mx-auto max-w-3xl px-8 py-8 space-y-8">
-      <header class="flex items-start justify-between gap-4">
-        <div>
-          <h2 class="text-lg font-semibold tracking-tight">管理员控制台</h2>
-          <p class="mt-1 text-sm text-muted-foreground">系统级监控与维护入口</p>
-        </div>
-        <Button variant="outline" size="sm" @click="router.push({ name: 'chats' })">
-          <ArrowLeft class="size-4" :stroke-width="1.75" />
-          返回工作区
-        </Button>
-      </header>
-
-      <section class="grid grid-cols-2 gap-3">
-        <div
-          v-for="s in stats"
-          :key="s.label"
-          class="p-4 rounded-xl border border-border bg-card flex items-center gap-3"
-        >
-          <div class="size-10 shrink-0 rounded-lg bg-brand-soft text-brand flex items-center justify-center">
-            <component :is="s.icon" class="size-5" :stroke-width="1.75" />
-          </div>
-          <div class="min-w-0">
-            <div class="text-xs text-muted-foreground">{{ s.label }}</div>
-            <div class="mt-0.5 text-base font-semibold truncate">{{ s.value }}</div>
-          </div>
-        </div>
-      </section>
-
-      <section class="rounded-xl border border-dashed border-border p-6 text-center text-xs text-muted-foreground space-y-2">
-        <p>用户管理、权限配置与审计日志将在后继版本提供。</p>
-        <p>管理员身份：{{ authStore.user?.role === 'admin' ? '已验证' : '未验证' }}</p>
-      </section>
-    </div>
+  <div class="mx-auto max-w-4xl space-y-6 p-4 sm:p-6 lg:p-8">
+    <header><h1 class="text-xl font-semibold tracking-tight">系统概览</h1><p class="mt-1 text-sm text-muted-foreground">管理员会话与账户管理能力</p></header>
+    <section class="grid gap-4 sm:grid-cols-2">
+      <article class="rounded-xl border border-border bg-card p-5"><ShieldCheck class="size-5 text-brand" /><h2 class="mt-4 font-medium">管理员身份已验证</h2><p class="mt-2 break-all text-sm text-muted-foreground">{{ auth.user?.email }}</p></article>
+      <article class="rounded-xl border border-border bg-card p-5"><KeyRound class="size-5 text-brand" /><h2 class="mt-4 font-medium">服务端权限校验</h2><p class="mt-2 text-sm text-muted-foreground">所有管理接口逐次验证 D1 会话及角色。</p></article>
+    </section>
+    <section class="flex flex-col gap-4 rounded-xl border border-border bg-card p-5 sm:flex-row sm:items-center sm:justify-between">
+      <div class="flex items-center gap-3"><UsersRound class="size-5 text-brand" /><div><h2 class="font-medium">用户管理</h2><p class="mt-1 text-sm text-muted-foreground">搜索、新增或删除普通用户账户。</p></div></div>
+      <RouterLink :to="{ name: 'admin-users' }"><Button>进入用户管理<ArrowRight class="size-4" /></Button></RouterLink>
+    </section>
   </div>
 </template>

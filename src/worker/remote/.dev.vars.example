@@ -1,0 +1,8 @@
+# 本地开发密钥（复制为 .dev.vars 后填写；.dev.vars 已被 Git 忽略）
+#
+# TURNSTILE_SECRET: Cloudflare Turnstile widget 的 Secret Key（服务端 siteverify 使用）
+# ADMIN_*: 部署时自动写入/更新远端 D1 的管理员账户（仅部署脚本读取，不会上传为 Worker Secret）
+TURNSTILE_SECRET=replace-with-turnstile-secret
+ADMIN_EMAIL=operator@lattice.dev
+ADMIN_PASSWORD=replace-with-a-strong-password
+ADMIN_NAME=System Operator

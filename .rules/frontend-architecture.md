@@ -42,12 +42,21 @@
      src/views/auth/                # 鉴权域：登录与注册
      ├── components/                # 该域专属的版式部件，不进 src/components
      │   ├── AuthWallpaperPanel.vue  # 左栏：壁纸轮替与蒙版
-     │   └── AuthFormShell.vue       # 右栏：品牌头 / 表单 / 页脚骨架
+     │   ├── AuthFormShell.vue       # 右栏：品牌头 / 表单 / 页脚骨架
+     │   └── TurnstileWidget.vue     # 人机验证容器（零 ref，委托 turnstileBridge）
      ├── login/
      │   └── LoginView.vue           # 用户登录子页
      ├── register/
      │   └── RegisterView.vue        # 用户注册子页
      └── AuthLayout.vue              # 左右分栏 + 分界线的顶层容器
+
+     src/views/admin/
+     ├── login/AdminLoginView.vue    # 管理员登录（独立于管理域外壳）
+     ├── overview/                   # 系统概览
+     ├── users/                      # 管理面板第一模块：用户管理
+     │   ├── AdminUsersView.vue
+     │   └── components/            # VXE 表格、工具栏、分页、新增/删除弹窗
+     └── AdminLayout.vue             # 管理导航与账户出口
      ```
 
 3. **顶层域平级原则**：
@@ -125,8 +134,20 @@
 即使是「显示密码」「表单草稿」这类看起来一次性的状态，也必须落到对应 store
 （原因：草稿入 store 才能在登录 ↔ 注册 之间往返时不丢失）。
 
+第三方 SDK 的 DOM 实例句柄（如 Turnstile widgetId）同样不得进视图，
+应交由对应业务域的 Data Source 单例管理，视图只负责挂载固定容器。
+
 ### 4. 路由守卫
 
 * 会话身份一律取自 `authStore`，不得在路由表里另起一份登录标志；
 * 用 `meta.requiresAuth` / `meta.requiresAdmin` 声明式标注，统一在 `beforeEach` 中裁决；
+* 守卫为**异步**：先 `await auth.initializeSessionConnection()` 完成远端建连握手，再决定放行；
+* 已登录访问登录/注册页时重定向到对应首页（用户 → `/workspace/chats`，管理员 → `/admin/users`）；
 * 管理域与工作区**共用同一套判定来源**，但角色互不通用：普通用户不得凭既有会话进入控制台。
+
+### 5. 管理表格
+
+* 用户管理使用 VXE-Table，采用服务端搜索、分页与排序，不得下载全量用户后在前端分页；
+* 表格与列按需局部导入，管理域路由懒加载，禁止在 `main.ts` 全量注册 VXE 组件；
+* 表格内部 SDK 状态由 VXE 管理，业务数据、排序、分页及加载态仍以 Pinia 为唯一来源；
+* 新增/删除使用 Reka UI Dialog，覆盖层开关与请求态归 Store，不在弹窗组件声明本地响应式状态。
