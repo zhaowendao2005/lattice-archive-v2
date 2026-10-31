@@ -29,9 +29,19 @@ export const useAppStore = defineStore('app', {
     themeMode: 'system' as ThemeMode,
     /** 开发者模式开关 */
     developerMode: false,
+    /**
+     * 工作区分区（会话 / 归档 / 设置）切换进行中：覆盖「拉取路由分包 + 首次挂载重组件」整段耗时，
+     * 由 src/router/workspaceTransition.ts 驱动，AppLayout 据此渲染缓冲遮罩与进度条。
+     */
+    isSectionSwitching: false,
   }),
 
   actions: {
+    /** 分区切换开始 / 结束（仅由路由钩子调用） */
+    setSectionSwitching(switching: boolean) {
+      this.isSectionSwitching = switching;
+    },
+
     /** 切换平台尺度：同时把 data-platform 写到 body 上，供 CSS 令牌选择器生效 */
     setPlatform(mode: PlatformMode) {
       this.platform = mode;

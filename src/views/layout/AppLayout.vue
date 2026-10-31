@@ -12,6 +12,7 @@
 <script setup lang="ts">
 import { watch } from 'vue';
 import { useMediaQuery } from '@vueuse/core';
+import { Loader2 } from '@lucide/vue';
 import { useAppStore } from '@/stores/app/stores/appStore';
 import { useAuthStore } from '@/stores/auth/stores/authStore';
 import { useChatStore } from '@/stores/chat/stores/chatStore';
@@ -75,12 +76,30 @@ watch(isNarrowWidth, (narrow) => {
     </div>
 
     <!-- 内容面板：铺满高度的白色工作区；子路由由 RouterView 承接 -->
-    <div class="flex-1 min-w-0 min-h-0 flex my-3 mr-3 rounded-2xl border border-border bg-card shadow-sm overflow-hidden">
+    <div class="relative flex-1 min-w-0 min-h-0 flex my-3 mr-3 rounded-2xl border border-border bg-card shadow-sm overflow-hidden">
       <RouterView v-slot="{ Component }">
         <KeepAlive :max="8">
           <component :is="Component" />
         </KeepAlive>
       </RouterView>
+
+      <!--
+        分区切换缓冲层（会话 / 归档 / 设置）：DOM 常驻，仅切换 opacity。
+        进入带 100ms 延迟，已缓存分区的瞬时切换不会闪烁；撤下时的淡出即新页面的淡入。
+        只动 opacity / transform，主线程忙于挂载新页面时动画仍由合成线程驱动。
+      -->
+      <div
+        :aria-hidden="!appStore.isSectionSwitching"
+        :class="[
+          'absolute inset-0 z-20 flex items-center justify-center bg-card will-change-[opacity] transition-opacity',
+          appStore.isSectionSwitching ? 'opacity-100 duration-150 delay-100' : 'pointer-events-none opacity-0 duration-200'
+        ]"
+      >
+        <div class="absolute inset-x-0 top-0 h-0.5 overflow-hidden bg-brand-soft">
+          <div class="h-full w-1/3 origin-left bg-brand animate-route-progress" />
+        </div>
+        <Loader2 class="size-5 animate-spin text-muted-foreground" :stroke-width="1.75" />
+      </div>
     </div>
   </div>
 </template>

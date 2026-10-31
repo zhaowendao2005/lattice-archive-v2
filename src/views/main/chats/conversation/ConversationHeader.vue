@@ -20,6 +20,19 @@ const mediaStore = useChatMediaStore();
 <template>
   <header class="h-14 shrink-0 flex items-center justify-between gap-3 px-4 border-b border-border bg-card/60 backdrop-blur-md">
     <div class="min-w-0 flex items-center gap-2">
+      <!-- 侧栏抽屉展开按钮（当列表折叠时展示）：固定贴在最左侧，位置不随返回按钮的出现而跳动 -->
+      <Button
+        v-if="chatStore.isSessionListCollapsed"
+        variant="ghost"
+        size="icon"
+        class="token-hit-target shrink-0 text-muted-foreground"
+        aria-label="展开会话列表"
+        title="展开会话列表"
+        @click="chatStore.toggleSessionList()"
+      >
+        <ArrowRightFromLine :stroke-width="1.75" />
+      </Button>
+
       <!-- 跨群组跳转返回栈（栈原则）：点击沿访问顺序返回上一会话 -->
       <Button
         v-if="chatStore.canGoBack"
@@ -31,19 +44,6 @@ const mediaStore = useChatMediaStore();
         @click="chatStore.goBackChat()"
       >
         <ArrowLeft class="size-4" :stroke-width="2" />
-      </Button>
-
-      <!-- 侧栏抽屉展开按钮（当列表折叠时展示） -->
-      <Button
-        v-if="chatStore.isSessionListCollapsed"
-        variant="ghost"
-        size="icon"
-        class="token-hit-target shrink-0 text-muted-foreground"
-        aria-label="展开会话列表"
-        title="展开会话列表"
-        @click="chatStore.toggleSessionList()"
-      >
-        <ArrowRightFromLine :stroke-width="1.75" />
       </Button>
 
       <span

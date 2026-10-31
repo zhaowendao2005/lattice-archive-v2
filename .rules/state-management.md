@@ -23,14 +23,14 @@
 ```text
 src/stores/
 ├── app/                           # 应用全局环境域（平台类型、尺寸令牌、侧栏展开态、主题）
-│   └── stores/appStore.ts
+│   └── stores/appStore.ts          # 含 isSectionSwitching（分区切换缓冲遮罩，由 src/router/workspaceTransition.ts 驱动）
 ├── chat/                          # 核心业务域：Telegram 会话与消息（只读，已接线真实数据）
 │   ├── types.ts                   # Worker DTO 再导出、消息窗口、冷启动快照、视图模型、媒体与播放器状态
 │   ├── data-sources/
 │   │   ├── chatDataSource.ts     # 经 MTProto Bridge 调本地 Worker：会话分页 / 历史分页 / 补差 / 归档 / 加入退出 / 媒体下载与取消
 │   │   ├── chatCacheStore.ts     # 冷启动快照：设备密钥 AES-GCM 加密后写 IndexedDB，按「Lattice 用户:TG 账户」隔离
 │   │   ├── chatMediaCache.ts     # 媒体持久缓存：AES-GCM 加密 Cache Storage（单条 ≤ 20 MiB）
-│   │   ├── chatMediaLoader.ts    # 双车道下载器：图片（并发 3 / 400 条 LRU）+ 视频（并发 2 / 256 MB LRU + pin + abort）
+│   │   ├── chatMediaLoader.ts    # 双车道下载器：图片（并发 3 / 400 条 LRU）+ 视频（并发 2 / 256 MB LRU + pin + abort）；附件文件保存后保留区（≤ 64 MB 单件 / 128 MB 总量）
 │   │   ├── chatPreferences.ts    # 自动下载策略、GIF/圆视频自动播放开关、播放器音量与倍速持久化
 │   │   ├── messageViewport.ts    # 消息流滚动容器句柄 + 预取（600px）、头像（240px）与自动播放（50% 可见）IntersectionObserver
 │   │   ├── progressiveStream.ts  # 大视频渐进式播放桥接：注册 /sw.js、512 KiB 对齐分片、24 块内存 LRU、前 2 MiB 加密缓存
@@ -39,6 +39,7 @@ src/stores/
 │       ├── chatStore.ts          # 会话列表（活动/归档）、公开用户名查找、加入/退出会话、消息窗口、同步阶段、缓存调度
 │       ├── chatMediaStore.ts     # 头像/缩略图/原图加载、统一查看器状态（旋转/缩放/胶片条）、自动下载策略
 │       ├── chatVideoStore.ts     # 视频渐进流/完整下载、画质切换、查看器播放控制、GIF 与圆视频单实例播放
+│       ├── chatFileStore.ts      # 非视频附件（文件 / 音频 / 语音）下载：字节进度、取消、完成后触发浏览器保存
 │       └── chatModel.ts          # 纯函数：窗口合并、相册聚合、画质选择、格式化、快照裁剪
 ├── auth/                          # 登录与用户认证域
 │   ├── data-sources/

@@ -8,7 +8,7 @@
 import { Api } from 'telegram/tl';
 import { strippedPhotoToJpg } from 'telegram/Utils';
 import type {
-  TgAvatarInfo, TgChatKind, TgDialogDto, TgInlineButton, TgMessageDto, TgMessageEntity, TgMessageMedia,
+  TgAvatarInfo, TgChatKind, TgDialogDto, TgFileInfo, TgInlineButton, TgMessageDto, TgMessageEntity, TgMessageMedia,
   TgPeerKey, TgPeerRef, TgPhotoInfo, TgPhotoSize, TgReplyInfo, TgVideoInfo, TgVideoQuality, TgWebPagePreview,
 } from '../chatProtocol';
 
@@ -291,6 +291,21 @@ function withDuration(label: string, video: TgVideoInfo | undefined) {
   return video && video.duration > 0 ? `${label} · ${formatDuration(video.duration)}` : label;
 }
 
+/** 非视频文档 → 下载所需的定位信息（不含任何字节）；体积为 0 的异常文档不提供下载。 */
+function fileInfoOf(document: Api.Document, fileName: string | undefined): TgFileInfo | undefined {
+  const size = toNumber(document.size);
+  if (size <= 0) return undefined;
+  return {
+    id: document.id.toString(),
+    accessHash: document.accessHash.toString(),
+    fileReference: document.fileReference.toString('base64'),
+    dcId: document.dcId,
+    mimeType: document.mimeType || 'application/octet-stream',
+    size,
+    fileName,
+  };
+}
+
 /** 消息媒体 → 统一媒体描述。这层只做「分类 + 取元信息」，不下载任何字节。 */
 function mediaOf(media: Api.TypeMessageMedia | undefined): TgMessageMedia | undefined {
   if (!media || media instanceof Api.MessageMediaEmpty || media instanceof Api.MessageMediaWebPage) return undefined;
@@ -314,9 +329,10 @@ function mediaOf(media: Api.TypeMessageMedia | undefined): TgMessageMedia | unde
     if (animated) return { kind: 'gif', label: 'GIF', video: info && !info.asFile ? info : undefined };
     if (video?.roundMessage) return { kind: 'round', label: withDuration(media.ttlSeconds ? '限时视频消息' : '视频消息', info), video: info };
     if (video && document.mimeType.startsWith('video/')) return { kind: 'video', label: withDuration(media.ttlSeconds ? '限时视频' : '视频', info), video: info };
-    if (audio?.voice) return { kind: 'voice', label: '语音消息' };
-    if (audio) return { kind: 'audio', label: audio.title ? `音频 · ${audio.title}` : '音频' };
-    return { kind: 'file', label: fileName ? `文件 · ${fileName}` : '文件', video: info?.asFile ? info : undefined };
+    if (audio?.voice) return { kind: 'voice', label: '语音消息', file: fileInfoOf(document, fileName) };
+    if (audio) return { kind: 'audio', label: audio.title ? `音频 · ${audio.title}` : '音频', file: fileInfoOf(document, fileName) };
+    if (info?.asFile) return { kind: 'file', label: fileName ? `文件 · ${fileName}` : '文件', video: info };
+    return { kind: 'file', label: fileName ? `文件 · ${fileName}` : '文件', file: fileInfoOf(document, fileName) };
   }
   if (media instanceof Api.MessageMediaGeo || media instanceof Api.MessageMediaGeoLive || media instanceof Api.MessageMediaVenue) return { kind: 'location', label: '位置' };
   if (media instanceof Api.MessageMediaContact) return { kind: 'contact', label: '联系人' };

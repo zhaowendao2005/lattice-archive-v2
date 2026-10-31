@@ -10,6 +10,7 @@ import MessagePhotoGrid from './media/MessagePhotoGrid.vue';
 import MessageRichText from './MessageRichText.vue';
 import MessageRoundVideo from './media/MessageRoundVideo.vue';
 import MessageVideoFile from './media/MessageVideoFile.vue';
+import MessageDocument from './media/MessageDocument.vue';
 import MessageWebPageCard from './MessageWebPageCard.vue';
 
 const props = defineProps<{ item: FeedMessageItem }>();
@@ -113,6 +114,7 @@ const ALBUM_WIDTH = 400;
           <MessageMeta v-if="!props.item.text && !props.item.webPage" :item="props.item" overlay />
         </div>
         <MessageVideoFile v-if="props.item.videoFile" :file="props.item.videoFile" :out="props.item.out" />
+        <MessageDocument v-if="props.item.document" :file="props.item.document" :out="props.item.out" />
         <p
           v-if="props.item.mediaLabel"
           :class="['mb-1 inline-flex max-w-full items-center gap-1.5 rounded-md px-2 py-1 text-xs', props.item.out ? 'bg-primary-foreground/15' : 'bg-card']"
@@ -148,7 +150,7 @@ const ALBUM_WIDTH = 400;
       class="self-center rounded-full p-1.5 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:bg-accent hover:text-foreground"
       title="回复此消息"
       aria-label="回复此消息"
-      @click="chatStore.setReplyTarget(props.item.id, props.item.senderName, props.item.text || props.item.mediaLabel)"
+      @click="chatStore.setReplyTarget(props.item.id, props.item.senderName, props.item.text || props.item.mediaLabel || props.item.document?.fileName)"
     >
       <Reply class="size-3.5" :stroke-width="1.75" />
     </button>

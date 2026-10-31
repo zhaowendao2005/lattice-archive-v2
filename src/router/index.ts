@@ -2,6 +2,7 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router';
 // 守卫里需要读取登录态，所以直接引入鉴权 Store（Pinia 已在 main.ts 中先于 router 安装）
 import { useAuthStore } from '@/stores/auth/stores/authStore';
+import { installWorkspaceTransition } from './workspaceTransition';
 
 /**
  * 路由表。
@@ -143,5 +144,8 @@ router.beforeEach((to) => {
   }
   return true; // 其余情况放行
 });
+
+// 工作区分区切换的缓冲遮罩与空闲预取（注册在鉴权守卫之后：被守卫重定向的导航不会触发缓冲）
+installWorkspaceTransition(router);
 
 export default router;

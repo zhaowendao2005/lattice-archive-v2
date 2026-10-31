@@ -27,7 +27,7 @@
      │   ├── MessageBubble.vue
      │   ├── FeedStatus.vue
      │   ├── ReadOnlyNotice.vue
-     │   ├── media/                 # 图片/视频/GIF/圆视频组件、相册网格、沉浸查看器（MediaViewer）与可见性/播放器指令
+     │   ├── media/                 # 图片/视频/GIF/圆视频组件、文件附件卡片（MessageDocument）、相册网格、沉浸查看器（MediaViewer）与可见性/播放器指令
      │   └── ConversationContainer.vue
      └── ChatsView.vue              # 顶层同级聚合容器（路由参数 ↔ 选中会话）
 
@@ -147,6 +147,12 @@
 * 守卫为**异步**：先 `await auth.initializeSessionConnection()` 完成远端建连握手，再决定放行；
 * 已登录访问登录/注册页时重定向到对应首页（用户 → `/workspace/chats`，管理员 → `/admin/users`）；
 * 管理域与工作区**共用同一套判定来源**，但角色互不通用：普通用户不得凭既有会话进入控制台。
+
+### 5. 工作区分区切换的缓冲与预热
+
+* `src/router/workspaceTransition.ts` 在鉴权守卫之后注册：跨分区（会话 / 归档 / 设置）导航期间置 `appStore.isSectionSwitching`，`AppLayout` 据此显示常驻 DOM 的淡入遮罩与进度条（进入延迟 100ms，避免瞬时切换闪烁）；
+* 首次进入的分区会先让出一帧再挂载，保证遮罩过渡已提交给合成线程；缓冲动画只允许使用 `opacity` / `transform`；
+* 进入工作区后在浏览器空闲时**串行**预取所有工作区子路由分包；新增工作区子路由必须保持 `() => import()` 懒加载写法才能被预取。
 
 ### 5. 管理表格
 

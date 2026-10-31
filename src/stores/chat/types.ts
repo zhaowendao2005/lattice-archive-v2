@@ -5,7 +5,7 @@ import type { TgDialogDto, TgInlineButton, TgMessageDto, TgPeerKey, TgUpdatesSta
 
 export type {
   TgAvatarInfo, TgCallbackAnswer, TgChatUpdate, TgDialogCursor, TgDialogDto, TgDocumentLocation, TgDocumentPart,
-  TgEntityKind, TgInlineButton, TgInlineButtonKind, TgInvitePreview, TgJoinChatResult, TgMediaFile,
+  TgEntityKind, TgFileInfo, TgInlineButton, TgInlineButtonKind, TgInvitePreview, TgJoinChatResult, TgMediaFile,
   TgMessageDto, TgMessageEntity, TgPeerKey, TgPeerRef, TgPhotoInfo, TgPhotoLocation, TgPhotoSize,
   TgReplyInfo, TgUpdatesState, TgVideoInfo, TgVideoQuality, TgWebPagePreview,
 } from '@/worker/local/chatProtocol';
@@ -136,6 +136,17 @@ export interface FeedPhoto {
 export type FeedVisual = FeedPhoto;
 /** 以文件方式发送的视频：附件卡片。 */
 export interface FeedVideoFile { target: string; fileName: string; metaLabel: string; thumb?: string; previewKey: string; playable: boolean }
+/** 非视频类文档（文件 / 音频 / 语音）：附件卡片 + 下载按钮；下载状态按 key 在 chatFileStore 中索引。 */
+export interface FeedDocument {
+  target: string;
+  /** 下载状态键：file:<文档 ID>。 */
+  key: string;
+  fileName: string;
+  /** 图标内的扩展名缩写（大写，≤ 4 字符），无扩展名时为空串。 */
+  extension: string;
+  sizeLabel: string;
+  kind: 'file' | 'audio' | 'voice';
+}
 /** 圆形视频消息。 */
 export interface FeedRound { target: string; previewKey: string; thumb?: string; durationLabel: string; duration: number }
 
@@ -201,6 +212,7 @@ export interface FeedMessageItem {
   /** 单图或相册（同一 groupedId 的连续照片 / 视频合并为一个气泡）。 */
   photos?: FeedPhoto[];
   videoFile?: FeedVideoFile;
+  document?: FeedDocument;
   round?: FeedRound;
   webPage?: FeedWebPage;
   /** 相册包含的全部消息 ID，供阅读锚点定位。 */

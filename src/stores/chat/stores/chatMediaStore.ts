@@ -11,6 +11,7 @@ import { defineStore } from 'pinia';
 import { effectScope, watch } from 'vue';
 import { useChatStore } from './chatStore';
 import { useChatVideoStore } from './chatVideoStore';
+import { useChatFileStore } from './chatFileStore';
 import { chatDataSource } from '../data-sources/chatDataSource';
 import { chatMediaCache } from '../data-sources/chatMediaCache';
 import { chatMediaLoader, MediaCanceledError } from '../data-sources/chatMediaLoader';
@@ -259,6 +260,7 @@ export const useChatMediaStore = defineStore('chatMedia', {
     reset() {
       mediaGeneration += 1;
       useChatVideoStore().reset();
+      useChatFileStore().reset();
       chatMediaLoader.reset();
       visibleTargets.clear();
       visibleAvatarTargets.clear();

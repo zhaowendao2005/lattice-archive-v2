@@ -114,7 +114,15 @@ export interface TgVideoInfo extends TgDocumentLocation {
   startAt?: number;
 }
 
-export interface TgMessageMedia { kind: TgMediaKind; label: string; photo?: TgPhotoInfo; video?: TgVideoInfo }
+/** 非视频类文档（普通文件 / 音频 / 语音）：附件卡片 + 下载按钮所需的定位与展示元信息。 */
+export interface TgFileInfo extends TgDocumentLocation {
+  mimeType: string;
+  /** 字节数（Telegram long，4 GB 以内可安全转 number）。 */
+  size: number;
+  fileName?: string;
+}
+
+export interface TgMessageMedia { kind: TgMediaKind; label: string; photo?: TgPhotoInfo; video?: TgVideoInfo; file?: TgFileInfo }
 
 /** 消息文本中的富文本与隐藏链接实体（offset / length 均按 UTF-16 代码单元计数）。 */
 export type TgEntityKind =

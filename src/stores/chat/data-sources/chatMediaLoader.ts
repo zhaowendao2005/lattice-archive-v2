@@ -9,6 +9,7 @@
  * - image：照片档位 / 视频缩略图，并发 3，按条数（400）LRU；
  * - video：完整视频文件，并发 2，按字节（256 MB）LRU；正在播放的 URL 通过 pin 免于淘汰。
  * 视频任务可在下载中途 abort（Worker 在分片边界停止）。
+ * 另有附件文件的「保存后保留」区（saveBlob / resave）：不参与上述两条通道的预算，单独按字节 LRU 回收。
  */
 export type MediaLane = 'image' | 'video';
 
@@ -22,6 +23,10 @@ const VIDEO_RETRY_DELAYS_MS = [1_000, 3_000];
 const MAX_IMAGE_URLS = 400;
 /** 内存中视频 Blob 的总字节预算。 */
 const MAX_VIDEO_BYTES = 256 * 1024 * 1024;
+/** 附件文件：单个 ≤ 64 MB 的 Blob 保留以便再次保存，总量 128 MB；更大的文件保存后 60 s 回收。 */
+const MAX_SAVED_FILE_BYTES = 64 * 1024 * 1024;
+const MAX_SAVED_TOTAL_BYTES = 128 * 1024 * 1024;
+const SAVED_REVOKE_DELAY_MS = 60_000;
 
 export class MediaCanceledError extends Error {
   constructor() { super('MEDIA_CANCELED'); }
@@ -53,6 +58,8 @@ interface UrlRecord { url: string; lane: MediaLane; bytes: number }
 type EvictListener = (key: string) => void;
 
 const urls = new Map<string, UrlRecord>();
+/** 附件文件下载后保留的 Object URL（独立于图片 / 视频预算，Map 顺序即 LRU 顺序）。 */
+const savedFiles = new Map<string, UrlRecord>();
 const pinned = new Set<string>();
 const inflight = new Map<string, Promise<string>>();
 /** key → 当前拥有 inflight 条目的任务（排队或下载中）。 */
@@ -216,6 +223,8 @@ export const chatMediaLoader = {
     pending.forEach((task) => task.reject(new MediaCanceledError()));
     urls.forEach((record) => URL.revokeObjectURL(record.url));
     urls.clear();
+    savedFiles.forEach((record) => URL.revokeObjectURL(record.url));
+    savedFiles.clear();
   },
 
   /** 触发浏览器下载已加载的媒体。 */
@@ -228,4 +237,43 @@ export const chatMediaLoader = {
     anchor.click();
     anchor.remove();
   },
+
+  /**
+   * 保存一个已下载完成的文件 Blob（附件卡片的下载按钮）：
+   * - 立即触发浏览器保存；
+   * - 不超过单文件上限的 Blob 保留 Object URL，再次点击可瞬时重新保存，总量按字节 LRU 回收；
+   * - 超出上限的大文件在浏览器接手后延迟回收，避免长期占用内存。
+   */
+  saveBlob(key: string, blob: Blob, fileName: string) {
+    const url = URL.createObjectURL(blob);
+    this.saveAs(url, fileName);
+    if (blob.size > MAX_SAVED_FILE_BYTES) {
+      window.setTimeout(() => URL.revokeObjectURL(url), SAVED_REVOKE_DELAY_MS);
+      return;
+    }
+    const previous = savedFiles.get(key);
+    if (previous) URL.revokeObjectURL(previous.url);
+    savedFiles.delete(key);
+    savedFiles.set(key, { url, lane: 'video', bytes: blob.size });
+    let total = 0;
+    savedFiles.forEach((record) => { total += record.bytes; });
+    for (const [savedKey, record] of [...savedFiles]) {
+      if (total <= MAX_SAVED_TOTAL_BYTES || savedKey === key) break;
+      savedFiles.delete(savedKey);
+      URL.revokeObjectURL(record.url);
+      total -= record.bytes;
+    }
+  },
+
+  /** 已保留的文件 URL 直接再次保存；未命中返回 false，由调用方重新下载。 */
+  resave(key: string, fileName: string): boolean {
+    const record = savedFiles.get(key);
+    if (!record) return false;
+    savedFiles.delete(key);
+    savedFiles.set(key, record);
+    this.saveAs(record.url, fileName);
+    return true;
+  },
+
+  hasSaved(key: string) { return savedFiles.has(key); },
 };

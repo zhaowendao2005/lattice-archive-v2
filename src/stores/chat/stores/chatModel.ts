@@ -3,7 +3,7 @@
  * 不持有状态、不访问网络或 DOM，便于 Store 保持精简并可单独推理。
  */
 import type {
-  ChatCacheSnapshot, FeedItem, FeedPhoto, FeedReplyPreview, FeedRound, FeedVideoFile, FeedWebPage,
+  ChatCacheSnapshot, FeedDocument, FeedItem, FeedPhoto, FeedReplyPreview, FeedRound, FeedVideoFile, FeedWebPage,
   MessageWindow, ParsedTelegramLink, RichTextBlock, RichTextSegment, SessionListItem, TgAvatarInfo,
   TgDialogDto, TgMessageDto, TgMessageEntity, TgPeerKey, TgPhotoInfo, TgPhotoSize, TgUpdatesState,
   TgVideoInfo, TgVideoQuality,
@@ -466,6 +466,7 @@ export function buildFeed(messages: TgMessageDto[], dialog: TgDialogDto | undefi
     const albumColumns = photos.length > 1 ? layoutAlbum(photos) : undefined;
     const round = toFeedRound(message);
     const videoFile = toFeedVideoFile(message);
+    const attachment = toFeedDocument(message);
     const webPage = toFeedWebPage(captioned);
     const richBlocks = captioned.text ? tokenizeMessageText(captioned.text, captioned.entities, captioned.id) : undefined;
     const replyPreview = buildReplyPreview(message, byId);
@@ -479,9 +480,10 @@ export function buildFeed(messages: TgMessageDto[], dialog: TgDialogDto | undefi
       out: message.out,
       text: captioned.text,
       richBlocks,
-      mediaLabel: photos.length > 0 || round || videoFile ? undefined : message.media?.label,
+      mediaLabel: photos.length > 0 || round || videoFile || attachment ? undefined : message.media?.label,
       photos: photos.length > 0 ? photos : undefined,
       videoFile,
+      document: attachment,
       round,
       webPage,
       albumIds: album.length > 1 ? album.map((item) => item.id) : undefined,
@@ -628,6 +630,34 @@ function toFeedVideoFile(message: TgMessageDto): FeedVideoFile | undefined {
     thumb: video.thumb,
     previewKey: videoPreviewOf(video)?.key ?? '',
     playable: video.mimeType !== 'video/webm' || typeof MediaSource !== 'undefined',
+  };
+}
+
+/** 文件下载状态键：按文档 ID 区分（同一文件被多次转发时共享下载状态）。 */
+export function fileKey(file: { id: string }) { return `file:${file.id}`; }
+
+/** 语音消息没有文件名时按 MIME 推断扩展名（Telegram 语音为 audio/ogg）。 */
+function extensionOfMime(mimeType: string) {
+  const subtype = mimeType.split('/')[1]?.split(';')[0] ?? '';
+  return subtype === 'mpeg' ? 'mp3' : subtype.replace(/^x-/, '');
+}
+
+/** 非视频文档 → 附件卡片：文件名缺省时按「类型-消息ID.扩展名」生成，保证浏览器保存时有合理文件名。 */
+function toFeedDocument(message: TgMessageDto): FeedDocument | undefined {
+  const media = message.media;
+  const file = media?.file;
+  if (!file || (media.kind !== 'file' && media.kind !== 'audio' && media.kind !== 'voice')) return undefined;
+  const fallbackExtension = extensionOfMime(file.mimeType);
+  const fileName = file.fileName || `${media.kind === 'voice' ? 'voice' : 'telegram-file'}-${message.id}${fallbackExtension ? `.${fallbackExtension}` : ''}`;
+  const dot = fileName.lastIndexOf('.');
+  const extension = dot > 0 && dot < fileName.length - 1 ? fileName.slice(dot + 1, dot + 5).toUpperCase() : '';
+  return {
+    target: mediaTarget(message.peerKey, message.id),
+    key: fileKey(file),
+    fileName,
+    extension,
+    sizeLabel: formatBytes(file.size),
+    kind: media.kind,
   };
 }
 
