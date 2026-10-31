@@ -33,12 +33,12 @@
         "ALLOWED_ORIGINS": "http://localhost:5173,http://127.0.0.1:5173,capacitor://localhost,http://localhost"
       },
       "d1_databases": [
-        { "binding": "AUTH_DB", "database_name": "lattice-v2-d1", "database_id": "77de0f1f-d4ce-4e54-a754-8ee593b549a0", "migrations_dir": "migrations" }
+        { "binding": "AUTH_DB", "database_name": "lattice-v2-d1", "database_id": "6c2c5334-ceed-4c70-9e69-f95716075096", "migrations_dir": "migrations" }
       ]
     }
   },
   "secrets": { "required": ["TURNSTILE_SECRET"] },
   "d1_databases": [
-    { "binding": "AUTH_DB", "database_name": "lattice-v2-d1", "database_id": "77de0f1f-d4ce-4e54-a754-8ee593b549a0", "migrations_dir": "migrations" }
+    { "binding": "AUTH_DB", "database_name": "lattice-v2-d1", "database_id": "6c2c5334-ceed-4c70-9e69-f95716075096", "migrations_dir": "migrations" }
   ]
 }

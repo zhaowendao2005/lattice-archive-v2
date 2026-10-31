@@ -66,7 +66,7 @@ deploy.config.json  # 当前 D1 部署模式与库名
    - 用户管理只创建、列出、删除普通用户；响应不得包含密码哈希/盐或会话 Token，删除用户必须同时清理其远端会话；
    - 管理员账户由 `.dev.vars` 的 `ADMIN_EMAIL` / `ADMIN_PASSWORD` / `ADMIN_NAME` 定义，部署时自动 upsert（模板见 `.dev.vars.example`）；`ADMIN_*` 不得上传为 Worker Secret；
    - 密钥只放 `.dev.vars`（已忽略）或 `wrangler secret`，**不得写入源码、配置或日志**。
-6. **部署模式**：默认 `rebuild` 会清空线上数据；涉及数据保留时必须使用 `pnpm deploy:migrate`，或先改 `deploy.config.json`。
+6. **部署模式**：默认 `migrate` 会保留线上数据并只应用未执行迁移；只有明确需要清空数据库时才使用 `pnpm deploy:rebuild`。
 
 ---
 

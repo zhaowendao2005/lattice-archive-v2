@@ -67,8 +67,8 @@
 
 | 模式 | 行为 | 数据 | 命令 |
 | --- | --- | --- | --- |
-| `rebuild`（当前默认） | 删除远端库 → 重建 → 回写新 `database_id` → 应用迁移 | **清空** | `pnpm deploy:rebuild` |
-| `migrate` | 仅应用未执行迁移 | 保留 | `pnpm deploy:migrate` |
+| `migrate`（当前默认） | 仅应用未执行迁移 | 保留 | `pnpm deploy` / `pnpm deploy:migrate` |
+| `rebuild` | 删除远端库 → 重建 → 回写新 `database_id` → 应用迁移 | **清空** | `pnpm deploy:rebuild` |
 
 > ⚠️ 重建会生成新的 `database_id`，`scripts/deploy.mjs` 会自动改写 `wrangler.jsonc`，因此该文件会产生 diff；这是预期行为。
 >

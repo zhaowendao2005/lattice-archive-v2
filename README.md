@@ -229,7 +229,7 @@ ADMIN_NAME=System Operator
 
 ```json
 {
-  "d1Mode": "rebuild",
+  "d1Mode": "migrate",
   "databaseName": "lattice-v2-d1",
   "rebuildLocation": "apac"
 }
@@ -237,8 +237,8 @@ ADMIN_NAME=System Operator
 
 | 模式 | 行为 | 数据 | 适用场景 |
 | --- | --- | --- | --- |
-| `rebuild`（当前默认） | 删除远端 D1 → 按迁移模板重新创建 → 回写新的 `database_id` → 应用迁移 | **全部清空，不迁移** | 结构大改、希望从零开始，或按需重置数据库 |
-| `migrate` | 只执行尚未应用的迁移 | 保留 | 日常迭代、线上已有真实用户数据 |
+| `migrate`（当前默认） | 只执行尚未应用的迁移 | 保留 | 日常迭代、线上已有真实用户数据 |
+| `rebuild` | 删除远端 D1 → 按迁移模板重新创建 → 回写新的 `database_id` → 应用迁移 | **全部清空，不迁移** | 结构大改、希望从零开始，或按需重置数据库 |
 
 切换方式（任选其一，优先级从高到低）：
 

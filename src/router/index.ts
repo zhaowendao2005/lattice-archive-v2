@@ -80,6 +80,7 @@ const routes: RouteRecordRaw[] = [
           { path: 'appearance', name: 'settings-appearance', component: () => import('@/views/main/settings/subviews/AppearanceSettingsView.vue') },
           { path: 'general', name: 'settings-general', component: () => import('@/views/main/settings/subviews/GeneralSettingsView.vue') },
           { path: 'developer', name: 'settings-developer', component: () => import('@/views/main/settings/subviews/DeveloperSettingsView.vue') },
+          { path: 'telegram', name: 'settings-telegram', component: () => import('@/views/main/settings/subviews/telegram-binding/TelegramBindingView.vue') },
           { path: 'storage', name: 'settings-storage', component: () => import('@/views/main/settings/subviews/StorageSettingsView.vue') },
         ],
       },
