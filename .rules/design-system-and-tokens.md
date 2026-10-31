@@ -21,6 +21,20 @@
 | **Brand** | `--brand` / `bg-brand` `text-brand` | `oklch(0.55 0.20 248)` | 蔚蓝强调（未读 Badge、焦点环、开关激活） |
 | **Brand Soft** | `--brand-soft` / `bg-brand-soft` | `oklch(0.94 0.035 245)` | 浅冰蓝底（用户头像背景） |
 
+### 沉浸媒体查看器专属令牌（Media Viewer Dark Surface）
+
+照片/视频查看器、视频瓦片角标与播放器控制栏无论系统处于亮色或暗色模式，始终使用深色观影语义令牌（定义于 `src/style.css`）：
+
+| 色彩角色 | CSS 变量 / 原子类 | 用途 |
+| :--- | :--- | :--- |
+| **Media Backdrop** | `--media-backdrop` / `bg-media-backdrop` | 沉浸查看器全屏遮罩底色 |
+| **Media Scrim** | `--media-scrim` / `bg-media-scrim` | 播放器顶部/底部渐变遮罩、视频瓦片胶囊半透明黑底 |
+| **Media Surface** | `--media-surface` / `bg-media-surface` | 倍速、画质、音量等浮层菜单背景 |
+| **Media Control** | `--media-control` / `bg-media-control` | 中央大播放圆形按钮与控制栏按钮悬停底色 |
+| **Media Foreground** | `--media-foreground` / `text-media-foreground` | 播放器白色图标、时间码、说明文字 |
+| **Media Muted** | `--media-muted` / `text-media-muted` | 次要计数、来源时间与副文案 |
+| **Media Track / Buffered** | `--media-track` / `--media-buffered` | 进度条底轨与已缓冲进度条 |
+
 **铁律**：视图中只允许使用上表的语义原子类，**严禁直接写 `slate-*`、`sky-*` 等调色板色或十六进制色值**，否则暗色模式与后续换肤都会失效。
 
 ### 字体与字号

@@ -2,13 +2,18 @@
 import { watch } from 'vue';
 import { useMediaQuery } from '@vueuse/core';
 import { useAppStore } from '@/stores/app/stores/appStore';
+import { useAuthStore } from '@/stores/auth/stores/authStore';
 import { useChatStore } from '@/stores/chat/stores/chatStore';
 import AppSidebar from './AppSidebar.vue';
 
 const appStore = useAppStore();
+const authStore = useAuthStore();
 const chatStore = useChatStore();
 const isCompactWidth = useMediaQuery('(width < 1024px)');
 const isNarrowWidth = useMediaQuery('(width < 768px)');
+
+// 工作区级引导（在子页面挂载前执行）：恢复本机 Telegram 连接并加载该用户的聊天缓存。
+if (authStore.user) chatStore.initialize(authStore.user.id);
 
 // 仅在跨越断点时自动折叠，窄屏内仍允许用户手动展开。
 let sidebarCollapsedBeforeCompact = appStore.isSidebarCollapsed;

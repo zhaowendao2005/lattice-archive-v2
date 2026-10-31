@@ -56,7 +56,10 @@ export async function bindAccount(env: Env, userId: string, body: AccountInput) 
 export async function updateAuthorization(env: Env, userId: string, authId: string, body: AuthorizationInput) {
   const state = body.sessionState === undefined ? undefined : requiredText(body.sessionState, '授权状态', 20);
   if (state && !['active', 'expired', 'revoked', 'duplicated'].includes(state)) throw new AuthError('INVALID_REQUEST', '授权状态无效');
-  await repository.touchAuthorization(env.AUTH_DB, userId, authId, { state, reachability: optionalText(body.reachability, 20), latency: typeof body.latencyMs === 'number' ? body.latencyMs : null, now: Date.now() });
+  // 必须与 tg_authorizations.reachability 的 CHECK 约束一致；非法值返回 400，不能落到 D1 变成 500。
+  const reachability = optionalText(body.reachability, 20);
+  if (reachability && !['ok', 'degraded', 'blocked'].includes(reachability)) throw new AuthError('INVALID_REQUEST', '连通状态无效');
+  await repository.touchAuthorization(env.AUTH_DB, userId, authId, { state, reachability, latency: typeof body.latencyMs === 'number' ? body.latencyMs : null, now: Date.now() });
   return getAccounts(env, userId);
 }
 export async function removeAuthorization(env: Env, userId: string, authId: string) { await repository.deleteAuthorization(env.AUTH_DB, userId, authId); return { deleted: true }; }

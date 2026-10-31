@@ -2,7 +2,7 @@
 
 > 本文整理 Telegram Web Z 参考项目中聊天列表、消息流、冷启动、连接与更新同步、媒体缩略图/播放、归档和加入/退出会话的实现观察，并给出适用于 Lattice Archive 的分阶段交付建议。
 >
-> **调研范围**：本地参考项目 `/Volumes/Lenovo/参考项目/Telegram-web-z-master`，`package.json` 版本 `12.0.47`。主要依据其 TypeScript 源码；本文描述的是该仓库当前实现，不保证等同于所有 Telegram 官方客户端、官方协议规范或未来版本。本文仅为研究文档，不代表已经实现任何功能。
+> **调研范围**：本地参考项目 `/Volumes/Lenovo/参考项目/Telegram-web-z-master`，`package.json` 版本 `12.0.47`。主要依据其 TypeScript 源码；本文描述的是该仓库当前实现，不保证等同于所有 Telegram 官方客户端、官方协议规范或未来版本。阶段 1–4 已在 Lattice 中落地，见第 10 节「实施状态」；其余阶段仍为规划。
 
 ---
 
@@ -345,6 +345,17 @@ HTMLVideoElement 请求 Range
 | **7. 大视频渐进式播放** | Range + Service Worker、分块下载、请求取消、前段缓存、重试和 file reference 修复；浏览器回退。 | 大文件能较早开始播放；seek 后请求目标区间；弱网暂停/恢复和失败行为可预期；内存使用稳定。 |
 | **8. Telegram 归档** | 活动/归档列表、服务端归档/取消归档、分页与 updates 合并、当前聊天保护。 | 归档操作跨端一致；从归档恢复；归档当前打开聊天时视图不丢；刷新后状态一致。 |
 | **9. 加入/退出会话** | 公开频道/群组加入、加入申请、退出、基础错误和角色保护；之后再做邀请链接/转让所有权复杂流程。 | 申请态不误报加入；成功加入后列表/权限正确；退出后当前视图和列表一致；取消/失败不会错误清理本地会话。 |
+
+### 实施状态（阶段 1–6 已落地）
+
+| 阶段 | 落地位置 | 与蓝图的差异 / 已知限制 |
+|---|---|---|
+| 1 | `src/worker/local/chat/chatService.ts`（`getDialogs`：置顶 + 100 条分页，游标 = 日期 + ID + peer）；首页可交互后后台每 400 ms 续拉一页直至全部（上限 30 页）；首页刷新与更深分页合并；`AppLayout` 工作区级引导；会话栏同步状态行 | 仅活动列表（folder 0），归档列表留给阶段 8（存在归档时列表底部提示）；单设备同一时间只连接一个 Telegram 账户。 |
+| 2 | `getHistory`（大屏 60 / 小屏 40）；路由 `/workspace/chats/:chatKey`；`messageViewport` 顶部插入补偿与阅读锚点；账户代次 + 窗口 `epoch` 丢弃过期响应 | 未做完整虚拟列表：离开会话时窗口超过 300 条裁剪为最新 100 条；文本不渲染实体（链接 / 粗体），媒体只显示类型标签。 |
+| 3 | `chatCacheStore`（AES-GCM 加密 IndexedDB，按 Lattice 用户隔离）；`syncFrom` → `updates.getDifference`；实时 Raw updates + 公共 pts 缺口检测；断线重连触发补差 | 频道不做 `getChannelDifference`：频道窗口在补差后标记为不连续，打开时以最新页校准（重叠区以服务器为准，可清除已删除消息）。 |
+| 4 | Worker：`converters.ts` 随消息下发照片定位信息、原图宽高与 stripped thumb（还原为 data URL 作模糊占位）；`chat/mediaService.ts` 的 `getPhoto` 按档位下载（预览 ≤ 800px 档，原图取最大档），`FILE_REFERENCE_*` 时按 peer + messageId 重新获取消息并重试一次，并发上限 4，字节以 Transferable 移交，失败不触发主连接重连。主线程：`messageViewport` 以消息流为根的 IntersectionObserver（预取边距 600px）+ `v-media-visible` 指令；`chatMediaLoader`（去重、优先级、并发 3、250 ms→4 s 退避 5 次、Object URL LRU 400）；`chatMediaCache`（Cache Storage，设备密钥 AES-GCM 加密，按 Lattice 用户 / Telegram 账户隔离，5 天 TTL、单文件 ≤ 512 KiB、上限 2000 条）；`chatMediaStore`（按私聊 / 群组 / 频道的自动下载策略、防剧透遮罩、查看器原图与左右翻页、保存图片）；同一 `groupedId` 的连续照片合并为相册网格；设置 → 数据与归档可切换自动下载与清除媒体缓存 | 网页预览图、会话列表小图与贴纸留给后续阶段；限时（阅后即焚）照片不下载；查看器只在当前已加载窗口内翻页。 |
+| 5 | Worker：`converters.ts` 识别 `video` / `gif` / `round` 与以文件方式发送的可播放视频（`asFile`，`video/mp4`、`video/webm`、`video/quicktime`），提取 `videoCover`、`videoTimestamp`、stripped/photo 缩略图与 `altDocuments` 多档画质（过滤 `application/x-tgstoryboard`）；`mediaService.ts` 实现 `getDocumentThumb`（归入图片池）与 `getDocument`（独立文件池并发 2，单文件 4 路 512 KiB 分片并行写入预分配 `Uint8Array`，处理 `FILE_MIGRATE_X`、多路共享 `FILE_REFERENCE_*` 刷新、分片边界取消 `CancelToken`、250 ms 或 2% 节流 `chatProgress`）；`mtprotoBridge` 支持 `onProgress`、`AbortSignal` → `chatCancel` 与按进度续期的 `idleTimeoutMs`。主线程：`chatMediaLoader` 拆为图片（并发 3 / 400 条 LRU）与视频（并发 2 / 256 MB 字节上限 LRU + 播放期 `pin` 保护 + `abort`）双车道；Cache Storage 单条目上限提升至 20 MiB；`chatVideoStore` 管理体积档位（≤ 100 MB 直接下载，100–300 MB 需确认，> 300 MB 提示留待阶段 7）、画质选择（Auto 取 `≤ min(720, 屏幕短边)` 且 `canPlayType` 可播的最高档）、离开即取消（关闭查看器 / 翻页 / 切换会话立即中止下载）；同一 `groupedId` 的连续照片与普通视频合并为混合相册网格 | 未做 Range / Service Worker 流式播放（留给阶段 7），需完整下载对应画质 Blob 后起播；> 300 MB 视频暂不支持在线播放；限时（阅后即焚）视频与圆形视频不提供下载。 |
+| 6 | 主线程：`videoPlayback` 单例统一管理 `<video>` 元素句柄（`viewer`、`gif:<target>`、`round:<target>`）、全屏与画中画，配合 `v-video-element`、`v-video-stage`、`v-media-playing` 指令保持视图零 `ref`；`style.css` 新增 `--media-*` 沉浸深色查看器语义令牌；`MediaViewer` 统一承载照片、视频與 GIF（顶部操作栏含旋转 / 1×–4× 缩放 / 下载 / 关闭，中间画布含左右切换、触屏滑动、滚轮与双指缩放拖拽，底部说明文字与相册/多媒体的缩略图胶片条 `ViewerFilmstrip`，以及自定义 `VideoPlayer` / `VideoControls` / `SeekBar`：缓冲条、已播进度条、音量滑块、`0.5×–2×` 倍速、⚙ 画质切换、画中画、全屏、3 秒无操作自动隐藏控制栏、键盘 `Space/K`、`J/L`、`←/→`、`M`、`F`）；`messageViewport` 新增 50% 可见性播放观察器，驱动气泡内 GIF（≤ 10 MB 静音循环 + 左上角 `GIF` 徽章）与 240px 圆形视频消息（静音循环预览，点击切换单实例有声从头播放 + SVG 环形进度圈 + 右下角时长与静音角标）；设置 → 数据与归档新增 GIF 与圆形视频自动播放开关 | 切换画质时会重新下载目标画质档位的完整文件并保持当前播放进度与倍速；尚不支持 storyboard 缩略图预览条。 |
 
 ### 阶段依赖建议
 

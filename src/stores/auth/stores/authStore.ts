@@ -7,6 +7,8 @@ export type UserRole = 'user' | 'admin';
 export interface UserProfile { id: string; name: string; email: string; initials: string; role: UserRole }
 const ROLE_LABELS: Record<UserRole, string> = { user: '标准用户', admin: '系统管理员' };
 
+let connectionPromise: Promise<boolean> | null = null;
+
 export const useAuthStore = defineStore('auth', {
   state: () => {
     const session = authSessionStorage.read();
@@ -28,8 +30,9 @@ export const useAuthStore = defineStore('auth', {
     };
   },
   getters: {
-    isLoggedIn: (state): boolean => state.user !== null && state.isConnectedToServer,
-    isAdmin: (state): boolean => state.user?.role === 'admin' && state.isConnectedToServer,
+    /** 本地持有未过期的有效会话即视为已登录（支持首屏零等待放行与弱网离线浏览）；远端 401 时会清理会话。 */
+    isLoggedIn: (state): boolean => state.user !== null && state.sessionToken !== null,
+    isAdmin: (state): boolean => state.user?.role === 'admin' && state.sessionToken !== null,
     displayName: (state): string => state.user?.name ?? '登录',
     displayRole: (state): string => state.user ? ROLE_LABELS[state.user.role] : '尚未登录',
     canSubmitLogin: (state): boolean => !!state.emailInput.trim() && !!state.passwordInput,
@@ -65,41 +68,62 @@ export const useAuthStore = defineStore('auth', {
       if (this.isSubmitting) return false;
       if (!this.turnstileToken) { this.authError = '请先完成人机安全验证'; return false; }
       this.isSubmitting = true;
+      let succeeded = false;
       try {
         const result = await request();
         this.applySession(result.user, result.session.token, result.session.expiresAt);
         this.isConnectedToServer = true;
+        this.hasInitializedConnection = true;
         this.passwordInput = ''; this.registerPassword = ''; this.adminPasswordInput = '';
         this.closeAccountMenu();
+        succeeded = true;
         return true;
       } catch (error) {
         this.authError = error instanceof RemoteAuthError ? error.message : '认证失败，请稍后重试';
         return false;
       } finally {
         this.isSubmitting = false;
-        turnstileBridge.reset();
+        if (!succeeded) turnstileBridge.reset();
+        else this.turnstileToken = '';
       }
     },
     applySession(user: UserProfile, token: string, expiresAt: number) {
       this.user = user; this.sessionToken = token; this.sessionExpiresAt = expiresAt;
       authSessionStorage.write({ user, token, expiresAt }, this.keepSignedIn);
     },
-    async initializeSessionConnection() {
-      if (this.hasInitializedConnection) return this.isConnectedToServer;
-      this.hasInitializedConnection = true;
-      if (!this.sessionToken || !this.user) return false;
-      try {
-        const result = await authRemoteDataSource.connectSession(this.sessionToken);
-        this.user = result.user; this.sessionExpiresAt = result.sessionExpiresAt; this.isConnectedToServer = true;
-      return true;
-      } catch (error) {
-        if (error instanceof RemoteAuthError && error.status === 401) this.clearLocalSession();
-        else {
-          this.hasInitializedConnection = false;
-          this.authError = '暂时无法连接认证服务器，请检查网络后重试';
-        }
+    async initializeSessionConnection(onUnauthorized?: (previousRole?: UserRole) => void) {
+      if (this.hasInitializedConnection) return this.isLoggedIn;
+      if (!this.sessionToken || !this.user) {
+        this.hasInitializedConnection = true;
         return false;
       }
+      if (connectionPromise) return connectionPromise;
+      const token = this.sessionToken;
+      const previousRole = this.user.role;
+      connectionPromise = (async () => {
+        try {
+          const result = await authRemoteDataSource.connectSession(token);
+          if (this.sessionToken !== token) return this.isLoggedIn;
+          this.user = result.user;
+          this.sessionExpiresAt = result.sessionExpiresAt;
+          this.isConnectedToServer = true;
+          this.hasInitializedConnection = true;
+          return true;
+        } catch (error) {
+          if (error instanceof RemoteAuthError && error.status === 401) {
+            this.clearLocalSession();
+            this.hasInitializedConnection = true;
+            onUnauthorized?.(previousRole);
+            return false;
+          }
+          // 网络抖动或远端暂时不可达时保留本地有效会话，允许继续使用本地缓存与直连 Telegram。
+          this.hasInitializedConnection = true;
+          return this.isLoggedIn;
+        } finally {
+          connectionPromise = null;
+        }
+      })();
+      return connectionPromise;
     },
     async logout() {
       const token = this.sessionToken;

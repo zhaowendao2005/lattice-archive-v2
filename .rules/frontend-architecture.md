@@ -19,14 +19,17 @@
      ├── session-list/              # 左栏目录：各自组织会话检索、条目与过滤器
      │   ├── SessionSearch.vue
      │   ├── SessionItem.vue
+     │   ├── SessionListState.vue   # 未绑定 / 加载骨架 / 错误 / 空列表
      │   └── SessionListContainer.vue
-     ├── conversation/              # 右栏目录：各自组织消息头、消息泡、输入框
+     ├── conversation/              # 右栏目录：各自组织消息头、消息泡、只读提示
      │   ├── ConversationHeader.vue
      │   ├── MessageFeed.vue
      │   ├── MessageBubble.vue
-     │   ├── MessageInput.vue
+     │   ├── FeedStatus.vue
+     │   ├── ReadOnlyNotice.vue
+     │   ├── media/                 # 图片/视频/GIF/圆视频组件、相册网格、沉浸查看器（MediaViewer）与可见性/播放器指令
      │   └── ConversationContainer.vue
-     └── ChatsView.vue              # 顶层同级聚合容器
+     └── ChatsView.vue              # 顶层同级聚合容器（路由参数 ↔ 选中会话）
 
      src/views/main/settings/       # 设置页双栏分治范式
      ├── nav/

@@ -51,7 +51,7 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', handlePointerD
         <SidebarNavItem
           :icon="MessagesSquare"
           label="会话"
-          :badge="chatStore.sessions.length"
+          :badge="chatStore.unreadChatCount || ''"
           :active="isActive"
           :collapsed="appStore.isSidebarCollapsed"
           @click="navigate"

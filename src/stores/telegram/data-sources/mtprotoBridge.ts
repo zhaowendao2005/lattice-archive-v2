@@ -1,4 +1,5 @@
 import type { TgCommand, TgEvent, TgInitialUser, TgPlatform, TgRestoreFailure, TgValidationReport } from '@/worker/local/protocol';
+import type { TgChatMethod, TgChatRequest, TgChatResponseMap, TgChatUpdate, TgUpdatesState } from '@/worker/local/chatProtocol';
 import { tgSessionVault } from './tgSessionVault';
 
 export type TelegramUser = TgInitialUser;
@@ -14,7 +15,14 @@ export type LoginEvent =
   | { type: 'connectionState'; accountId: string; state: 'connecting' | 'online' | 'reconnecting' | 'offline' | 'auth-expired'; message?: string }
   | { type: 'accountDisconnected'; accountId: string }
   | { type: 'sessionStopped'; accountId?: string }
+  | { type: 'chatUpdates'; accountId: string; updates: TgChatUpdate[]; state?: TgUpdatesState }
   | { type: 'error'; message: string; code?: string };
+
+/** 聊天 RPC 失败时携带 Telegram 错误码，便于业务层区分 FLOOD_WAIT / 权限 / 未连接。 */
+export class TgChatRequestError extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) { super(message); this.code = code; }
+}
 
 type BusMessage =
   | { kind: 'master'; senderId: string }
@@ -22,8 +30,26 @@ type BusMessage =
   | { kind: 'command'; senderId: string; requestId: string; command: TgCommand }
   | { kind: 'event'; senderId: string; event: TgEvent };
 
+export interface ChatRequestOptions {
+  onProgress?: (loaded: number, total: number) => void;
+  signal?: AbortSignal;
+  idleTimeoutMs?: number;
+}
+
+interface PendingChatRequest {
+  resolve: (data: unknown) => void;
+  reject: (error: Error) => void;
+  timeout: number;
+  onProgress?: (loaded: number, total: number) => void;
+  restartTimeout?: () => number;
+  cleanup?: () => void;
+}
+
 const BUS_NAME = 'lattice.telegram.multitab.v1';
 const COMMAND_TIMEOUT_MS = 15_000;
+const VALIDATE_TIMEOUT_MS = 25_000;
+/** 补差可能连续拉取多个分片，给聊天 RPC 更宽的超时。 */
+const CHAT_REQUEST_TIMEOUT_MS = 45_000;
 const DEBUG_KEY = 'lattice.telegram.debug';
 
 /**
@@ -36,9 +62,9 @@ export class MtprotoBridge {
   private readonly lockName: string;
   private readonly tabId = crypto.randomUUID();
   private readonly channel: BroadcastChannel | null;
-  private readonly pendingValidation = new Map<string, { resolve: (report: ValidationReport) => void; reject: (error: Error) => void }>();
+  private readonly pendingValidation = new Map<string, { resolve: (report: ValidationReport) => void; reject: (error: Error) => void; timeout: number }>();
   private readonly pendingConnectionChecks = new Map<string, { resolve: (online: boolean) => void; timeout: number }>();
-  private readonly pendingCommands = new Map<string, { timeout: number; resolve?: () => void; reject?: (error: Error) => void }>();
+  private readonly pendingChatRequests = new Map<string, PendingChatRequest>();
   private worker: Worker | null = null;
   private activeAccountId?: string;
   private role: 'unknown' | 'master' | 'follower' | 'destroyed' = 'unknown';
@@ -65,8 +91,16 @@ export class MtprotoBridge {
   validateApp(apiId: number, apiHash: string): Promise<ValidationReport> {
     const requestId = crypto.randomUUID();
     return new Promise((resolve, reject) => {
-      this.pendingValidation.set(requestId, { resolve, reject });
-      void this.sendCommand({ t: 'validateApp', requestId, apiId, apiHash }, requestId);
+      const timeout = window.setTimeout(() => {
+        this.pendingValidation.delete(requestId);
+        reject(new Error('连接 Telegram 验证超时，请检查网络后重试'));
+      }, VALIDATE_TIMEOUT_MS);
+      this.pendingValidation.set(requestId, { resolve, reject, timeout });
+      this.sendCommand({ t: 'validateApp', requestId, apiId, apiHash }, requestId).catch((error: unknown) => {
+        window.clearTimeout(timeout);
+        this.pendingValidation.delete(requestId);
+        reject(error instanceof Error ? error : new Error('验证应用凭据失败'));
+      });
     });
   }
 
@@ -100,6 +134,54 @@ export class MtprotoBridge {
 
   cancel() { void this.sendCommand({ t: 'cancel' }); }
 
+  disconnectSession() { void this.sendCommand({ t: 'disconnectSession' }); }
+
+  /**
+   * 聊天只读 RPC：主标签页直连 Worker，从标签页经 BroadcastChannel 代理；响应按 requestId 只回给发起方。
+   * options.idleTimeoutMs：长请求（完整文件）改为「无进度超时」，每次收到进度事件都会重新计时；
+   * options.signal：中止时通知 Worker 在分片边界停止，并以 TG_CANCELED 拒绝。
+   */
+  requestChat<M extends TgChatMethod>(accountId: string, request: Extract<TgChatRequest, { method: M }>, options: ChatRequestOptions = {}): Promise<TgChatResponseMap[M]> {
+    const requestId = crypto.randomUUID();
+    const timeoutMs = options.idleTimeoutMs ?? CHAT_REQUEST_TIMEOUT_MS;
+    return new Promise<TgChatResponseMap[M]>((resolve, reject) => {
+      if (options.signal?.aborted) { reject(new TgChatRequestError('TG_CANCELED', '下载已取消')); return; }
+      const expire = () => window.setTimeout(() => {
+        this.finishChatRequest(requestId);
+        reject(new TgChatRequestError('TG_REQUEST_TIMEOUT', 'Telegram 请求超时，请稍后重试'));
+      }, timeoutMs);
+      const handleAbort = () => {
+        if (!this.pendingChatRequests.has(requestId)) return;
+        this.finishChatRequest(requestId);
+        void this.sendCommand({ t: 'chatCancel', requestId }).catch(() => undefined);
+        reject(new TgChatRequestError('TG_CANCELED', '下载已取消'));
+      };
+      options.signal?.addEventListener('abort', handleAbort, { once: true });
+      this.pendingChatRequests.set(requestId, {
+        resolve: (data) => resolve(data as TgChatResponseMap[M]),
+        reject,
+        timeout: expire(),
+        onProgress: options.onProgress,
+        restartTimeout: options.idleTimeoutMs ? expire : undefined,
+        cleanup: () => options.signal?.removeEventListener('abort', handleAbort),
+      });
+      this.sendCommand({ t: 'chatRequest', requestId, accountId, request }, requestId).catch((error: unknown) => {
+        this.finishChatRequest(requestId);
+        reject(error instanceof Error ? error : new Error('Telegram 请求失败'));
+      });
+    });
+  }
+
+  /** 清理挂起表中的聊天请求：超时计时器与中止监听一并释放。 */
+  private finishChatRequest(requestId: string) {
+    const pending = this.pendingChatRequests.get(requestId);
+    if (!pending) return undefined;
+    window.clearTimeout(pending.timeout);
+    pending.cleanup?.();
+    this.pendingChatRequests.delete(requestId);
+    return pending;
+  }
+
   destroy(): Promise<void> {
     if (this.destroyPromise) return this.destroyPromise;
     this.destroyPromise = new Promise((resolve) => { this.resolveDestroy = resolve; });
@@ -112,8 +194,6 @@ export class MtprotoBridge {
     this.rejectPending(new Error('Telegram 连接已关闭'));
     this.pendingConnectionChecks.forEach(({ resolve, timeout }) => { window.clearTimeout(timeout); resolve(false); });
     this.pendingConnectionChecks.clear();
-    this.pendingCommands.forEach(({ timeout, reject }) => { window.clearTimeout(timeout); reject?.(new Error('主标签页连接已关闭')); });
-    this.pendingCommands.clear();
     this.channel?.close();
     window.removeEventListener('pagehide', this.handlePageHide);
     void this.lockRequest?.finally(() => {
@@ -132,11 +212,6 @@ export class MtprotoBridge {
     this.worker?.terminate();
     this.worker = null;
   };
-
-  private releaseMasterOwnership() {
-    if (this.role !== 'master') return;
-    this.releaseDeviceLock?.();
-  }
 
   private async startElection() {
     if (!navigator.locks || !this.channel) {
@@ -175,13 +250,16 @@ export class MtprotoBridge {
     worker.addEventListener('message', (event: MessageEvent<TgEvent>) => this.handleWorkerEvent(event.data));
     worker.addEventListener('error', () => {
       if (this.role === 'destroyed') return;
-      this.onEvent({ type: 'error', message: 'Telegram 协议进程异常退出，请等待其他标签页接管' });
       if (this.activeAccountId) this.onEvent({ type: 'sessionStopped', accountId: this.activeAccountId });
       this.activeAccountId = undefined;
       this.worker?.terminate();
       this.worker = null;
-      this.releaseDeviceLock?.();
       this.rejectPending(new Error('Telegram 协议进程异常退出'));
+      // 主标签页保持设备锁并原地重建 Worker，避免单标签页下释放锁后无人接管。
+      if (this.role === 'master') {
+        this.createWorker();
+        this.onEvent({ type: 'elected' });
+      }
     });
     worker.postMessage({ t: 'init', deviceId: this.deviceId, platform: this.getPlatform(), appVersion: '2.0.0', debug: this.isDebugEnabled() } satisfies TgCommand);
   }
@@ -202,12 +280,6 @@ export class MtprotoBridge {
       return;
     }
     if (!this.channel || !this.knownMasterId) throw new Error('未找到 Telegram 主标签页，请稍后重试');
-    const timeout = window.setTimeout(() => {
-      const pending = this.pendingCommands.get(requestId);
-      this.pendingCommands.delete(requestId);
-      pending?.reject?.(new Error('主标签页未响应'));
-    }, COMMAND_TIMEOUT_MS);
-    this.pendingCommands.set(requestId, { timeout });
     this.channel.postMessage({ kind: 'command', senderId: this.tabId, requestId, command } satisfies BusMessage);
   }
 
@@ -232,16 +304,44 @@ export class MtprotoBridge {
   }
 
   private handleWorkerEvent(event: TgEvent, broadcast = true) {
-    if (broadcast) this.channel?.postMessage({ kind: 'event', senderId: this.tabId, event } satisfies BusMessage);
+    // 本标签页自己发起的聊天 RPC 响应 / 进度（含媒体字节）无需广播，只有代理从标签页的请求才需要转发。
+    const ownResponse = (event.t === 'chatResponse' || event.t === 'chatProgress') && this.pendingChatRequests.has(event.requestId);
+    if (broadcast && !ownResponse) this.channel?.postMessage({ kind: 'event', senderId: this.tabId, event } satisfies BusMessage);
     if (event.t === 'validationReport') {
       const pending = this.pendingValidation.get(event.requestId);
-      if (pending) { pending.resolve(event.report); this.pendingValidation.delete(event.requestId); }
+      if (pending) {
+        window.clearTimeout(pending.timeout);
+        this.pendingValidation.delete(event.requestId);
+        if (event.ok) pending.resolve(event.report);
+        else pending.reject(new Error(event.message));
+      }
       return;
     }
     if (event.t === 'connectionCheck') {
       const pending = this.pendingConnectionChecks.get(event.requestId);
       if (pending) { window.clearTimeout(pending.timeout); pending.resolve(event.online); }
       this.pendingConnectionChecks.delete(event.requestId);
+      return;
+    }
+    if (event.t === 'chatResponse') {
+      const pending = this.finishChatRequest(event.requestId);
+      if (!pending) return;
+      if (event.ok) pending.resolve(event.data);
+      else pending.reject(new TgChatRequestError(event.code, event.message));
+      return;
+    }
+    if (event.t === 'chatProgress') {
+      const pending = this.pendingChatRequests.get(event.requestId);
+      if (!pending) return;
+      if (pending.restartTimeout) {
+        window.clearTimeout(pending.timeout);
+        pending.timeout = pending.restartTimeout();
+      }
+      pending.onProgress?.(event.loaded, event.total);
+      return;
+    }
+    if (event.t === 'chatUpdates') {
+      this.onEvent({ type: 'chatUpdates', accountId: event.accountId, updates: event.updates, state: event.state });
       return;
     }
     if (event.t === 'connectionState') {
@@ -252,7 +352,6 @@ export class MtprotoBridge {
       const accountId = event.accountId ?? this.activeAccountId;
       this.activeAccountId = undefined;
       this.onEvent({ type: 'sessionStopped', accountId });
-      this.releaseMasterOwnership();
       return;
     }
     if (event.t === 'ready') return;
@@ -276,8 +375,10 @@ export class MtprotoBridge {
   }
 
   private rejectPending(error: Error) {
-    this.pendingValidation.forEach(({ reject }) => reject(error));
+    this.pendingValidation.forEach(({ reject, timeout }) => { window.clearTimeout(timeout); reject(error); });
     this.pendingValidation.clear();
+    this.pendingChatRequests.forEach(({ reject, timeout, cleanup }) => { window.clearTimeout(timeout); cleanup?.(); reject(error); });
+    this.pendingChatRequests.clear();
   }
 
   private getPlatform(): TgPlatform {
@@ -286,3 +387,23 @@ export class MtprotoBridge {
     return 'web';
   }
 }
+
+type BridgeListener = (event: LoginEvent) => void;
+const bridgeListeners = new Set<BridgeListener>();
+let sharedBridge: MtprotoBridge | null = null;
+
+/**
+ * 每个标签页唯一的 Bridge 单例与事件分发器。
+ * telegram 域（登录 / 设备心跳）与 chat 域（会话 / 消息更新）各自订阅，互不持有对方的 Store。
+ * 必须先 subscribe 再 bridge()：主标签页选举的 elected 事件在构造后异步派发。
+ */
+export const mtprotoHub = {
+  bridge(): MtprotoBridge {
+    if (!sharedBridge) sharedBridge = new MtprotoBridge((event) => { bridgeListeners.forEach((listener) => listener(event)); });
+    return sharedBridge;
+  },
+  subscribe(listener: BridgeListener): () => void {
+    bridgeListeners.add(listener);
+    return () => { bridgeListeners.delete(listener); };
+  },
+};

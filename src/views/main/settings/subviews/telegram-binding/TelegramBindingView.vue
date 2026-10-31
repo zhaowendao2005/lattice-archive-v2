@@ -6,7 +6,7 @@ import TgLoginModal from './TgLoginModal.vue';
 import { useTelegramStore } from '@/stores/telegram/stores/telegramStore';
 
 const telegramStore = useTelegramStore();
-onMounted(() => { void telegramStore.load(); });
+onMounted(() => { void telegramStore.refreshBindingView(); });
 </script>
 
 <template>

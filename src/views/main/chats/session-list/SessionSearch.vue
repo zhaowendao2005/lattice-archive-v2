@@ -14,9 +14,9 @@ function handleInput(event: Event) {
   <div class="relative flex items-center">
     <Search class="absolute left-3 size-4 text-muted-foreground pointer-events-none" :stroke-width="1.75" />
     <input
-      type="text"
+      type="search"
       :value="chatStore.searchKeyword"
-      placeholder="搜索会话、消息或标签"
+      placeholder="筛选已加载的会话"
       class="w-full token-control-height rounded-lg border border-transparent bg-muted pl-9 pr-3 outline-none transition-colors placeholder:text-muted-foreground focus:border-ring focus:bg-card"
       @input="handleInput"
     />

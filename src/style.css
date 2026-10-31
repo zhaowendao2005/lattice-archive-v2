@@ -39,6 +39,16 @@
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
 
+  /* 媒体查看器深色令牌（明暗主题取值一致，见 design-system 规范「媒体查看器」一节） */
+  --color-media-backdrop: var(--media-backdrop);
+  --color-media-scrim: var(--media-scrim);
+  --color-media-foreground: var(--media-foreground);
+  --color-media-muted: var(--media-muted);
+  --color-media-track: var(--media-track);
+  --color-media-buffered: var(--media-buffered);
+  --color-media-control: var(--media-control);
+  --color-media-surface: var(--media-surface);
+
   /* 圆角阶梯 */
   --radius-xs: 4px;
   --radius-sm: 6px;
@@ -93,6 +103,16 @@
     --sidebar-accent-foreground: var(--accent-foreground);
     --sidebar-border: var(--border);
     --sidebar-ring: var(--ring);
+
+    /* 媒体查看器：与 Telegram 一致始终为深色，不随主题切换 */
+    --media-backdrop: oklch(0.12 0 0 / 0.96);
+    --media-scrim: oklch(0 0 0 / 0.75);
+    --media-foreground: oklch(1 0 0);
+    --media-muted: oklch(1 0 0 / 0.6);
+    --media-track: oklch(1 0 0 / 0.16);
+    --media-buffered: oklch(1 0 0 / 0.5);
+    --media-control: oklch(0 0 0 / 0.5);
+    --media-surface: oklch(0.22 0 0 / 0.92);
 
     /* 默认平台尺寸令牌 (Windows Standard) */
     --hit-target: 40px;

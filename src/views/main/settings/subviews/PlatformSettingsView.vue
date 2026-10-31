@@ -68,7 +68,7 @@ const POLICIES = [
           </div>
           <div class="px-4 py-3">
             <dt class="text-xs text-muted-foreground">活动会话数</dt>
-            <dd class="mt-1 text-lg font-semibold tabular-nums">{{ chatStore.sessions.length }}</dd>
+            <dd class="mt-1 text-lg font-semibold tabular-nums">{{ chatStore.dialogCount }}</dd>
           </div>
         </dl>
       </section>

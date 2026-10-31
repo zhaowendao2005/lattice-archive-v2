@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { Database, HardDriveDownload } from '@lucide/vue';
 import { useChatStore } from '@/stores/chat/stores/chatStore';
+import MediaDownloadSection from './storage/MediaDownloadSection.vue';
 
 const chatStore = useChatStore();
 </script>
@@ -29,7 +30,7 @@ const chatStore = useChatStore();
           <div class="grid grid-cols-2 gap-3 pt-2 text-xs">
             <div class="p-3 rounded-lg bg-muted/60 border border-border">
               <span class="text-muted-foreground block">会话总数</span>
-              <span class="text-base font-semibold tabular-nums mt-0.5 block">{{ chatStore.sessions.length }}</span>
+              <span class="text-base font-semibold tabular-nums mt-0.5 block">{{ chatStore.dialogCount }}</span>
             </div>
             <div class="p-3 rounded-lg bg-muted/60 border border-border">
               <span class="text-muted-foreground block">离线状态</span>
@@ -38,6 +39,8 @@ const chatStore = useChatStore();
           </div>
         </div>
       </section>
+
+      <MediaDownloadSection />
 
       <section class="space-y-3">
         <span class="text-sm font-medium">维护与重置</span>

@@ -16,9 +16,12 @@ async function issue(db: D1Database, user: UserProfile, keep: boolean, request: 
 }
 
 export async function authenticate(request: Request, env: Env, action: TurnstileAction, role: Role, body: AuthBody, ctx: ExecutionContext) {
-  if (!await verifyTurnstileToken(body.turnstileToken, action, request, env)) throw new AuthError('TURNSTILE_FAILED', '人机安全验证未通过，请重试', 403);
   const credentials = validateCredentials(body.email, body.password);
-  const user = await findUser(env.AUTH_DB, credentials.email, role);
+  const [turnstileOk, user] = await Promise.all([
+    verifyTurnstileToken(body.turnstileToken, action, request, env),
+    findUser(env.AUTH_DB, credentials.email, role),
+  ]);
+  if (!turnstileOk) throw new AuthError('TURNSTILE_FAILED', '人机安全验证未通过，请重试', 403);
   const valid = user ? await verifyPassword(credentials.password, user.password_salt, user.password_hash, user.iterations) : (await verifyDummyPassword(credentials.password), false);
   if (!user || !valid) throw new AuthError('INVALID_CREDENTIALS', '邮箱或密码错误', 401);
   ctx.waitUntil(removeExpiredSessions(env.AUTH_DB, user.id, Date.now()));
@@ -26,14 +29,19 @@ export async function authenticate(request: Request, env: Env, action: Turnstile
 }
 
 export async function register(request: Request, env: Env, body: AuthBody): Promise<SessionResult> {
-  if (!await verifyTurnstileToken(body.turnstileToken, 'register', request, env)) throw new AuthError('TURNSTILE_FAILED', '人机安全验证未通过，请重试', 403);
   const credentials = validateCredentials(body.email, body.password);
   if (typeof body.name !== 'string' || body.name.trim().length < 1 || body.name.trim().length > 80) throw new AuthError('INVALID_NAME', '用户名长度需为 1 至 80 个字符');
   const email = credentials.email.toLowerCase();
-  if (await findEmail(env.AUTH_DB, email)) throw new AuthError('EMAIL_TAKEN', '该邮箱已注册', 409);
+  const [turnstileOk, existing, passwordData] = await Promise.all([
+    verifyTurnstileToken(body.turnstileToken, 'register', request, env),
+    findEmail(env.AUTH_DB, email),
+    hashPassword(credentials.password),
+  ]);
+  if (!turnstileOk) throw new AuthError('TURNSTILE_FAILED', '人机安全验证未通过，请重试', 403);
+  if (existing) throw new AuthError('EMAIL_TAKEN', '该邮箱已注册', 409);
   const name = body.name.trim();
   const user: UserProfile = { id: crypto.randomUUID(), name, email, initials: Array.from(name).slice(0, 2).join('').toUpperCase(), role: 'user' };
-  await createUser(env.AUTH_DB, user, await hashPassword(credentials.password), Date.now());
+  await createUser(env.AUTH_DB, user, passwordData, Date.now());
   return issue(env.AUTH_DB, user, body.keepSignedIn === true, request);
 }
 
@@ -43,7 +51,7 @@ function bearer(request: Request): string {
   return header.slice(7);
 }
 
-export async function connectSession(request: Request, env: Env) {
+export async function connectSession(request: Request, env: Env, ctx: ExecutionContext) {
   const hash = await hashSessionToken(bearer(request));
   const session = await findSession(env.AUTH_DB, hash);
   const now = Date.now();
@@ -51,7 +59,7 @@ export async function connectSession(request: Request, env: Env) {
     await deleteSession(env.AUTH_DB, hash);
     throw new AuthError('UNAUTHORIZED', '会话已失效，请重新登录', 401);
   }
-  await touchSession(env.AUTH_DB, hash, now);
+  ctx.waitUntil(touchSession(env.AUTH_DB, hash, now));
   return { connected: true, serverTime: now, sessionExpiresAt: session.expires_at, user: profile(session) };
 }
 

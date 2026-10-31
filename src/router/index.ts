@@ -62,7 +62,8 @@ const routes: RouteRecordRaw[] = [
     children: [
       { path: '', redirect: '/workspace/chats' },
       {
-        path: 'chats',
+        // 选中的会话属于「我在哪里」：可刷新还原、可深链，参数形如 user-123 / chat-456 / channel-789。
+        path: 'chats/:chatKey?',
         name: 'chats',
         component: () => import('@/views/main/chats/ChatsView.vue'),
       },
@@ -95,10 +96,20 @@ const router = createRouter({
   scrollBehavior: () => ({ top: 0 }),
 });
 
-/** 访问守卫：会话身份来自 authStore，未登录不得进入工作区，非管理员不得进入控制台。 */
-router.beforeEach(async (to) => {
+/**
+ * 访问守卫：
+ * - 本地持有未过期会话时立即乐观放行（0ms 阻塞），同时在后台静默向远端校准会话；
+ * - 若后台校准返回 401（会话已被服务端撤销或过期），自动清理本地状态并跳回对应登录页。
+ */
+router.beforeEach((to) => {
   const auth = useAuthStore();
-  await auth.initializeSessionConnection();
+  if (!auth.hasInitializedConnection && auth.sessionToken) {
+    void auth.initializeSessionConnection((previousRole) => {
+      const current = router.currentRoute.value;
+      if (current.meta.requiresAdmin) void router.replace({ name: 'admin-login' });
+      else if (current.meta.requiresAuth) void router.replace({ name: previousRole === 'admin' ? 'admin-login' : 'auth-login' });
+    });
+  }
   if (to.meta.requiresAdmin && !auth.isAdmin) return { name: 'admin-login' };
   if (to.meta.requiresAuth && !auth.isLoggedIn) return { name: 'auth-login' };
   if (auth.isLoggedIn && (to.name === 'auth-login' || to.name === 'auth-register')) {

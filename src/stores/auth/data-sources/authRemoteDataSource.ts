@@ -8,6 +8,7 @@ export class RemoteAuthError extends Error {
   constructor(message: string, code = 'NETWORK_ERROR', status = 0) { super(message); this.code = code; this.status = status; }
 }
 const baseUrl = ((import.meta.env.VITE_REMOTE_WORKER_URL as string | undefined) ?? '').replace(/\/$/, '');
+const REQUEST_TIMEOUT_MS = 12_000;
 
 async function request<T>(path: string, payload?: unknown, token?: string): Promise<T> {
   let response: Response;
@@ -15,6 +16,7 @@ async function request<T>(path: string, payload?: unknown, token?: string): Prom
     response = await fetch(`${baseUrl}${path}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
       ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch { throw new RemoteAuthError('无法连接认证服务器，请检查网络后重试'); }
   const data = await response.json().catch(() => ({})) as { error?: string; message?: string };
