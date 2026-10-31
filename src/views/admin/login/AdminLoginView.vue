@@ -1,3 +1,12 @@
+<!--
+  ============================================================================
+  管理员登录页（/admin/login）
+  ============================================================================
+  为何必须独立于 AdminLayout 之外：
+  否则「守卫发现非管理员 → 打回管理员登录页」时目标页本身也在受保护布局内，
+  会形成自己踢自己的死循环。
+  与用户登录页同构：零 ref、共用壁纸与表单壳，只是 badge 与提交目的地不同。
+-->
 <script setup lang="ts">
 import { useRouter } from 'vue-router';
 import { ArrowRight, Eye, EyeOff } from '@lucide/vue';
@@ -14,12 +23,14 @@ const authStore = useAuthStore();
 const router = useRouter();
 
 async function handleSubmit() {
+  // 与用户登录同样的策略：可点 + 现场校验 + 聚焦缺失项
   if (!authStore.adminEmailInput.trim() || !authStore.adminPasswordInput) {
     authStore.setAuthError('请输入管理员账号和密码');
     document.getElementById(authStore.adminEmailInput.trim() ? 'admin-password' : 'admin-email')?.focus();
     return;
   }
   if (!authStore.turnstileToken) { authStore.setAuthError('请先完成人机安全验证'); return; }
+  // 管理员登录走 /api/auth/admin/login，action 为 admin_login
   if (await authStore.submitAdminLogin()) await router.push({ name: 'admin-users' });
 }
 </script>

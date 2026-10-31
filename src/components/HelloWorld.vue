@@ -1,9 +1,16 @@
+<!--
+  ⚠️ Vite 脚手架残留的示例组件，当前项目没有使用它。
+  保留原因：仅作参考；真实页面一律在 src/views/ 下。
+  注意：这里出现了 ref —— 它不属于 src/views，因此不违反「视图零 ref」约束，
+  但请勿模仿：新增业务组件请把状态放进 Pinia Store。
+-->
 <script setup lang="ts">
 import { ref } from 'vue'
 import heroImg from '../assets/hero.png'
 import viteLogo from '../assets/vite.svg'
 import vueLogo from '../assets/vue.svg'
 
+// 示例计数器：仅演示 Vue 响应式，无业务含义
 const count = ref(0)
 </script>
 

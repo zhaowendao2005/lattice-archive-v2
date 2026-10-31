@@ -1,3 +1,12 @@
+<!--
+  ============================================================================
+  用户表格（VXE Table）
+  ============================================================================
+  注意两点：
+  · 样式全部通过 CSS 变量映射到设计令牌（下方 <style> 块），
+    不得使用 vxe-table 自带的硬编码颜色，否则暗色模式会发白；
+  · 排序是“远程排序”（sort-config.remote），翻页/排序都交给 Store 重新请求。
+-->
 <script setup lang="ts">
 import { VxeTable } from 'vxe-table/es/table';
 import { VxeColumn } from 'vxe-table/es/column';
@@ -8,11 +17,14 @@ import type { VxeTableDefines } from 'vxe-table';
 import { Button } from '@/components/ui/button';
 import { useAdminUsersStore } from '@/stores/admin/stores/adminUsersStore';
 const store = useAdminUsersStore();
+// VXE 的中文包只注册一次（VxeUI 是全局单例）
 if (!VxeUI.hasLanguage('zh-CN')) {
   VxeUI.setI18n('zh-CN', zhCN);
   VxeUI.setLanguage('zh-CN');
 }
+// VXE 返回的时间戳是毫秒，统一按中文本地格式展示
 const formatDate = (value: number) => new Date(value).toLocaleString('zh-CN', { hour12: false });
+// 表头排序 → 交给 Store（字段白名单与方向归一都在 Store/服务端完成）
 const handleSort = ({ field, order }: VxeTableDefines.SortChangeEventParams) => store.setSort(field, order);
 </script>
 

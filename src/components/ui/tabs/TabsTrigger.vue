@@ -1,3 +1,9 @@
+/**
+ * 单个页签触发器
+ * 选中态由 reka-ui 写入 data-active，样式完全靠 data-active:* 变体驱动，
+ * 组件内部不维护任何「是否选中」的布尔量（符合视图零状态约束）。
+ * line 变体下，选中项底部会多出一条 2px 指示线（after: 伪元素）。
+ */
 <script setup lang="ts">
 import type { TabsTriggerProps } from 'reka-ui'
 import type { HTMLAttributes } from 'vue'
@@ -7,12 +13,14 @@ import { cn } from '@/lib/utils'
 
 const props = defineProps<TabsTriggerProps & { class?: HTMLAttributes['class'] }>()
 
+// 同样：class 由 cn() 处理，其余（value、disabled 等）转发给 reka-ui
 const delegatedProps = reactiveOmit(props, 'class')
 
 const forwardedProps = useForwardProps(delegatedProps)
 </script>
 
 <template>
+  <!-- 四段类名：基础排版 / line 变体去底色 / 选中态反白 / 伪元素指示线 -->
   <TabsTrigger
     data-slot="tabs-trigger"
     :class="cn(

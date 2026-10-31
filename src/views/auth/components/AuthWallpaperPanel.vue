@@ -1,3 +1,13 @@
+<!--
+  ============================================================================
+  登录页左侧壁纸面板（自动轮替 + 双层蒙版 + Ken Burns 缓推）
+  ============================================================================
+  实现要点：
+  · 四张图常驻 DOM，只切换 opacity：不会每 9s 重新下载图片，也不会重排；
+  · 进度条用纯 CSS 动画，JS 只负责切换下标（避免 60fps 的响应式更新）；
+  · 鼠标进入时暂停轮替，离开后恢复；
+  · 每张图绑定了 object-position，cover 裁切时不会把塔尖/灭点切掉。
+-->
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted } from 'vue';
 import { useWallpaperStore } from '@/stores/auth/stores/wallpaperStore';
@@ -21,8 +31,8 @@ const veilStyle = computed(() => {
   };
 });
 
-onMounted(() => store.start());
-onBeforeUnmount(() => store.stop());
+onMounted(() => store.start());      // 进入页面开始轮替
+onBeforeUnmount(() => store.stop()); // 离开时停掉定时器，避免后台空转
 </script>
 
 <template>
@@ -33,6 +43,7 @@ onBeforeUnmount(() => store.stop());
     @pointerleave="store.setAutoPlay(true)"
   >
     <!-- 壁纸层：四层常驻，仅切换透明度，不产生重排与二次加载 -->
+    <!-- <picture> + source：>=1024px 用竖图 panel-*，窄屏用横图 band-*，主体不会被裁空 -->
     <div class="absolute inset-0">
       <div
         v-for="(w, i) in store.all"

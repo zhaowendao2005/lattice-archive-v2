@@ -1,3 +1,20 @@
+/**
+ * ============================================================================
+ * 本地 Telegram Worker（独立线程运行 GramJS，主线程永不接触 auth_key）
+ * ============================================================================
+ * 为什么要 Worker：
+ *   1. GramJS 会长时间保持 WebSocket 并做大量加解密，放主线程会卡 UI；
+ *   2. session 字符串（≈账户控制权）只存在于本线程与本地加密仓库，不经过任何远端。
+ *
+ * 通信协议：主线程 postMessage(TgCommand) → 本文件 handle() 分发 →
+ *           回传 TgEvent（见 ./protocol.ts）。
+ *
+ * 生命周期两套客户端：
+ *   · client      ：已授权的在线会话（同一时刻只允许一个）；
+ *   · loginClient ：登录中的临时客户端（关闭登录弹窗只销毁它，不影响在线会话）。
+ *
+ * 必须最先 import polyfills：GramJS 在模块求值阶段就用 Buffer / window / process。
+ */
 // 必须最先求值：GramJS 在模块初始化阶段就使用 Buffer。
 import './polyfills';
 import { TelegramClient } from 'telegram';
@@ -7,20 +24,23 @@ import { LogLevel } from 'telegram/extensions/Logger';
 import type { TgCommand, TgEvent, TgInitialUser, TgRestoreFailure } from './protocol';
 import { renderQrDataUrl } from './qr';
 import { isChatEngineHealthy, runChatRequest, setChatDebug, startChatEngine, stopChatEngine } from './chat/chatService';
-import { downloadDocument, downloadDocumentThumb, downloadPhoto, resetMediaState, type CancelToken } from './chat/mediaService';
+import { downloadAvatar, downloadDocument, downloadDocumentPart, downloadDocumentThumb, downloadPhoto, resetMediaState, type CancelToken } from './chat/mediaService';
 
 const CANCELED = 'AUTH_USER_CANCEL';
+// 文件下载进度向主线程汇报的最小间隔（毫秒），避免高频 postMessage 挤占主线程
 const PROGRESS_INTERVAL_MS = 250;
 /** 进行中的完整文件下载：requestId → 取消令牌。 */
 const cancelTokens = new Map<string, CancelToken>();
-const RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
+const RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000]; // 指数退避：最多重试 5 次
 /** gramJS 的 connect()/invoke() 均无超时；恢复旧会话或验证凭据时服务端可能不回包，必须自行兜底。 */
 const RESTORE_TIMEOUT_MS = 20_000;
 const VALIDATE_TIMEOUT_MS = 20_000;
 const DISCONNECT_TIMEOUT_MS = 5_000;
+// 瞬时错误：可重试（网络抖动、连接未初始化、迁移 DC）
 const TRANSIENT_CONNECTION_CODES = new Set(['CONNECTION_NOT_INITED', 'CONNECTION_TIMEOUT', 'NETWORK_MIGRATE', 'TIMEOUT']);
+// 致命错误：会话已废，只能重新登录（不能再重试）
 const AUTH_FATAL_CODES = new Set(['AUTH_KEY_DUPLICATED', 'AUTH_KEY_UNREGISTERED', 'SESSION_REVOKED', 'USER_DEACTIVATED']);
-
+/** 登录过程中挂起的「等主线程输入」的等候者（手机号 / 验证码 / 二步密码） */
 type Waiter = { resolve: (value: string) => void; reject: (error: Error) => void };
 
 let client: TelegramClient | null = null;
@@ -37,11 +57,13 @@ let loginTarget: string | undefined;
 let restoreInFlight: { accountId: string; promise: Promise<void | undefined> } | undefined;
 let lastQr: TgEvent | undefined;
 
+/** 向主线程发消息；transfer 用于零拷贝移交 ArrayBuffer（大文件必须走它） */
 function emit(event: TgEvent, transfer: Transferable[] = []) { self.postMessage(event, { transfer }); }
 function errorCode(error: unknown) { return String((error as { errorMessage?: string; code?: string })?.errorMessage ?? (error as { code?: string })?.code ?? (error instanceof Error ? error.message : '')).toUpperCase(); }
 function isAuthFatal(error: unknown) { const code = errorCode(error); return [...AUTH_FATAL_CODES].some((item) => code.includes(item)); }
 function isTransient(error: unknown) { const code = errorCode(error); return [...TRANSIENT_CONNECTION_CODES].some((item) => code.includes(item)) || code.includes('DISCONNECTED'); }
 function wait(ms: number) { return new Promise<void>((resolve) => setTimeout(resolve, ms)); }
+/** 统一超时包装：超时后抛一个带 code 的错误，方便上层归因 */
 function withTimeout<T>(promise: Promise<T>, ms: number, code: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error(code), { code })), ms); });
@@ -77,6 +99,10 @@ function resolveWaiter(stage: string, value: string) {
   waiter?.resolve(value);
 }
 
+/**
+ * 取消登录：序号 +1 让所有在飞的异步回调失效，并拒掉所有等候者。
+ * 特别注意：只断开 loginClient，绝不动在线的 client。
+ */
 async function cancelLogin() {
   loginGeneration += 1;
   waiters.forEach(({ reject }) => reject(new Error(CANCELED)));
@@ -89,6 +115,7 @@ async function cancelLogin() {
   try { if (pending) await withTimeout(pending.disconnect(), DISCONNECT_TIMEOUT_MS, 'DISCONNECT_TIMEOUT'); } catch { /* 忽略取消登录时的断开异常 */ }
 }
 
+/** 断开并清空当前在线会话（切号、解绑、销毁时使用） */
 async function teardownActiveSession() {
   stopChatEngine();
   const stoppedAccountId = authorizedAccountId;
@@ -101,22 +128,26 @@ async function teardownActiveSession() {
   return stoppedAccountId;
 }
 
+/** 完整拆除：先取消登录，再断开在线会话 */
 async function teardown() {
   await cancelLogin();
   return teardownActiveSession();
 }
 
+/** 停止当前会话并通知主线程（sessionStopped 携带被停掉的 accountId） */
 async function stopCurrentSession() {
   const accountId = await teardown();
   emit({ t: 'sessionStopped', accountId });
 }
 
+/** 用新客户端替换当前在线会话（切换账户时调用） */
 async function replaceActiveSessionWith(nextClient: TelegramClient) {
   const previousAccountId = await teardownActiveSession();
   if (previousAccountId) emit({ t: 'accountDisconnected', accountId: previousAccountId });
   client = nextClient;
 }
 
+/** 创建 GramJS 客户端；传入空 StringSession 即为「尚未登录」 */
 function createClient(apiId: number, apiHash: string, session: StringSession = new StringSession('')) {
   const telegram = new TelegramClient(session, apiId, apiHash, {
     connectionRetries: 3,
@@ -193,17 +224,31 @@ function attachChatEngine(telegram: TelegramClient, accountId: string) {
   );
 }
 
+/** 聊天请求统一入口：媒体走下载分支，其余走普通 RPC */
 async function handleChatRequest(command: Extract<TgCommand, { t: 'chatRequest' }>) {
   try {
     if (!client || authorizedAccountId !== command.accountId) throw Object.assign(new Error('Telegram 账户尚未连接'), { code: 'TG_NOT_CONNECTED' });
     const telegram = client;
     const request = command.request;
-    if (request.method === 'getPhoto' || request.method === 'getDocumentThumb') {
+    if (request.method === 'getAvatar' || request.method === 'getPhoto' || request.method === 'getDocumentThumb') {
       // 媒体下载走独立 DC 连接，失败不能触发主连接重连或把账户标为离线；重试交给主线程退避。
-      const file = request.method === 'getPhoto'
-        ? await downloadPhoto(telegram, request.peer, request.messageId, request.photo, request.size)
-        : await downloadDocumentThumb(telegram, request.peer, request.messageId, request.document, request.size);
+      const file = request.method === 'getAvatar'
+        ? await downloadAvatar(telegram, request.peer, request.photoId, request.dcId, request.containerPeer, request.messageId)
+        : request.method === 'getPhoto'
+          ? await downloadPhoto(telegram, request.peer, request.messageId, request.photo, request.size)
+          : await downloadDocumentThumb(telegram, request.peer, request.messageId, request.document, request.size);
       emit({ t: 'chatResponse', requestId: command.requestId, ok: true, data: file }, [file.bytes]);
+      return;
+    }
+    if (request.method === 'getDocumentPart') {
+      const token: CancelToken = { canceled: false };
+      cancelTokens.set(command.requestId, token);
+      try {
+        const part = await downloadDocumentPart(telegram, request.peer, request.messageId, request.document, request.offset, request.limit, request.size, request.mimeType, token);
+        emit({ t: 'chatResponse', requestId: command.requestId, ok: true, data: part }, [part.bytes]);
+      } finally {
+        cancelTokens.delete(command.requestId);
+      }
       return;
     }
     if (request.method === 'getDocument') {
@@ -232,6 +277,10 @@ async function handleChatRequest(command: Extract<TgCommand, { t: 'chatRequest' 
     emit({ t: 'chatResponse', requestId: command.requestId, ok: false, code: errorCode(error) || 'TG_REQUEST_FAILED', message: error instanceof Error ? error.message : 'Telegram 请求失败' });
   }
 }
+/**
+ * 授权成功后的收尾：校验目标账户 → 替换在线会话 → 挂载聊天引擎 → 回传 session。
+ * expectedUserId 用于「给已有账户重新授权」场景，防止扫了别人的码导致串号。
+ */
 async function finishAuthorization(telegram: TelegramClient, user: TgInitialUser, expectedUserId?: string) {
   if (expectedUserId && user.id !== expectedUserId) {
     try { await telegram.invoke(new Api.auth.LogOut()); } catch { /* mismatch session cleanup is best effort */ }
@@ -253,8 +302,10 @@ async function finishAuthorization(telegram: TelegramClient, user: TgInitialUser
   return true;
 }
 
+/** Worker 消息入口：所有命令异步处理，单条失败不会打断消息循环 */
 self.addEventListener('message', (event: MessageEvent<TgCommand>) => { void handle(event.data); });
 
+/** 命令分发器（switch 的替身：用提前 return 保持每个分支扁平） */
 async function handle(command: TgCommand) {
   try {
     if (command.t === 'init') { debugEnabled = command.debug === true; setChatDebug(debugEnabled); emit({ t: 'ready' }); return; }

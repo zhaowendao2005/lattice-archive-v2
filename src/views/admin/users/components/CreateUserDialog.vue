@@ -1,3 +1,9 @@
+<!--
+  新增用户弹窗
+  表单值 / 校验 / 提交态全在 adminUsersStore；本组件只负责弹窗骨架与事件转发。
+  · 请求在飞时禁止 ESC / 点遮罩关闭（避免请求成功了但界面状态错乱）；
+  · 弹窗叠在 bg-background/80 + backdrop-blur 上，不用会发白的 bg-foreground。
+-->
 <script setup lang="ts">
 import { DialogRoot, DialogPortal, DialogOverlay, DialogContent, DialogTitle, DialogDescription } from 'reka-ui';
 import { Button } from '@/components/ui/button';

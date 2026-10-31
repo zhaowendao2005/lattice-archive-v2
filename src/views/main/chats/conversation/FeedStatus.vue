@@ -1,3 +1,7 @@
+<!--
+  消息流非就绪态：loading（骨架气泡）/ waiting（等连接）/ error（带重试）/ 空会话。
+  与 SessionListState 同一思路：把多态文案集中，避免容器里分散的 v-if。
+-->
 <script setup lang="ts">
 import { Button } from '@/components/ui/button';
 import { useChatStore } from '@/stores/chat/stores/chatStore';

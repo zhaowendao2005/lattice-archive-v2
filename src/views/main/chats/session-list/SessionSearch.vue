@@ -1,3 +1,8 @@
+<!--
+  会话搜索框（受控输入）
+  说明：除了本地筛选已加载的会话，输入 @username / t.me/xxx 时
+  Store 会额外发起一次远端解析（见 chatStore.resolvePublicUsername）。
+-->
 <script setup lang="ts">
 import { Search } from '@lucide/vue';
 import { useChatStore } from '@/stores/chat/stores/chatStore';
@@ -5,6 +10,7 @@ import { useChatStore } from '@/stores/chat/stores/chatStore';
 const chatStore = useChatStore();
 
 function handleInput(event: Event) {
+  // 直接把输入写给 Store（含防抖的远端解析都在 Store 内）
   const target = event.target as HTMLInputElement;
   chatStore.setSearchKeyword(target.value);
 }

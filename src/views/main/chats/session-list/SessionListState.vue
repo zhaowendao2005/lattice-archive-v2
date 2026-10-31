@@ -1,3 +1,7 @@
+<!--
+  会话列表的“非就绪态”分支：loading / no-account / error / empty / no-match。
+  把五态集中在一个组件，避免在列表容器里堆一堆 v-if，也让文案有统一出处。
+-->
 <script setup lang="ts">
 import { MessagesSquare } from '@lucide/vue';
 import { Button } from '@/components/ui/button';

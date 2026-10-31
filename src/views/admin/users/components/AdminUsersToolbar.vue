@@ -1,3 +1,7 @@
+<!--
+  用户管理工具栏：搜索（回车提交）+ 刷新 + 新增入口。
+  搜索框是受控的（值在 Store），只有提交时才真正请求，避免每敲一个字打一次接口。
+-->
 <script setup lang="ts">
 import { RefreshCw, Search, UserPlus } from '@lucide/vue';
 import { Button } from '@/components/ui/button';

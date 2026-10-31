@@ -1,3 +1,10 @@
+<!--
+  ============================================================================
+  账户菜单（侧栏底部向上弹出的浮层）
+  ============================================================================
+  放在 layout/ 下而不是 components/ui：它属于「工作区外壳」的业务部件，
+  内部直接读取 authStore 完成登出与管理员跳转，所以不进通用组件库。
+-->
 <script setup lang="ts">
 import { LogOut, ShieldCheck } from '@lucide/vue';
 import { useRouter } from 'vue-router';
@@ -17,10 +24,12 @@ const router = useRouter();
 
 function goToAdminLogin() {
   authStore.closeAccountMenu();
+  // 普通用户跳管理员登录页：不登出当前会话，方便随时切回（两套会话在服务端是隔离的）
   router.push({ name: 'admin-login' });
 }
 
 function handleLogout() {
+  // logout 会先清本地再尽力通知远端，因此离线也能正常退出
   authStore.logout();
   authStore.closeAccountMenu();
   router.push({ name: 'auth-login' });

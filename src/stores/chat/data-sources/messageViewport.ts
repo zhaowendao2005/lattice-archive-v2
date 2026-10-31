@@ -11,8 +11,11 @@ const NEAR_TOP_PX = 240;
 const NEAR_BOTTOM_PX = 96;
 /** 媒体预取边距：在进入视口前约一屏开始加载，离开该范围后取消尚未开始的下载。 */
 const MEDIA_PREFETCH_MARGIN = '600px 0px';
+/** 头像预取边距：覆盖左侧会话列表、会话头、消息流群成员与查看器页眉。 */
+const AVATAR_PREFETCH_MARGIN = '160px 0px';
 
 let element: HTMLElement | null = null;
+let composerInput: HTMLInputElement | HTMLTextAreaElement | null = null;
 let mediaObserver: IntersectionObserver | null = null;
 let mediaHandler: MediaVisibilityHandler | null = null;
 /** 已登记的媒体元素 → 目标标识（`${peerKey}:${messageId}`）。 */
@@ -21,6 +24,36 @@ const mediaTargets = new Map<Element, string>();
 let playbackObserver: IntersectionObserver | null = null;
 let playbackHandler: MediaVisibilityHandler | null = null;
 const playbackTargets = new Map<Element, string>();
+/** 头像可见性观察器（以浏览器视口为根，支持多处同时展示同一 peer 头像）。 */
+let avatarObserver: IntersectionObserver | null = null;
+let avatarHandler: MediaVisibilityHandler | null = null;
+const avatarTargets = new Map<Element, string>();
+const visibleAvatarElements = new Map<string, Set<Element>>();
+
+function ensureAvatarObserver(): IntersectionObserver | null {
+  if (avatarObserver || typeof IntersectionObserver === 'undefined') return avatarObserver;
+  avatarObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      const target = avatarTargets.get(entry.target);
+      if (!target) continue;
+      updateAvatarElementVisibility(entry.target, target, entry.isIntersecting);
+    }
+  }, { root: null, rootMargin: AVATAR_PREFETCH_MARGIN });
+  return avatarObserver;
+}
+
+function updateAvatarElementVisibility(node: Element, target: string, visible: boolean) {
+  let set = visibleAvatarElements.get(target);
+  if (visible) {
+    const wasEmpty = !set || set.size === 0;
+    if (!set) { set = new Set(); visibleAvatarElements.set(target, set); }
+    set.add(node);
+    if (wasEmpty) avatarHandler?.(target, true);
+  } else if (set?.delete(node) && set.size === 0) {
+    visibleAvatarElements.delete(target);
+    avatarHandler?.(target, false);
+  }
+}
 
 function rebuildPlaybackObserver() {
   playbackObserver?.disconnect();
@@ -102,6 +135,29 @@ export const messageViewport = {
     mediaHandler?.(target, false);
   },
 
+  onAvatarVisibility(handler: MediaVisibilityHandler) { avatarHandler = handler; },
+
+  observeAvatar(node: Element, target: string | undefined) {
+    const previous = avatarTargets.get(node);
+    if (previous === target) return;
+    if (previous) {
+      avatarTargets.delete(node);
+      avatarObserver?.unobserve(node);
+      updateAvatarElementVisibility(node, previous, false);
+    }
+    if (!target) return;
+    avatarTargets.set(node, target);
+    ensureAvatarObserver()?.observe(node);
+  },
+
+  unobserveAvatar(node: Element) {
+    const target = avatarTargets.get(node);
+    if (!target) return;
+    avatarTargets.delete(node);
+    avatarObserver?.unobserve(node);
+    updateAvatarElementVisibility(node, target, false);
+  },
+
   isAttached() { return element !== null; },
 
   isNearTop() { return element ? element.scrollTop <= NEAR_TOP_PX : false; },
@@ -127,11 +183,20 @@ export const messageViewport = {
   },
 
   /** 定位到指定消息（相册内任一消息也可）；找不到返回 false，由调用方回退到贴底。用几何矩形计算，不依赖 offsetParent 层级。 */
-  scrollToMessage(messageId: number): boolean {
+  scrollToMessage(messageId: number, center = false): boolean {
     const target = element?.querySelector<HTMLElement>(`[data-message-id="${messageId}"], [data-album-ids~="${messageId}"]`);
     if (!element || !target) return false;
-    element.scrollTop += target.getBoundingClientRect().top - element.getBoundingClientRect().top - 12;
+    const paddingTop = center ? Math.max(16, Math.floor(element.clientHeight * 0.22)) : 12;
+    element.scrollTop += target.getBoundingClientRect().top - element.getBoundingClientRect().top - paddingTop;
     return true;
+  },
+
+  attachComposerInput(target: Element | null) {
+    composerInput = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement ? target : null;
+  },
+
+  focusComposerInput() {
+    composerInput?.focus();
   },
 
   /** 视口顶部第一条可见消息的 ID，用于离开会话后恢复阅读位置。 */

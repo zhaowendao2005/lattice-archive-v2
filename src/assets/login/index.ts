@@ -1,3 +1,14 @@
+/**
+ * ============================================================================
+ * 登录页壁纸素材清单
+ * ============================================================================
+ * 图片在构建期由 Vite 处理（返回带 hash 的 URL），不依赖运行时路径，
+ * 这样 Web / Electron / Capacitor 三端打包后都能正确取到资源。
+ *
+ * 每张照片需要三套裁切（见 .rules/design-system-and-tokens.md 登录页规范）：
+ *   panel-*（4:5 竖图，桌面左栏）、band-*（横图，窄屏顶部图带）、thumb-*（指示点）。
+ * 之所以分套出图而不是用 CSS 裁同一张，是为了避免「同一张图被裁出两次不同主体」。
+ */
 import panelAlley from './panel-alley.jpg';
 import panelCitic from './panel-citic.jpg';
 import panelLights from './panel-lights.jpg';
@@ -41,6 +52,7 @@ export interface LoginWallpaper {
 }
 
 export const LOGIN_WALLPAPERS: LoginWallpaper[] = [
+  // 每项文案都对应产品的一个卖点：磁贴秩序 / 本地优先 / 性能 / 跨端一致
   {
     id: 'citic',
     label: '中信大厦',

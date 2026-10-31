@@ -3,6 +3,7 @@ import { DialogClose, DialogDescription, DialogTitle } from 'reka-ui';
 import { Download, Loader2, X, ZoomIn, ZoomOut } from '@lucide/vue';
 import { useChatMediaStore } from '@/stores/chat/stores/chatMediaStore';
 import { useChatVideoStore } from '@/stores/chat/stores/chatVideoStore';
+import { vAvatarVisible } from './mediaVisible';
 import ProgressRing from './ProgressRing.vue';
 
 const media = useChatMediaStore();
@@ -11,9 +12,24 @@ const ICON_BUTTON = 'flex size-10 items-center justify-center rounded-full text-
 </script>
 
 <template>
-  <!-- 页眉：头像缩写 + 发送者 / 会话名 + 「序号 · 日期」；右侧放大 / 缩小、下载（视频带进度，可取消）、关闭 -->
+  <!-- 页眉：头像 + 发送者 / 会话名 + 「序号 · 日期」；右侧放大 / 缩小、下载（视频带进度，可取消）、关闭 -->
   <header v-if="media.viewerModel" class="flex items-center gap-3 px-4 py-2.5">
-    <span class="flex size-10 shrink-0 items-center justify-center rounded-full bg-media-control text-sm font-semibold text-media-foreground">{{ media.viewerModel.initials }}</span>
+    <span
+      :key="media.viewerModel.avatarTarget ?? media.viewerModel.title"
+      v-avatar-visible="media.viewerModel.avatarKey ? media.viewerModel.avatarTarget : undefined"
+      class="relative flex size-10 shrink-0 overflow-hidden items-center justify-center rounded-full bg-media-control text-sm font-semibold text-media-foreground"
+    >
+      <img
+        v-if="media.avatarUrl(media.viewerModel.avatarKey, media.viewerModel.avatarThumb)"
+        :src="media.avatarUrl(media.viewerModel.avatarKey, media.viewerModel.avatarThumb)"
+        :alt="media.viewerModel.title"
+        :class="[
+          'size-full object-cover',
+          !media.isAvatarLoaded(media.viewerModel.avatarKey) && media.viewerModel.avatarThumb ? 'scale-110 blur-[2px]' : ''
+        ]"
+      />
+      <span v-else>{{ media.viewerModel.initials }}</span>
+    </span>
     <div class="min-w-0 flex-1">
       <DialogTitle class="truncate text-sm font-medium text-media-foreground">{{ media.viewerModel.title }}</DialogTitle>
       <DialogDescription class="truncate text-xs tabular-nums text-media-muted">{{ media.viewerModel.position }} · {{ media.viewerModel.dateLabel }}</DialogDescription>

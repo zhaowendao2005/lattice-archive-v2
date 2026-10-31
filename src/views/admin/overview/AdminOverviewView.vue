@@ -1,3 +1,7 @@
+<!--
+  管理端系统概览页：纯展示，不调接口。
+  目的是把「管理员会话有效」与「服务端逐次鉴权」两件事明确告知运维人员。
+-->
 <script setup lang="ts">
 import { ArrowRight, KeyRound, ShieldCheck, UsersRound } from '@lucide/vue';
 import { Button } from '@/components/ui/button';

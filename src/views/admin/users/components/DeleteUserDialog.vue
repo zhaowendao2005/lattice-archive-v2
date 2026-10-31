@@ -1,3 +1,8 @@
+<!--
+  删除用户确认弹窗
+  规范要求：确认文案必须点名目标邮箱，并说明“远端会话同时失效、不可撤销”。
+  删除按钮用 destructive 变体（文字色 text-destructive，不靠锁色）。
+-->
 <script setup lang="ts">
 import { DialogRoot, DialogPortal, DialogOverlay, DialogContent, DialogTitle, DialogDescription } from 'reka-ui';
 import { Button } from '@/components/ui/button';

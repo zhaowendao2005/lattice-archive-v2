@@ -1,3 +1,14 @@
+<!--
+  ============================================================================
+  工作区外壳（/workspace 下所有页面的公共骨架）
+  ============================================================================
+  结构：左侧 AppSidebar（可折叠）+ 右侧白色内容面板（RouterView）。
+  注意：
+  · 这里的 KeepAlive 会让聊天/设置页面在切换后保留状态，因此子页不应假设
+    卸载时就会清理定时器（清理写在 onBeforeUnmount 里同样会执行）；
+  · 窄屏（<1024px）侧栏变成抽屉，用一个遮罩层模拟点击外部关闭；
+  · 侧栏折叠状态放在 appStore，会话列表折叠放在 chatStore（两者粒度不同）。
+-->
 <script setup lang="ts">
 import { watch } from 'vue';
 import { useMediaQuery } from '@vueuse/core';
@@ -9,13 +20,15 @@ import AppSidebar from './AppSidebar.vue';
 const appStore = useAppStore();
 const authStore = useAuthStore();
 const chatStore = useChatStore();
-const isCompactWidth = useMediaQuery('(width < 1024px)');
-const isNarrowWidth = useMediaQuery('(width < 768px)');
+const isCompactWidth = useMediaQuery('(width < 1024px)'); // 平板竖屏/手机：侧栏变抽屉
+const isNarrowWidth = useMediaQuery('(width < 768px)');   // 手机：会话列表也收起
 
 // 工作区级引导（在子页面挂载前执行）：恢复本机 Telegram 连接并加载该用户的聊天缓存。
+// 放在 AppLayout 而不是 ChatsView，是为了让「设置页」等其它子页也能提前完成连接。
 if (authStore.user) chatStore.initialize(authStore.user.id);
 
 // 仅在跨越断点时自动折叠，窄屏内仍允许用户手动展开。
+// 记住跨越前的状态，回到宽屏时原样恢复，避免用户手动展开/收起的结果被覆盖。
 let sidebarCollapsedBeforeCompact = appStore.isSidebarCollapsed;
 let sessionListCollapsedBeforeNarrow = chatStore.isSessionListCollapsed;
 
@@ -39,7 +52,9 @@ watch(isNarrowWidth, (narrow) => {
 </script>
 
 <template>
+  <!-- 整体锁定视口高度（h-screen + overflow-hidden），滚动只发生在内部子区域 -->
   <div class="relative h-screen min-h-0 w-screen flex bg-background text-foreground antialiased pt-[var(--safe-top)] pb-[var(--safe-bottom)] overflow-hidden">
+    <!-- 窄屏抽屉打开时的遮罩：点击即收起侧栏 -->
     <button
       v-if="isCompactWidth && !appStore.isSidebarCollapsed"
       type="button"
@@ -48,6 +63,7 @@ watch(isNarrowWidth, (narrow) => {
       @click="appStore.setSidebarCollapsed(true)"
     />
     <div class="relative w-15 shrink-0 min-[1024px]:w-auto">
+      <!-- 宽屏：普通列（宽度由自身 w-15 / w-72 控制）；窄屏：绝对定位抽屉 -->
       <AppSidebar
         :class="[
           'h-full bg-background',

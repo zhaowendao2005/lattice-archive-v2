@@ -18,12 +18,13 @@ import { chatPreferences } from '../data-sources/chatPreferences';
 import { messageViewport } from '../data-sources/messageViewport';
 import { TgChatRequestError } from '@/stores/telegram/data-sources/mtprotoBridge';
 import type { AutoDownloadPrefs, FeedPhoto, MediaEntry, TgMediaFile, TgMessageDto, TgPeerKey, TgPeerRef, TgPhotoInfo, TgPhotoSize } from '../types';
-import { formatDateTime, initialsOf, mediaTarget, parseMediaTarget, photoKey, previewSizeOf, videoPreviewOf } from './chatModel';
+import { avatarKey, formatDateTime, initialsOf, mediaTarget, parseMediaTarget, photoKey, previewSizeOf, videoPreviewOf } from './chatModel';
 
 const PRIORITY_VIEWER = 30;
 const PRIORITY_MANUAL = 20;
 const PRIORITY_VISIBLE = 10;
 const PRIORITY_NEIGHBOR = 5;
+const PRIORITY_AVATAR = 3;
 const RETRYABLE_PATTERNS = ['TIMEOUT', 'DISCONNECT', 'CONNECTION', 'NETWORK'];
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 4;
@@ -37,12 +38,44 @@ const DRAG_THRESHOLD = 6;
 let initialized = false;
 let mediaGeneration = 0;
 const visibleTargets = new Set<string>();
+const visibleAvatarTargets = new Set<string>();
 const pointers = new Map<number, { x: number; y: number }>();
 let gesture: { kind: 'pan' | 'swipe' | 'pinch'; startX: number; startY: number; originX: number; originY: number; distance: number; scale: number; moved: boolean } | null = null;
 let suppressClick = false;
 
 export interface MessageRef { peerKey: TgPeerKey; message: TgMessageDto }
 interface ImageRequest { key: string; spoiler: boolean; fetch: (accountId: string, peer: TgPeerRef, messageId: number) => Promise<TgMediaFile> }
+interface AvatarRequest { key: string; fetch: (accountId: string) => Promise<TgMediaFile> }
+
+function peerRefFromKey(key: TgPeerKey): TgPeerRef | null {
+  const match = /^(user|chat|channel)-(\d+)$/.exec(key);
+  return match ? { type: match[1] as TgPeerRef['type'], id: match[2] } : null;
+}
+
+function resolveAvatarRequest(target: string): AvatarRequest | null {
+  const chat = useChatStore();
+  const parsed = parseMediaTarget(target);
+  if (parsed) {
+    const message = chat.windows[parsed.peerKey]?.messages.find((item) => item.id === parsed.messageId);
+    const avatar = message?.senderAvatar;
+    const senderKey = message?.senderKey;
+    if (!message || !avatar || !senderKey) return null;
+    const senderPeer = chat.dialogs[senderKey]?.peer ?? peerRefFromKey(senderKey);
+    const containerPeer = chat.peerRefOf(parsed.peerKey) ?? undefined;
+    if (!senderPeer) return null;
+    return {
+      key: avatarKey(senderKey, avatar),
+      fetch: (accountId) => chatDataSource.getAvatar(accountId, senderPeer, avatar.photoId, avatar.dcId, containerPeer, message.id),
+    };
+  }
+  const dialog = chat.dialogs[target] ?? (chat.resolvedDialog?.key === target ? chat.resolvedDialog : undefined);
+  if (!dialog?.avatar) return null;
+  const avatar = dialog.avatar;
+  return {
+    key: avatarKey(dialog.key, avatar),
+    fetch: (accountId) => chatDataSource.getAvatar(accountId, dialog.peer, avatar.photoId, avatar.dcId),
+  };
+}
 
 function isRetryable(error: unknown) {
   const raw = `${error instanceof TgChatRequestError ? error.code : ''} ${error instanceof Error ? error.message : ''}`.toUpperCase();
@@ -93,6 +126,9 @@ export interface MediaViewerModel {
   caption: string;
   title: string;
   initials: string;
+  avatarTarget?: string;
+  avatarKey?: string;
+  avatarThumb?: string;
   dateLabel: string;
   position: string;
   hasPrev: boolean;
@@ -139,11 +175,19 @@ export const useChatMediaStore = defineStore('chatMedia', {
       if (!message?.media) return null;
       const dialog = useChatStore().dialogs[viewer.peerKey];
       const title = message.senderName || dialog?.title || '媒体';
+      const senderAvatar = message.senderAvatar && message.senderKey
+        ? { target: mediaTarget(viewer.peerKey, message.id), key: avatarKey(message.senderKey, message.senderAvatar), thumb: message.senderAvatar.thumb }
+        : dialog?.avatar
+          ? { target: dialog.key, key: avatarKey(dialog.key, dialog.avatar), thumb: dialog.avatar.thumb }
+          : undefined;
       const base = {
         target: mediaTarget(viewer.peerKey, message.id),
         caption: message.text,
         title,
         initials: initialsOf(dialog?.title ?? title),
+        avatarTarget: senderAvatar?.target,
+        avatarKey: senderAvatar?.key,
+        avatarThumb: senderAvatar?.thumb,
         dateLabel: formatDateTime(message.date),
         position: `${index + 1} / ${items.length}`,
         hasPrev: index > 0,
@@ -194,6 +238,7 @@ export const useChatMediaStore = defineStore('chatMedia', {
       initialized = true;
       const chat = useChatStore();
       messageViewport.onMediaVisibility((target, visible) => this.handleVisibility(target, visible));
+      messageViewport.onAvatarVisibility((target, visible) => this.handleAvatarVisibility(target, visible));
       chatMediaLoader.onEvict((key) => {
         if (this.entries[key]) delete this.entries[key];
         else useChatVideoStore().handleEvict(key);
@@ -216,6 +261,7 @@ export const useChatMediaStore = defineStore('chatMedia', {
       useChatVideoStore().reset();
       chatMediaLoader.reset();
       visibleTargets.clear();
+      visibleAvatarTargets.clear();
       this.entries = {};
       this.revealed = {};
       this.manual = {};
@@ -254,6 +300,59 @@ export const useChatMediaStore = defineStore('chatMedia', {
       return previewKey ? this.entries[previewKey]?.url : undefined;
     },
 
+    /** 获取头像图片 URL：优先使用已加载的 160×160 清晰头像，未就绪时回退到随实体下发的 strippedThumb。 */
+    avatarUrl(key?: string, thumb?: string): string | undefined {
+      return (key ? this.entries[key]?.url : undefined) ?? thumb;
+    },
+
+    isAvatarLoaded(key?: string): boolean {
+      return Boolean(key && this.entries[key]?.url);
+    },
+
+    handleAvatarVisibility(target: string, visible: boolean) {
+      const request = resolveAvatarRequest(target);
+      if (!visible) {
+        visibleAvatarTargets.delete(target);
+        if (request && this.entries[request.key]?.status === 'queued' && chatMediaLoader.cancel(request.key)) {
+          delete this.entries[request.key];
+        }
+        return;
+      }
+      visibleAvatarTargets.add(target);
+      if (!request) return;
+      if (this.entries[request.key]?.status === 'ready') { chatMediaLoader.touch(request.key); return; }
+      this.requestAvatar(request);
+    },
+
+    requestAvatar(request: AvatarRequest) {
+      const chat = useChatStore();
+      const accountId = chat.accountId;
+      const ownerId = chat.ownerId;
+      const key = request.key;
+      const current = this.entries[key];
+      if (!accountId || !ownerId || current?.status === 'ready' || current?.status === 'loading') return;
+      if (current?.status !== 'queued') this.entries[key] = { status: 'queued' };
+      const generation = mediaGeneration;
+      const scope = chatMediaCache.scopeOf(ownerId, accountId);
+      const fetch = async () => {
+        const cached = await chatMediaCache.read(scope, key);
+        if (cached) return cached;
+        if (!chat.isOnline) throw new MediaCanceledError();
+        if (generation === mediaGeneration && this.entries[key]?.status === 'queued') this.entries[key] = { status: 'loading' };
+        const file = await request.fetch(accountId);
+        void chatMediaCache.write(scope, key, file.bytes, file.mimeType);
+        return new Blob([file.bytes], { type: file.mimeType });
+      };
+      chatMediaLoader.load(key, { priority: PRIORITY_AVATAR, fetch, isRetryable }).then(
+        (url) => { if (generation === mediaGeneration) this.entries[key] = { status: 'ready', url }; },
+        (error: unknown) => {
+          if (generation !== mediaGeneration) return;
+          if (error instanceof MediaCanceledError) { if (this.entries[key]?.status !== 'ready') delete this.entries[key]; return; }
+          this.entries[key] = { status: 'error', error: chatDataSource.readError(error) };
+        },
+      );
+    },
+
     /** 进入预取范围：按自动下载策略请求预览图（GIF / 圆形视频另由视频 Store 决定是否预载）；离开：取消尚未开始的下载。 */
     handleVisibility(target: string, visible: boolean) {
       useChatVideoStore().handleVisibility(target, visible);
@@ -278,6 +377,11 @@ export const useChatMediaStore = defineStore('chatMedia', {
         const request = ref ? previewRequestOf(ref.message) : null;
         if (request && this.entries[request.key]?.status === 'error') delete this.entries[request.key];
         this.handleVisibility(target, true);
+      });
+      visibleAvatarTargets.forEach((target) => {
+        const request = resolveAvatarRequest(target);
+        if (request && this.entries[request.key]?.status === 'error') delete this.entries[request.key];
+        this.handleAvatarVisibility(target, true);
       });
     },
 

@@ -1,11 +1,24 @@
+<!--
+  ============================================================================
+  侧栏导航项（纯展示原子组件）
+  ============================================================================
+  无状态：active / collapsed / badge 全部由父级传入。
+  注意：它不是 <a>，而是 <button>，因为父级用 RouterLink 的 custom 模式包裹并
+  在 @click 里调用 navigate()；这样既能沿用统一视觉，又保留路由语义。
+-->
 <script setup lang="ts">
 import type { Component } from 'vue';
 
 const props = defineProps<{
+  /** 图标组件（lucide） */
   icon: Component;
+  /** 中文标签 */
   label: string;
+  /** 侧栏是否折叠：折叠时只留图标 */
   collapsed: boolean;
+  /** 是否为当前路由 */
   active?: boolean;
+  /** 右侧角标文本（如未读数） */
   badge?: string | number;
 }>();
 </script>

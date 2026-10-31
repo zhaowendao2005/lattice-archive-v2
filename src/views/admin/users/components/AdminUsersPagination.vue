@@ -1,8 +1,13 @@
+<!--
+  分页器：页码 / 每页条数均写回 Store，翻页由 Store 统一处理越界与加载态。
+  这里的 disabled 只用于“不可翻页”的导航按钮，不涉及主提交按钮（规范允许）。
+-->
 <script setup lang="ts">
 import { ChevronLeft, ChevronRight } from '@lucide/vue';
 import { Button } from '@/components/ui/button';
 import { useAdminUsersStore } from '@/stores/admin/stores/adminUsersStore';
 const store = useAdminUsersStore();
+// select 的 value 是字符串，需要显式转成 number 再交给 Store
 const changePageSize = (event: Event) => store.setPageSize(Number((event.target as HTMLSelectElement).value));
 </script>
 

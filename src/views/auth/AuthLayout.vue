@@ -1,3 +1,10 @@
+<!--
+  ============================================================================
+  鉴权域外壳（/auth/login 与 /auth/register 共用）
+  ============================================================================
+  左：壁纸面板（AuthWallpaperPanel）；右：表单壳（AuthFormShell）；中间一条发光发丝线。
+  这套版式是设计令牌的唯一例外：允许图片作背景，但表单必须放在纯色面板上。
+-->
 <script setup lang="ts">
 import AuthFormShell from './components/AuthFormShell.vue';
 import AuthWallpaperPanel from './components/AuthWallpaperPanel.vue';
@@ -23,6 +30,7 @@ import AuthWallpaperPanel from './components/AuthWallpaperPanel.vue';
       />
     </div>
 
+    <!-- 表单壳：品牌头 + 可滚动正文 + 页脚；子路由在这里切换 -->
     <AuthFormShell class="min-h-0 flex-1">
       <Transition name="auth-page" mode="out-in">
         <RouterView />

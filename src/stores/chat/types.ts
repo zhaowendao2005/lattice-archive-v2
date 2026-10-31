@@ -1,9 +1,14 @@
 /**
  * 聊天业务域类型：Worker DTO 的再导出 + Store 内部状态结构 + 视图模型。
  */
-import type { TgDialogDto, TgMessageDto, TgPeerKey, TgUpdatesState } from '@/worker/local/chatProtocol';
+import type { TgDialogDto, TgInlineButton, TgMessageDto, TgPeerKey, TgUpdatesState } from '@/worker/local/chatProtocol';
 
-export type { TgChatUpdate, TgDialogCursor, TgDialogDto, TgDocumentLocation, TgMediaFile, TgMessageDto, TgPeerKey, TgPeerRef, TgPhotoInfo, TgPhotoLocation, TgPhotoSize, TgUpdatesState, TgVideoInfo, TgVideoQuality } from '@/worker/local/chatProtocol';
+export type {
+  TgAvatarInfo, TgCallbackAnswer, TgChatUpdate, TgDialogCursor, TgDialogDto, TgDocumentLocation, TgDocumentPart,
+  TgEntityKind, TgInlineButton, TgInlineButtonKind, TgInvitePreview, TgJoinChatResult, TgMediaFile,
+  TgMessageDto, TgMessageEntity, TgPeerKey, TgPeerRef, TgPhotoInfo, TgPhotoLocation, TgPhotoSize,
+  TgReplyInfo, TgUpdatesState, TgVideoInfo, TgVideoQuality, TgWebPagePreview,
+} from '@/worker/local/chatProtocol';
 
 /** 媒体加载状态：按「照片 ID + 尺寸档位」索引，Object URL 只在内存中存在。 */
 export interface MediaEntry {
@@ -80,6 +85,8 @@ export interface ChatCacheSnapshot {
   updatesState: TgUpdatesState | null;
   dialogs: TgDialogDto[];
   pinnedOrder: TgPeerKey[];
+  archivePinnedOrder?: TgPeerKey[];
+  hasArchivedChats?: boolean;
   windows: Record<TgPeerKey, { messages: TgMessageDto[]; hasOlder: boolean }>;
   recentChatKeys: TgPeerKey[];
   activeChatKey: TgPeerKey | null;
@@ -90,12 +97,16 @@ export interface SessionListItem {
   key: TgPeerKey;
   title: string;
   initials: string;
+  avatarKey?: string;
+  avatarThumb?: string;
   preview: string;
   timeLabel: string;
   unreadCount: number;
   unreadMark: boolean;
   muted: boolean;
   pinned: boolean;
+  folderId: 0 | 1;
+  canArchive: boolean;
   kindLabel: string;
 }
 
@@ -127,23 +138,82 @@ export type FeedVisual = FeedPhoto;
 export interface FeedVideoFile { target: string; fileName: string; metaLabel: string; thumb?: string; previewKey: string; playable: boolean }
 /** 圆形视频消息。 */
 export interface FeedRound { target: string; previewKey: string; thumb?: string; durationLabel: string; duration: number }
+
+/** 富文本片段（按 UTF-16 实体切分后的最小内联渲染单元）。 */
+export interface RichTextSegment {
+  text: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strike?: boolean;
+  code?: boolean;
+  pre?: boolean;
+  language?: string;
+  spoiler?: boolean;
+  spoilerKey?: string;
+  link?: {
+    kind: 'url' | 'mention' | 'mentionName' | 'botCommand' | 'hashtag';
+    target: string;
+  };
+}
+
+/** 富文本块：普通段落或带左侧竖线的引用块（Blockquote）。 */
+export interface RichTextBlock {
+  kind: 'paragraph' | 'blockquote';
+  collapsed?: boolean;
+  segments: RichTextSegment[];
+}
+
+/** 气泡顶部的回复引用卡片视图模型。 */
+export interface FeedReplyPreview {
+  messageId: number;
+  senderName: string;
+  text: string;
+}
+
+/** 气泡内的网页链接预览卡片视图模型。 */
+export interface FeedWebPage {
+  url: string;
+  displayUrl: string;
+  siteName?: string;
+  title?: string;
+  description?: string;
+  thumb?: string;
+}
+
+/** Telegram 链接解析结果（6 类跳转目标）。 */
+export type ParsedTelegramLink =
+  | { kind: 'botStart'; username: string; startParam: string }
+  | { kind: 'publicMessage'; username: string; messageId: number }
+  | { kind: 'privateMessage'; channelId: string; messageId: number }
+  | { kind: 'invite'; hash: string }
+  | { kind: 'username'; username: string }
+  | { kind: 'external'; url: string };
+
 export interface FeedMessageItem {
   type: 'message';
   key: string;
   id: number;
   out: boolean;
   text: string;
+  richBlocks?: RichTextBlock[];
   mediaLabel?: string;
   /** 单图或相册（同一 groupedId 的连续照片 / 视频合并为一个气泡）。 */
   photos?: FeedPhoto[];
   videoFile?: FeedVideoFile;
   round?: FeedRound;
+  webPage?: FeedWebPage;
   /** 相册包含的全部消息 ID，供阅读锚点定位。 */
   albumIds?: number[];
   /** 相册网格列数（2 或 3）。 */
   albumColumns?: 2 | 3;
   senderName?: string;
   senderInitials: string;
+  senderAvatarTarget?: string;
+  senderAvatarKey?: string;
+  senderAvatarThumb?: string;
+  /** 频道署名或群内自定义头衔（显示在发送者昵称右侧）。 */
+  postAuthor?: string;
   /** 群组会话：入站消息左侧保留头像列。 */
   inGroup: boolean;
   /** 群组中同一发送者连续消息只在首条展示头像与昵称。 */
@@ -152,6 +222,9 @@ export interface FeedMessageItem {
   edited: boolean;
   forwardedFrom?: string;
   replyToId?: number;
+  replyPreview?: FeedReplyPreview;
+  replyMarkup?: TgInlineButton[][];
+  repliesCount?: number;
   readState?: 'sent' | 'read';
 }
 export type FeedItem = FeedDayItem | FeedServiceItem | FeedMessageItem;

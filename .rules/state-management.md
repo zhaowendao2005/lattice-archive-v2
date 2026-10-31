@@ -27,17 +27,18 @@ src/stores/
 ├── chat/                          # 核心业务域：Telegram 会话与消息（只读，已接线真实数据）
 │   ├── types.ts                   # Worker DTO 再导出、消息窗口、冷启动快照、视图模型、媒体与播放器状态
 │   ├── data-sources/
-│   │   ├── chatDataSource.ts     # 经 MTProto Bridge 调本地 Worker：会话分页 / 历史分页 / 补差 / 媒体下载与取消
+│   │   ├── chatDataSource.ts     # 经 MTProto Bridge 调本地 Worker：会话分页 / 历史分页 / 补差 / 归档 / 加入退出 / 媒体下载与取消
 │   │   ├── chatCacheStore.ts     # 冷启动快照：设备密钥 AES-GCM 加密后写 IndexedDB，按「Lattice 用户:TG 账户」隔离
 │   │   ├── chatMediaCache.ts     # 媒体持久缓存：AES-GCM 加密 Cache Storage（单条 ≤ 20 MiB）
 │   │   ├── chatMediaLoader.ts    # 双车道下载器：图片（并发 3 / 400 条 LRU）+ 视频（并发 2 / 256 MB LRU + pin + abort）
 │   │   ├── chatPreferences.ts    # 自动下载策略、GIF/圆视频自动播放开关、播放器音量与倍速持久化
-│   │   ├── messageViewport.ts    # 消息流滚动容器句柄 + 预取（600px）与自动播放（50% 可见）IntersectionObserver
+│   │   ├── messageViewport.ts    # 消息流滚动容器句柄 + 预取（600px）、头像（240px）与自动播放（50% 可见）IntersectionObserver
+│   │   ├── progressiveStream.ts  # 大视频渐进式播放桥接：注册 /sw.js、512 KiB 对齐分片、24 块内存 LRU、前 2 MiB 加密缓存
 │   │   └── videoPlayback.ts      # HTMLVideoElement 槽位单例（viewer / gif / round）、全屏、画中画与编解码探测
 │   └── stores/
-│       ├── chatStore.ts          # 会话列表、消息窗口、同步阶段、缓存调度
-│       ├── chatMediaStore.ts     # 缩略图/原图加载、统一查看器状态（旋转/缩放/胶片条）、自动下载策略
-│       ├── chatVideoStore.ts     # 视频下载进度/取消、画质切换、查看器播放控制、GIF 与圆视频单实例播放
+│       ├── chatStore.ts          # 会话列表（活动/归档）、公开用户名查找、加入/退出会话、消息窗口、同步阶段、缓存调度
+│       ├── chatMediaStore.ts     # 头像/缩略图/原图加载、统一查看器状态（旋转/缩放/胶片条）、自动下载策略
+│       ├── chatVideoStore.ts     # 视频渐进流/完整下载、画质切换、查看器播放控制、GIF 与圆视频单实例播放
 │       └── chatModel.ts          # 纯函数：窗口合并、相册聚合、画质选择、格式化、快照裁剪
 ├── auth/                          # 登录与用户认证域
 │   ├── data-sources/
@@ -120,9 +121,9 @@ Chats View（零 ref，路由参数 /workspace/chats/:chatKey 决定选中会话
 * **缓存 ≠ 已同步**：`syncPhase` 必须区分 `cache`（仅本地快照）与 `live`（已补差并刷新首页），UI 不得把缓存命中显示为已同步；
 * **窗口连续性**：消息窗口是以最新消息为右端的连续区间；`continuous=false` 的窗口禁止插入实时消息，打开时以服务器最新页校准；
 * **代次丢弃**：所有异步响应按账户代次与窗口 `epoch` 校验，过期结果直接丢弃，不得串到其他会话；
-* **只读**：当前阶段不发送消息、不调用已读 RPC，后台预载不得改变 Telegram 服务端状态。
-* **媒体分级加载**：消息 DTO 只携带照片/视频定位信息、宽高、时长、多档画质列表与内联模糊缩略图；预览图与视频封面由 `v-media-visible` 指令 → `messageViewport` 可见性回调 → `chatMediaStore` 按自动下载策略请求；普通视频不在消息流内自动下载完整文件，只在查看器中按所选画质下载，关闭查看器、翻页或切换会话时立即通过 `AbortSignal` → `chatCancel` 中止在途分片；GIF 与圆形视频由 `v-media-playing` 指令在 ≥ 50% 可见且允许自动播放（≤ 10 MB）时静音循环，点击圆形视频切换单实例有声播放；占位尺寸在下载前锁定，媒体加载不得改变气泡高度；
-* **媒体句柄与缓存**：Object URL 只由 `chatMediaLoader` 创建与回收（图片 400 条 LRU，视频 256 MB 字节預算 LRU 且活跃播放槽位 `pin` 保护，切换账户时全部 revoke），`HTMLVideoElement` 与全屏容器句柄只由 `videoPlayback` 单例持有，Store 中只存 URL 字符串与可序列化播放状态；持久缓存只走 `chatMediaCache`（设备密钥加密的 Cache Storage，按 Lattice 用户 / Telegram 账户隔离，单条 ≤ 20 MiB，授权失效时整体清除），禁止写入未加密的媒体字节。
+* **消息只读与显式会话管理**：不发送消息、不调用已读 RPC，后台预载不得改变 Telegram 服务端状态；仅用户主动触发的归档/取消归档（`folders.EditPeerFolders`）、公开 `@username` 查找（`contacts.ResolveUsername`）、加入公开频道/群组（`channels.JoinChannel`，`INVITE_REQUEST_SENT` 必须标记为 `pending` 而非已加入）与二次确认退出（`channels.LeaveChannel` / `messages.DeleteChatUser`，创建者受角色保护拒绝直接退出，且仅在 RPC 成功后清理本地状态）允许变更会话列表状态；
+* **媒体与头像分级加载**：消息与会话 DTO 携带照片/视频定位信息、头像信息（`TgAvatarInfo`）与内联模糊缩略图；头像由 `v-avatar-visible` 指令按视口可见性请求（低优先级 `PRIORITY_AVATAR = 3` + Worker 独立 `avatarPool` 并发 2）；预览图与视频封面由 `v-media-visible` 指令按自动下载策略请求；查看器视频优先走 `progressiveStream`（Service Worker `/sw.js` 拦截 Range 请求 → 512 KiB 对齐分片 `getDocumentPart` → `206 Partial Content`），不支持或解码报错时自动降级为完整 Blob 下载，关闭查看器、翻页或切换会话时立即通过 `AbortSignal` → `chatCancel` 中止在途分片；GIF 与圆形视频由 `v-media-playing` 指令在 ≥ 50% 可见且允许自动播放（≤ 10 MB）时静音循环，点击圆形视频切换单实例有声播放；占位尺寸在下载前锁定，媒体加载不得改变气泡高度；
+* **媒体句柄与缓存**：Object URL 只由 `chatMediaLoader` 创建与回收（图片 400 条 LRU，视频 256 MB 字节预算 LRU 且活跃播放槽位 `pin` 保护，切换账户时全部 revoke），`HTMLVideoElement` 与全屏容器句柄只由 `videoPlayback` 单例持有，Store 中只存 URL 字符串与可序列化播放状态；持久缓存（含渐进式视频前 2 MiB 分片）只走 `chatMediaCache`（设备密钥加密的 Cache Storage，按 Lattice 用户 / Telegram 账户隔离，单条 ≤ 20 MiB，授权失效时整体清除），禁止写入未加密的媒体字节。
 
 ### 3. Mock 类 (模拟数据规范)
 * **定位**：服务于页面前端独立开发与渲染的原型数据。

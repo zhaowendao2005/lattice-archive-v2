@@ -1,3 +1,10 @@
+<!--
+  ============================================================================
+  用户注册页
+  ============================================================================
+  与登录页同构：零 ref，所有字段/错误/提交态来自 authStore。
+  服务端只允许注册普通用户（role = user），管理员账户由 ADMIN_* 环境变量创建。
+-->
 <script setup lang="ts">
 import { useRouter } from 'vue-router';
 import { ArrowRight, Eye, EyeOff } from '@lucide/vue';
@@ -10,6 +17,7 @@ const authStore = useAuthStore();
 const router = useRouter();
 
 async function handleSubmit() {
+  // 三项预校验：缺失时先聚焦第一个不合法的字段，再展示中文错误
   if (!authStore.registerName.trim() || !authStore.registerEmail.trim() || authStore.registerPassword.length < 8) {
     authStore.setAuthError('请完整填写用户名、有效邮箱和至少 8 位密码');
     const missing = !authStore.registerName.trim() ? 'reg-name' : !authStore.registerEmail.trim() ? 'reg-email' : 'reg-password';
@@ -17,6 +25,7 @@ async function handleSubmit() {
     return;
   }
   if (!authStore.turnstileToken) { authStore.setAuthError('请先完成人机安全验证'); return; }
+  // 注册成功即已登录（服务端直接签发会话），无需再登录一次
   if (await authStore.submitRegister()) await router.push({ name: 'chats' });
 }
 </script>

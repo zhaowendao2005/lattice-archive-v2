@@ -2,7 +2,12 @@
  * chat 域纯函数：消息窗口合并、会话排序、视图模型格式化、冷启动快照裁剪。
  * 不持有状态、不访问网络或 DOM，便于 Store 保持精简并可单独推理。
  */
-import type { ChatCacheSnapshot, FeedItem, FeedPhoto, FeedRound, FeedVideoFile, MessageWindow, SessionListItem, TgDialogDto, TgMessageDto, TgPeerKey, TgPhotoInfo, TgPhotoSize, TgUpdatesState, TgVideoInfo, TgVideoQuality } from '../types';
+import type {
+  ChatCacheSnapshot, FeedItem, FeedPhoto, FeedReplyPreview, FeedRound, FeedVideoFile, FeedWebPage,
+  MessageWindow, ParsedTelegramLink, RichTextBlock, RichTextSegment, SessionListItem, TgAvatarInfo,
+  TgDialogDto, TgMessageDto, TgMessageEntity, TgPeerKey, TgPhotoInfo, TgPhotoSize, TgUpdatesState,
+  TgVideoInfo, TgVideoQuality,
+} from '../types';
 import type { TgChatKind, TgHistoryPage } from '@/worker/local/chatProtocol';
 
 /** 参考实现的会话批量为 100；消息批量大屏 60、小屏 40。 */
@@ -11,8 +16,9 @@ export const DIALOG_PAGE_SIZE = 100;
 export const MAX_DIALOG_PAGES = 30;
 export function historyPageSize() { return typeof window !== 'undefined' && window.innerWidth >= 1024 ? 60 : 40; }
 
-/** 冷启动快照的裁剪上限：会话 200 条、最近会话 20 个、每个会话最新 60 条消息。 */
+/** 冷启动快照的裁剪上限：活动会话 200 条、归档会话 20 条、最近会话 20 个、每个会话最新 60 条消息。 */
 const CACHE_DIALOG_LIMIT = 200;
+const CACHE_ARCHIVE_DIALOG_LIMIT = 20;
 const CACHE_WINDOW_LIMIT = 20;
 const CACHE_MESSAGES_PER_WINDOW = 60;
 /** 离开会话时若窗口过长则裁剪，避免长时间浏览后内存与 DOM 无限增长。 */
@@ -50,6 +56,41 @@ export function prependOlder(window: MessageWindow, page: TgHistoryPage) {
   const older = page.messages.filter((message) => message.id < oldest);
   window.messages = [...older, ...window.messages];
   window.hasOlder = page.hasOlder && older.length > 0;
+}
+
+/**
+ * 合并跨历史跳转（getHistoryAround）拉取到的上下文：
+ * - 若与当前窗口重叠，则合并去重并保持 continuous 状态；
+ * - 若不重叠（跳到了很早的历史片段），则替换为该片段并标记 continuous=false。
+ */
+export function mergeHistoryAround(window: MessageWindow, page: TgHistoryPage) {
+  const incoming = page.messages;
+  if (incoming.length === 0) return;
+  const current = window.messages;
+  if (current.length === 0) {
+    window.messages = incoming;
+    window.hasOlder = page.hasOlder;
+    window.continuous = false;
+    window.epoch += 1;
+    return;
+  }
+  const minIn = incoming[0].id;
+  const maxIn = incoming[incoming.length - 1].id;
+  const minCur = current[0].id;
+  const maxCur = current[current.length - 1].id;
+  const overlaps = maxIn >= minCur && minIn <= maxCur;
+  if (overlaps) {
+    const map = new Map<number, TgMessageDto>();
+    for (const msg of current) map.set(msg.id, msg);
+    for (const msg of incoming) map.set(msg.id, msg);
+    window.messages = [...map.values()].sort((a, b) => a.id - b.id);
+    if (minIn < minCur) window.hasOlder = page.hasOlder;
+  } else {
+    window.messages = incoming;
+    window.hasOlder = page.hasOlder;
+    window.continuous = false;
+    window.epoch += 1;
+  }
 }
 
 /** 按 ID 插入或替换，保持升序。 */
@@ -139,18 +180,257 @@ function dialogPreview(dialog: TgDialogDto): string {
   return body;
 }
 
+export function avatarKey(peerKey: TgPeerKey, avatar: TgAvatarInfo): string {
+  return `avatar:${peerKey}:${avatar.photoId}`;
+}
+
 export function toSessionItem(dialog: TgDialogDto): SessionListItem {
+  const folderId: 0 | 1 = dialog.folderId === 1 ? 1 : 0;
   return {
     key: dialog.key,
     title: dialog.title,
     initials: initialsOf(dialog.title),
+    avatarKey: dialog.avatar ? avatarKey(dialog.key, dialog.avatar) : undefined,
+    avatarThumb: dialog.avatar?.thumb,
     preview: dialogPreview(dialog),
     timeLabel: formatListTime(dialog.date),
     unreadCount: dialog.unreadCount,
     unreadMark: dialog.unreadMark,
     muted: dialog.muted,
     pinned: dialog.pinned,
+    folderId,
+    canArchive: dialog.kind !== 'self' && !dialog.left && !dialog.kicked,
     kindLabel: kindLabel(dialog.kind),
+  };
+}
+
+/**
+ * 将消息 UTF-16 文本与 entities 切分为「段落 / 引用块 (Blockquote)」+「内联富文本与链接片段 (RichTextSegment)」。
+ * JavaScript 的 string.slice(offset, offset + length) 原生按 UTF-16 代码单元寻址，与 Telegram Entity 规范完全一致。
+ */
+export function tokenizeMessageText(text: string, entities?: TgMessageEntity[], messageId = 0): RichTextBlock[] {
+  if (!text) return [];
+  const totalLen = text.length;
+  const valid = (entities ?? [])
+    .map((item) => {
+      const start = Math.max(0, Math.min(totalLen, item.offset));
+      const end = Math.max(start, Math.min(totalLen, item.offset + item.length));
+      return { ...item, offset: start, length: end - start };
+    })
+    .filter((item) => item.length > 0);
+
+  if (valid.length === 0) {
+    return [{ kind: 'paragraph', segments: [{ text }] }];
+  }
+
+  const blockquotes = valid
+    .filter((item) => item.type === 'blockquote')
+    .sort((a, b) => a.offset - b.offset || b.length - a.length);
+  const inlines = valid.filter((item) => item.type !== 'blockquote');
+
+  interface RawBlock { kind: 'paragraph' | 'blockquote'; start: number; end: number; collapsed?: boolean }
+  const rawBlocks: RawBlock[] = [];
+  let cursor = 0;
+  for (const bq of blockquotes) {
+    const start = Math.max(cursor, bq.offset);
+    const end = bq.offset + bq.length;
+    if (end <= start) continue;
+    if (start > cursor) rawBlocks.push({ kind: 'paragraph', start: cursor, end: start });
+    rawBlocks.push({ kind: 'blockquote', start, end, collapsed: bq.collapsed });
+    cursor = end;
+  }
+  if (cursor < totalLen) rawBlocks.push({ kind: 'paragraph', start: cursor, end: totalLen });
+
+  const blocks: RichTextBlock[] = [];
+  for (let idx = 0; idx < rawBlocks.length; idx += 1) {
+    const raw = rawBlocks[idx];
+    let blockStart = raw.start;
+    let blockEnd = raw.end;
+    if (raw.kind === 'paragraph') {
+      // 消除紧邻 blockquote 前后的单个换行，避免出现多余空行。
+      if (idx > 0 && rawBlocks[idx - 1].kind === 'blockquote' && text[blockStart] === '\n') blockStart += 1;
+      if (idx + 1 < rawBlocks.length && rawBlocks[idx + 1].kind === 'blockquote' && blockEnd > blockStart && text[blockEnd - 1] === '\n') blockEnd -= 1;
+      if (blockEnd <= blockStart) continue;
+    }
+
+    const blockInlines = inlines.filter((item) => item.offset < blockEnd && item.offset + item.length > blockStart);
+    if (blockInlines.length === 0) {
+      blocks.push({ kind: raw.kind, collapsed: raw.collapsed, segments: [{ text: text.slice(blockStart, blockEnd) }] });
+      continue;
+    }
+
+    const points = new Set<number>([blockStart, blockEnd]);
+    for (const item of blockInlines) {
+      points.add(Math.max(blockStart, item.offset));
+      points.add(Math.min(blockEnd, item.offset + item.length));
+    }
+    const sorted = [...points].sort((a, b) => a - b);
+    const segments: RichTextSegment[] = [];
+
+    for (let i = 0; i < sorted.length - 1; i += 1) {
+      const segStart = sorted[i];
+      const segEnd = sorted[i + 1];
+      if (segEnd <= segStart) continue;
+      const segText = text.slice(segStart, segEnd);
+      const active = blockInlines.filter((item) => item.offset <= segStart && item.offset + item.length >= segEnd);
+      const segment: RichTextSegment = { text: segText };
+
+      for (const ent of active) {
+        if (ent.type === 'bold') segment.bold = true;
+        else if (ent.type === 'italic') segment.italic = true;
+        else if (ent.type === 'underline') segment.underline = true;
+        else if (ent.type === 'strike') segment.strike = true;
+        else if (ent.type === 'code') segment.code = true;
+        else if (ent.type === 'pre') { segment.pre = true; if (ent.language) segment.language = ent.language; }
+        else if (ent.type === 'spoiler') { segment.spoiler = true; segment.spoilerKey = `${messageId}:${ent.offset}`; }
+        else if (ent.type === 'textUrl' && ent.url) segment.link = { kind: 'url', target: ent.url };
+        else if (ent.type === 'url' && !segment.link) {
+          const fullUrl = text.slice(ent.offset, ent.offset + ent.length).trim();
+          const href = /^(?:https?:\/\/|tg:\/\/)/i.test(fullUrl) ? fullUrl : `https://${fullUrl}`;
+          segment.link = { kind: 'url', target: href };
+        } else if (ent.type === 'mention' && !segment.link) {
+          const mention = text.slice(ent.offset, ent.offset + ent.length).replace(/^@/, '').trim();
+          if (mention) segment.link = { kind: 'mention', target: mention };
+        } else if (ent.type === 'mentionName' && ent.userId && !segment.link) {
+          segment.link = { kind: 'mentionName', target: `user-${ent.userId}` };
+        } else if (ent.type === 'botCommand' && !segment.link) {
+          const cmd = text.slice(ent.offset, ent.offset + ent.length).trim();
+          if (cmd) segment.link = { kind: 'botCommand', target: cmd };
+        } else if ((ent.type === 'hashtag' || ent.type === 'cashtag') && !segment.link) {
+          const tag = text.slice(ent.offset, ent.offset + ent.length).trim();
+          if (tag) segment.link = { kind: 'hashtag', target: tag };
+        }
+      }
+      segments.push(segment);
+    }
+
+    blocks.push({ kind: raw.kind, collapsed: raw.collapsed, segments });
+  }
+
+  return blocks;
+}
+
+const RESERVED_TG_PATHS = new Set(['c', 'joinchat', 'addstickers', 'addemoji', 'share', 'iv', 'proxy', 'socks', 'bg', 'boost', 'login', 'invoice']);
+
+/**
+ * 解析任意 Telegram 链接（t.me / telegram.me / tg:// / @username）为 6 类动作目标。
+ */
+export function parseTelegramLink(rawUrl: string): ParsedTelegramLink {
+  const raw = rawUrl.trim();
+  if (!raw) return { kind: 'external', url: '' };
+
+  if (raw.startsWith('@')) {
+    const username = raw.slice(1).split(/[/?#]/)[0]?.trim() ?? '';
+    if (/^[a-zA-Z][a-zA-Z0-9_]{3,31}$/.test(username)) {
+      return { kind: 'username', username };
+    }
+  }
+
+  if (/^tg:\/\//i.test(raw)) {
+    try {
+      const parsed = new URL(raw.replace(/^tg:\/\//i, 'https://tg.internal/'));
+      const host = parsed.pathname.replace(/^\/+/, '').toLowerCase();
+      if (host === 'join') {
+        const hash = parsed.searchParams.get('invite')?.trim();
+        if (hash) return { kind: 'invite', hash };
+      }
+      if (host === 'privatepost') {
+        const channelId = parsed.searchParams.get('channel')?.trim();
+        const post = Number(parsed.searchParams.get('post'));
+        if (channelId && /^\d+$/.test(channelId) && Number.isInteger(post) && post > 0) {
+          return { kind: 'privateMessage', channelId, messageId: post };
+        }
+      }
+      if (host === 'resolve') {
+        const domain = parsed.searchParams.get('domain')?.trim() ?? '';
+        if (/^[a-zA-Z][a-zA-Z0-9_]{3,31}$/.test(domain)) {
+          const start = parsed.searchParams.get('start') ?? parsed.searchParams.get('startgroup') ?? parsed.searchParams.get('startchannel');
+          if (start !== null) return { kind: 'botStart', username: domain, startParam: start };
+          const post = Number(parsed.searchParams.get('post'));
+          if (Number.isInteger(post) && post > 0) return { kind: 'publicMessage', username: domain, messageId: post };
+          return { kind: 'username', username: domain };
+        }
+      }
+    } catch {
+      return { kind: 'external', url: raw };
+    }
+  }
+
+  const normalized = /^(?:https?:\/\/)/i.test(raw) ? raw : /^(?:t\.me|telegram\.me|telegram\.dog)\//i.test(raw) ? `https://${raw}` : raw;
+  try {
+    const url = new URL(normalized);
+    const hostname = url.hostname.toLowerCase().replace(/^www\./, '');
+    if (hostname === 't.me' || hostname === 'telegram.me' || hostname === 'telegram.dog') {
+      const parts = url.pathname.split('/').filter(Boolean);
+      if (parts.length === 1 && parts[0].startsWith('+')) {
+        const hash = parts[0].slice(1).trim();
+        if (hash) return { kind: 'invite', hash };
+      }
+      if (parts.length >= 2 && parts[0].toLowerCase() === 'joinchat') {
+        const hash = parts[1].trim();
+        if (hash) return { kind: 'invite', hash };
+      }
+      if (parts.length >= 3 && parts[0].toLowerCase() === 'c' && /^\d+$/.test(parts[1])) {
+        const msgId = Number(parts[parts.length - 1]);
+        if (Number.isInteger(msgId) && msgId > 0) {
+          return { kind: 'privateMessage', channelId: parts[1], messageId: msgId };
+        }
+      }
+      if (parts.length >= 1) {
+        const candidate = parts[0];
+        if (!RESERVED_TG_PATHS.has(candidate.toLowerCase()) && /^[a-zA-Z][a-zA-Z0-9_]{3,31}$/.test(candidate)) {
+          const start = url.searchParams.get('start') ?? url.searchParams.get('startgroup') ?? url.searchParams.get('startchannel');
+          if (start !== null && parts.length === 1) {
+            return { kind: 'botStart', username: candidate, startParam: start };
+          }
+          if (parts.length >= 2) {
+            const msgId = Number(parts[parts.length - 1]);
+            if (Number.isInteger(msgId) && msgId > 0) {
+              return { kind: 'publicMessage', username: candidate, messageId: msgId };
+            }
+          }
+          if (parts.length === 1) {
+            return { kind: 'username', username: candidate };
+          }
+        }
+      }
+    }
+  } catch {
+    // 非标准 URL 按外链兜底
+  }
+
+  return { kind: 'external', url: normalized };
+}
+
+function buildReplyPreview(message: TgMessageDto, byId: Map<number, TgMessageDto>): FeedReplyPreview | undefined {
+  const replyId = message.replyTo?.id ?? message.replyToId;
+  if (!replyId) return undefined;
+  const target = byId.get(replyId);
+  const quote = message.replyTo?.quoteText?.replace(/\s+/g, ' ').trim();
+  if (target) {
+    return {
+      messageId: replyId,
+      senderName: target.senderName || (target.out ? '你' : '消息'),
+      text: quote || messagePreview(target),
+    };
+  }
+  return {
+    messageId: replyId,
+    senderName: '回复消息',
+    text: quote || `消息 #${replyId}（点击定位）`,
+  };
+}
+
+function toFeedWebPage(message: TgMessageDto): FeedWebPage | undefined {
+  const page = message.webPage;
+  if (!page) return undefined;
+  return {
+    url: page.url,
+    displayUrl: page.displayUrl,
+    siteName: page.siteName,
+    title: page.title,
+    description: page.description,
+    thumb: page.photo?.thumb,
   };
 }
 
@@ -159,6 +439,9 @@ export function buildFeed(messages: TgMessageDto[], dialog: TgDialogDto | undefi
   const items: FeedItem[] = [];
   const inGroup = dialog ? isGroupKind(dialog.kind) : false;
   const showReadState = dialog ? dialog.kind !== 'channel' && dialog.kind !== 'self' : false;
+  const byId = new Map<number, TgMessageDto>();
+  for (const item of messages) byId.set(item.id, item);
+
   let lastDay = '';
   let lastSender: string | undefined;
   for (let index = 0; index < messages.length; index += 1) {
@@ -183,6 +466,10 @@ export function buildFeed(messages: TgMessageDto[], dialog: TgDialogDto | undefi
     const albumColumns = photos.length > 1 ? layoutAlbum(photos) : undefined;
     const round = toFeedRound(message);
     const videoFile = toFeedVideoFile(message);
+    const webPage = toFeedWebPage(captioned);
+    const richBlocks = captioned.text ? tokenizeMessageText(captioned.text, captioned.entities, captioned.id) : undefined;
+    const replyPreview = buildReplyPreview(message, byId);
+    const replyMarkup = last.replyMarkup ?? message.replyMarkup;
     const showSender = inGroup && !message.out && message.senderKey !== lastSender;
     lastSender = message.senderKey;
     items.push({
@@ -191,20 +478,29 @@ export function buildFeed(messages: TgMessageDto[], dialog: TgDialogDto | undefi
       id: message.id,
       out: message.out,
       text: captioned.text,
+      richBlocks,
       mediaLabel: photos.length > 0 || round || videoFile ? undefined : message.media?.label,
       photos: photos.length > 0 ? photos : undefined,
       videoFile,
       round,
+      webPage,
       albumIds: album.length > 1 ? album.map((item) => item.id) : undefined,
       albumColumns,
       senderName: message.senderName,
       senderInitials: initialsOf(message.senderName),
+      senderAvatarTarget: showSender && message.senderAvatar && message.senderKey ? mediaTarget(message.peerKey, message.id) : undefined,
+      senderAvatarKey: showSender && message.senderAvatar && message.senderKey ? avatarKey(message.senderKey, message.senderAvatar) : undefined,
+      senderAvatarThumb: showSender ? message.senderAvatar?.thumb : undefined,
+      postAuthor: message.postAuthor,
       inGroup,
       showSender,
       timeLabel: formatClock(last.date),
       edited: album.some((item) => Boolean(item.editDate)),
       forwardedFrom: message.forwardedFrom,
       replyToId: message.replyToId,
+      replyPreview,
+      replyMarkup,
+      repliesCount: last.repliesCount ?? message.repliesCount,
       readState: message.out && showReadState && dialog ? (last.id <= dialog.readOutboxMaxId ? 'read' : 'sent') : undefined,
     });
   }
@@ -369,6 +665,8 @@ interface SnapshotSource {
   updatesState: TgUpdatesState | null;
   dialogs: Record<TgPeerKey, TgDialogDto>;
   pinnedOrder: TgPeerKey[];
+  archivePinnedOrder?: TgPeerKey[];
+  hasArchivedChats?: boolean;
   windows: Record<TgPeerKey, MessageWindow>;
   recentChatKeys: TgPeerKey[];
   activeChatKey: TgPeerKey | null;
@@ -387,14 +685,18 @@ export function buildSnapshot(source: SnapshotSource): ChatCacheSnapshot {
     const anchor = source.viewportAnchors[key];
     if (anchor && messages.some((message) => message.id === anchor)) viewportAnchors[key] = anchor;
   }
+  const activeDialogs = orderDialogs(source.dialogs, source.pinnedOrder, 0).slice(0, CACHE_DIALOG_LIMIT);
+  const archivedDialogs = orderDialogs(source.dialogs, source.archivePinnedOrder ?? [], 1).slice(0, CACHE_ARCHIVE_DIALOG_LIMIT);
   return {
     version: 2,
     ownerId: source.ownerId,
     accountId: source.accountId,
     savedAt: Date.now(),
     updatesState: source.updatesState,
-    dialogs: orderDialogs(source.dialogs, source.pinnedOrder).slice(0, CACHE_DIALOG_LIMIT),
+    dialogs: [...activeDialogs, ...archivedDialogs],
     pinnedOrder: source.pinnedOrder,
+    archivePinnedOrder: source.archivePinnedOrder,
+    hasArchivedChats: source.hasArchivedChats || archivedDialogs.length > 0,
     windows,
     recentChatKeys: source.recentChatKeys.slice(0, CACHE_WINDOW_LIMIT),
     activeChatKey: source.activeChatKey,

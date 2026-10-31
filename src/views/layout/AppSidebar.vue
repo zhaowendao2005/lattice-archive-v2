@@ -1,3 +1,13 @@
+<!--
+  ============================================================================
+  应用侧栏（品牌 / 主导航 / 折叠开关 / 账户入口）
+  ============================================================================
+  · 折叠是纯 CSS 动画（宽度 w-15 ↔ w-72，文字用 max-width + opacity 隐藏），
+    DOM 树完全不变，因此不会丢焦点/重渲染；
+  · 导航项用 RouterLink 的 custom 模式 + SidebarNavItem，
+    这样 <button> 也能拿到 isActive 与 navigate，且语义仍是链接；
+  · 账户菜单点击外部关闭：在 document 上捕获阶段监听 pointerdown。
+-->
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from 'vue';
 import { Archive, MessagesSquare, PanelLeft, Settings } from '@lucide/vue';
@@ -17,7 +27,7 @@ const textClass = computed(() => [
   appStore.isSidebarCollapsed ? 'ml-0 max-w-0 opacity-0' : 'ml-2.5 max-w-44 opacity-100',
 ]);
 
-// 账户菜单挂载在侧栏底部容器上，向上弹出
+// 账户菜单挂载在侧栏底部容器上，向上弹出；这个 ref 只用于判断「点击是否在菜单内」
 const accountAnchor = ref<HTMLElement | null>(null);
 
 // 点击侧栏外部时收起菜单（菜单内点击不触发）
@@ -46,7 +56,9 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', handlePointerD
     </div>
 
     <!-- 主导航 -->
+  <!-- 主导航：三个顶层入口，与路由表一一对应 -->
     <nav class="flex-1 overflow-y-auto px-2.5 py-1 space-y-0.5">
+      <!-- 会话：badge 显示未读会话数（静音的会话不计入） -->
       <RouterLink :to="{ name: 'chats' }" custom #default="{ navigate, isActive }">
         <SidebarNavItem
           :icon="MessagesSquare"

@@ -15,6 +15,7 @@ import { chatDataSource } from '../data-sources/chatDataSource';
 import { chatMediaLoader, MediaCanceledError } from '../data-sources/chatMediaLoader';
 import { chatPreferences } from '../data-sources/chatPreferences';
 import { messageViewport } from '../data-sources/messageViewport';
+import { progressiveStream } from '../data-sources/progressiveStream';
 import { videoPlayback, type PlaybackPatch } from '../data-sources/videoPlayback';
 import { TgChatRequestError } from '@/stores/telegram/data-sources/mtprotoBridge';
 import type { AutoplayPrefs, PlaybackState, PlayerPrefs, TgMessageDto, TgPeerKey, TgVideoInfo, TgVideoQuality, VideoEntry } from '../types';
@@ -23,6 +24,8 @@ import { chooseQuality, formatBytes, formatDuration, mediaTarget, parseMediaTarg
 const MB = 1024 * 1024;
 export const VIDEO_DIRECT_LIMIT = 100 * MB;
 export const VIDEO_CONFIRM_LIMIT = 300 * MB;
+/** 渐进式流播放启用阈值：超过 1 MiB 或标记 supportsStreaming 的视频优先走 Range 流式加载。 */
+const STREAM_MIN_SIZE = 1 * MB;
 /** GIF / 圆形视频气泡内自动预载的大小上限。 */
 const INLINE_AUTO_LIMIT = 10 * MB;
 /** 时长不超过 30 s 的视频在查看器中循环（参考实现 MAX_LOOP_DURATION）。 */
@@ -131,6 +134,12 @@ export const useChatVideoStore = defineStore('chatVideo', {
     manualInline: {} as Record<string, true>,
     /** 已下载但浏览器无法解码的视频（按视频键）：元素移除后仍保持「不支持」状态，避免反复挂载。 */
     undecodable: {} as Record<string, true>,
+    /** 渐进式流播放失败后回退到完整 Blob 下载的视频键。 */
+    streamFallback: {} as Record<string, true>,
+    /** 流式播放期间后台完整下载保存的字节进度（key → { loaded, total }）。 */
+    saveProgress: {} as Record<string, { loaded: number; total: number }>,
+    /** Service Worker 渐进式流是否就绪。 */
+    swReady: false,
     /** 切换画质后在新元素挂载时恢复的播放位置（slot → 秒）。 */
     resumeAt: {} as Record<string, number>,
     autoplay: chatPreferences.readAutoplay() as AutoplayPrefs,
@@ -167,20 +176,23 @@ export const useChatVideoStore = defineStore('chatVideo', {
       const entry = state.entries[key];
       const playback = state.playback.viewer ?? DEFAULT_PLAYBACK;
       const duration = playback.duration || ref.video.duration;
+      const canStream = state.swReady && !state.streamFallback[key] && (ref.video.supportsStreaming || quality.size >= STREAM_MIN_SIZE);
       let status: ViewerVideoModel['status'] = entry?.status ?? 'idle';
       if (!entry) {
         if (!isPlayable(quality)) status = 'unsupported';
-        else if (quality.size > VIDEO_CONFIRM_LIMIT) status = 'too-large';
-        else if (quality.size > VIDEO_DIRECT_LIMIT && !state.confirmed[target]) status = 'confirm';
+        else if (!canStream && quality.size > VIDEO_CONFIRM_LIMIT) status = 'too-large';
+        else if (!canStream && quality.size > VIDEO_DIRECT_LIMIT && !state.confirmed[target]) status = 'confirm';
       }
       if (entry?.status === 'ready' && state.undecodable[key]) status = 'unsupported';
-      const total = entry?.total || quality.size;
-      const loaded = entry?.status === 'ready' ? total : entry?.loaded ?? 0;
+      const saveProg = state.saveProgress[key];
+      const total = saveProg?.total || entry?.total || quality.size;
+      const loaded = saveProg ? saveProg.loaded : entry?.status === 'ready' ? total : entry?.loaded ?? 0;
       const current = state.seekPreview !== null ? state.seekPreview * duration : playback.currentTime;
       const options = ref.kind === 'video' && ref.video.qualities.length > 1
         ? ref.video.qualities.filter(isPlayable).map((item) => ({ id: item.id, label: qualityLabel(item), sizeLabel: formatBytes(item.size), active: item.id === quality.id }))
         : null;
       const manual = state.selectedQuality[target];
+      const isBlobReady = Boolean(entry?.status === 'ready' && entry.url?.startsWith('blob:'));
       return {
         target,
         kind: ref.kind === 'gif' ? 'gif' : ref.kind === 'file' ? 'file' : 'video',
@@ -198,7 +210,7 @@ export const useChatVideoStore = defineStore('chatVideo', {
         buffered: duration > 0 ? playback.buffered.map(([start, end]) => [(start / duration) * 100, ((end - start) / duration) * 100]) : [],
         qualities: options && options.length > 1 ? options : null,
         qualityLabel: manual ? qualityLabel(quality) : `自动（${qualityLabel(quality)}）`,
-        saving: Boolean(state.saveRequested[key]) && entry?.status !== 'ready',
+        saving: Boolean(state.saveRequested[key]) && !isBlobReady,
         fileName: ref.video.fileName || `telegram-video-${ref.message.id}.${quality.mimeType.split('/')[1] ?? 'mp4'}`,
       };
     },
@@ -214,6 +226,11 @@ export const useChatVideoStore = defineStore('chatVideo', {
         fullscreen: videoPlayback.isFullscreenSupported(),
         volume: typeof navigator === 'undefined' || !/iPhone|iPad|iPod/i.test(navigator.userAgent),
       };
+      progressiveStream.init((ready) => {
+        this.swReady = ready;
+        if (ready && useChatMediaStore().viewer) this.syncViewer();
+      });
+      this.swReady = progressiveStream.isAvailable();
       videoPlayback.onState((slot, patch) => this.handlePlayback(slot, patch));
       videoPlayback.onFullscreenChange((fullscreen) => { this.isFullscreen = fullscreen; this.pokeControls(); });
       videoPlayback.onPageVisibility((visible) => this.handlePageVisibility(visible));
@@ -229,13 +246,16 @@ export const useChatVideoStore = defineStore('chatVideo', {
       window.clearTimeout(hideTimer);
       viewerKey = null;
       playbackVisible.clear();
+      progressiveStream.reset();
       void videoPlayback.exitFullscreen();
       this.entries = {};
       this.playback = {};
       this.confirmed = {};
       this.selectedQuality = {};
       this.saveRequested = {};
+      this.saveProgress = {};
       this.undecodable = {};
+      this.streamFallback = {};
       this.manualInline = {};
       this.resumeAt = {};
       this.seekPreview = null;
@@ -251,30 +271,41 @@ export const useChatVideoStore = defineStore('chatVideo', {
       return pickQuality(this.selectedQuality, this.player, target, video);
     },
 
-    /** 请求完整视频文件（video 通道）；进度写入 entries，完成后按需自动保存。 */
+    /** 请求完整视频文件（video 通道）；进度写入 entries 或 saveProgress，完成后按需自动保存。 */
     requestVideo(ref: VideoRef, quality: TgVideoQuality, priority: number) {
       const chat = useChatStore();
       const accountId = chat.accountId;
       const peer = chat.peerRefOf(ref.peerKey);
       const key = videoFileKey(quality);
       const current = this.entries[key];
-      if (!accountId || !peer || current?.status === 'ready' || current?.status === 'loading' || current?.status === 'queued') return;
-      this.entries[key] = { status: 'queued', loaded: 0, total: quality.size };
+      const isStreaming = Boolean(current?.status === 'ready' && current.url && !current.url.startsWith('blob:'));
+      if (!accountId || !peer) return;
+      if (!isStreaming && (current?.status === 'ready' || current?.status === 'loading' || current?.status === 'queued')) return;
+      if (isStreaming && this.saveProgress[key]) return;
+      if (isStreaming) this.saveProgress[key] = { loaded: 0, total: quality.size };
+      else this.entries[key] = { status: 'queued', loaded: 0, total: quality.size };
       const taskGeneration = generation;
       const fetch = async ({ signal, onProgress }: { signal: AbortSignal; onProgress: (loaded: number, total: number) => void }) => {
         if (!chat.isOnline) throw new MediaCanceledError();
-        if (taskGeneration === generation && this.entries[key]?.status === 'queued') this.entries[key] = { status: 'loading', loaded: 0, total: quality.size };
+        if (taskGeneration === generation && !isStreaming && this.entries[key]?.status === 'queued') {
+          this.entries[key] = { status: 'loading', loaded: 0, total: quality.size };
+        }
         const file = await chatDataSource.getDocument(accountId, peer, ref.message.id, quality, { signal, onProgress });
         return new Blob([file.bytes], { type: blobTypeOf(file.mimeType) });
       };
       const onProgress = (loaded: number, total: number) => {
         if (taskGeneration !== generation) return;
+        if (this.saveProgress[key]) {
+          this.saveProgress[key] = { loaded, total };
+          return;
+        }
         const entry = this.entries[key];
         if (entry && entry.status !== 'ready') this.entries[key] = { status: 'loading', loaded, total };
       };
       chatMediaLoader.load(key, { lane: 'video', priority, fetch, isRetryable, onProgress }).then(
         (url) => {
           if (taskGeneration !== generation) return;
+          delete this.saveProgress[key];
           this.entries[key] = { status: 'ready', loaded: quality.size, total: quality.size, url };
           if (key === viewerKey) chatMediaLoader.pin(key);
           if (this.saveRequested[key]) {
@@ -285,6 +316,8 @@ export const useChatVideoStore = defineStore('chatVideo', {
         (error: unknown) => {
           if (taskGeneration !== generation) return;
           delete this.saveRequested[key];
+          delete this.saveProgress[key];
+          if (isStreaming) return;
           if (error instanceof MediaCanceledError) { if (this.entries[key]?.status !== 'ready') delete this.entries[key]; return; }
           this.entries[key] = { status: 'error', loaded: 0, total: quality.size, error: chatDataSource.readError(error) };
         },
@@ -312,7 +345,12 @@ export const useChatVideoStore = defineStore('chatVideo', {
 
     releaseViewerKey(key: string) {
       chatMediaLoader.unpin(key);
+      progressiveStream.abortStream(key);
       const entry = this.entries[key];
+      if (entry?.url && !entry.url.startsWith('blob:')) {
+        delete this.entries[key];
+        return;
+      }
       if (entry && entry.status !== 'ready' && entry.status !== 'error' && !this.saveRequested[key]) {
         chatMediaLoader.abort(key);
         delete this.entries[key];
@@ -324,8 +362,33 @@ export const useChatVideoStore = defineStore('chatVideo', {
       if (!ref || ref.kind === 'round') return;
       const quality = this.qualityFor(target, ref.video);
       const key = videoFileKey(quality);
-      if (this.entries[key]?.status === 'ready') { chatMediaLoader.pin(key); return; }
-      if (!isPlayable(quality) || quality.size > VIDEO_CONFIRM_LIMIT) return;
+      const current = this.entries[key];
+      if (current?.status === 'ready' && current.url?.startsWith('blob:')) {
+        chatMediaLoader.pin(key);
+        return;
+      }
+      if (!isPlayable(quality)) return;
+      // 阶段 7：Service Worker 已接管且非 GIF 时，优先走 Range 渐进式流播放。
+      const chat = useChatStore();
+      const peer = chat.peerRefOf(ref.peerKey);
+      const useStream = ref.kind !== 'gif'
+        && this.swReady
+        && !this.streamFallback[key]
+        && (ref.video.supportsStreaming || quality.size >= STREAM_MIN_SIZE)
+        && Boolean(chat.ownerId && chat.accountId && peer);
+      if (useStream && chat.ownerId && chat.accountId && peer) {
+        const url = progressiveStream.register(key, {
+          ownerId: chat.ownerId,
+          accountId: chat.accountId,
+          peer,
+          messageId: ref.message.id,
+          quality,
+          mimeType: blobTypeOf(quality.mimeType),
+        });
+        this.entries[key] = { status: 'ready', loaded: quality.size, total: quality.size, url };
+        return;
+      }
+      if (quality.size > VIDEO_CONFIRM_LIMIT) return;
       if (quality.size > VIDEO_DIRECT_LIMIT && !this.confirmed[target]) return;
       this.requestVideo(ref, quality, PRIORITY_VIEWER);
     },
@@ -341,7 +404,9 @@ export const useChatVideoStore = defineStore('chatVideo', {
       const model = this.viewerVideo;
       if (!model) return;
       delete this.saveRequested[model.key];
+      delete this.saveProgress[model.key];
       chatMediaLoader.abort(model.key);
+      if (this.entries[model.key]?.url?.startsWith('blob:') === false) return;
       delete this.entries[model.key];
       delete this.confirmed[model.target];
     },
@@ -356,12 +421,12 @@ export const useChatVideoStore = defineStore('chatVideo', {
       this.startViewerVideo(model.target);
     },
 
-    /** 保存视频：已下载直接保存；未下载则先下载（不受大小确认限制，但仍受 300 MB 上限保护内存）。 */
+    /** 保存视频：已下载 Blob 直接保存；流式播放或未下载时启动完整下载并在完成后触发浏览器保存。 */
     saveViewerVideo() {
       const model = this.viewerVideo;
       const ref = model ? resolveVideo(model.target) : null;
       if (!model || !ref) return;
-      if (model.url) { chatMediaLoader.saveAs(model.url, model.fileName); return; }
+      if (model.url?.startsWith('blob:')) { chatMediaLoader.saveAs(model.url, model.fileName); return; }
       if (model.saving) { this.cancelViewerDownload(); return; }
       const quality = this.qualityFor(model.target, ref.video);
       if (quality.size > VIDEO_CONFIRM_LIMIT) return;
@@ -409,7 +474,22 @@ export const useChatVideoStore = defineStore('chatVideo', {
       this.playback[slot] = next;
       if (patch.attached) { void this.onAttached(slot); return; }
       if (slot === 'viewer') {
-        if ((patch.error === 'unsupported' || patch.error === 'decode') && viewerKey) this.undecodable[viewerKey] = true;
+        if (patch.error && viewerKey) {
+          const entry = this.entries[viewerKey];
+          const isStreamUrl = Boolean(entry?.url && !entry.url.startsWith('blob:'));
+          if (isStreamUrl) {
+            // 渐进式流播放失败（如非流式封装 moov 在文件尾部异常）：自动回退一次到完整 Blob 下载。
+            const currentTime = videoPlayback.currentTime('viewer');
+            if (currentTime > 0) this.resumeAt.viewer = currentTime;
+            this.streamFallback[viewerKey] = true;
+            progressiveStream.abortStream(viewerKey);
+            delete this.entries[viewerKey];
+            const model = useChatMediaStore().viewer;
+            if (model) this.startViewerVideo(mediaTarget(model.peerKey, model.messageId));
+            return;
+          }
+          if (patch.error === 'unsupported' || patch.error === 'decode') this.undecodable[viewerKey] = true;
+        }
         if (patch.paused === false) this.pokeControls();
         if (patch.paused === true || patch.ended) this.showControls();
         if (patch.duration && this.resumeAt.viewer !== undefined) {

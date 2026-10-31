@@ -1,3 +1,13 @@
+<!--
+  ============================================================================
+  消息流滚动容器
+  ============================================================================
+  三个关键点：
+  · 滚动容器句柄交给 messageViewport 单例（视图不持有 ref）；
+  · [overflow-anchor:none]：关掉浏览器原生滚动锚定，否则会与
+    messageViewport 的「顶部插入补偿」双重修正，导致跳动；
+  · 顶部提示占固定 h-9 高度，显隐不改变布局，补偿计算才准确。
+-->
 <script setup lang="ts">
 import type { ComponentPublicInstance } from 'vue';
 import { useChatStore } from '@/stores/chat/stores/chatStore';

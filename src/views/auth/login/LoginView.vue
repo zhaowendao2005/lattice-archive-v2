@@ -1,3 +1,12 @@
+<!--
+  ============================================================================
+  用户登录页
+  ============================================================================
+  职责边界：
+  · 页面本身不持有任何状态（零 ref）：输入值、错误、提交态、人机验证令牌全在 authStore；
+  · 提交前在本地做一次「缺什么就提示什么 + 聚焦到该字段」，而不是把按钮置灰；
+  · 成功后跳 /workspace/chats，由路由守卫再确认一次登录态。
+-->
 <script setup lang="ts">
 import { useRouter } from 'vue-router';
 import { ArrowRight, Eye, EyeOff, ShieldCheck } from '@lucide/vue';
@@ -10,12 +19,15 @@ const authStore = useAuthStore();
 const router = useRouter();
 
 async function handleSubmit() {
+  // 主按钮永远可点：点击后再校验，并聚焦到第一个缺失项（项目硬约束，不用 disabled 置灰）
   if (!authStore.emailInput.trim() || !authStore.passwordInput) {
     authStore.setAuthError('请输入邮箱和密码');
     document.getElementById(authStore.emailInput.trim() ? 'login-password' : 'login-email')?.focus();
     return;
   }
+  // 人机验证令牌是一次性的；没有令牌直接提示，不发请求
   if (!authStore.turnstileToken) { authStore.setAuthError('请先完成人机安全验证'); return; }
+  // 成功后 Store 已写会话，这里只负责跳转
   if (await authStore.submitLogin()) await router.push({ name: 'chats' });
 }
 </script>
@@ -81,6 +93,7 @@ async function handleSubmit() {
       </label>
 
       <div v-if="authStore.authError" role="alert" class="rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive">{{ authStore.authError }}</div>
+      <!-- 人机验证：固定一个挂载位，具体控件由 turnstileBridge 渲染 -->
       <TurnstileWidget action="login" />
       <Button
         type="submit"

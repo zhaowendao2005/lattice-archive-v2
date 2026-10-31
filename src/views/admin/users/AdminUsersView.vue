@@ -1,3 +1,10 @@
+<!--
+  ============================================================================
+  用户管理页（管理域第一模块）
+  ============================================================================
+  页面只做“拼装”：工具栏 / 表格 / 分页 / 两个弹窗，交互全在 adminUsersStore。
+  生命周期：onMounted 拉第一页；onBeforeUnmount 调 dispose() 把在飞请求作废。
+-->
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted } from 'vue';
 import { UsersRound } from '@lucide/vue';
@@ -8,8 +15,8 @@ import AdminUsersPagination from './components/AdminUsersPagination.vue';
 import CreateUserDialog from './components/CreateUserDialog.vue';
 import DeleteUserDialog from './components/DeleteUserDialog.vue';
 const store = useAdminUsersStore();
-onMounted(() => { void store.load(); });
-onBeforeUnmount(() => store.dispose());
+onMounted(() => { void store.load(); });      // 进入页面加载第一页
+onBeforeUnmount(() => store.dispose());      // 离开时 requestVersion+1，丢弃飞行中的响应
 </script>
 
 <template>

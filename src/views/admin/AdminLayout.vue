@@ -1,3 +1,10 @@
+<!--
+  ============================================================================
+  管理域外壳（/admin/users、/admin/overview 共用）
+  ============================================================================
+  顶部横向导航 + 全屏内容区；与工作区外壳不同，这里是“文档式”布局（整页滚动），
+  因为管理表格需要尽可能多的横向空间。
+-->
 <script setup lang="ts">
 import { useRouter } from 'vue-router';
 import { LogOut, ShieldCheck } from '@lucide/vue';
@@ -5,6 +12,7 @@ import { Button } from '@/components/ui/button';
 import { useAuthStore } from '@/stores/auth/stores/authStore';
 const auth = useAuthStore();
 const router = useRouter();
+/** 退出后回到管理员登录页（而不是用户登录页） */
 async function logout() { await auth.logout(); await router.replace({ name: 'admin-login' }); }
 </script>
 

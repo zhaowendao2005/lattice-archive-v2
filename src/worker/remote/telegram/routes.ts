@@ -1,8 +1,23 @@
+/**
+ * ============================================================================
+ * Telegram 绑定路由（/api/tg/*）
+ * ============================================================================
+ * 入口先用 requireUser 做「普通用户会话校验」，再用 session.user_id 作为后续
+ * 所有查询的所有者条件——客户端传来的 userId 一律不信任。
+ *
+ * 接口速查：
+ *   GET/PUT/DELETE /api/tg/credentials          应用凭据读写（DELETE 支持 cascade=1）
+ *   GET/POST       /api/tg/accounts             账号列表 / 绑定
+ *   DELETE         /api/tg/accounts/:id         解绑账号
+ *   POST           /api/tg/authorizations       绑定（兼容旧路径）
+ *   PATCH/DELETE   /api/tg/authorizations/:id   更新/删除设备授权
+ */
 import { AuthError } from '../auth/types';
 import { json } from '../shared/http';
 import { requireUser } from '../shared/authGuard';
 import { bindAccount, getAccounts, getCredentials, removeAccount, removeAuthorization, removeCredentials, saveCredentials, updateAuthorization } from './service';
 
+/** 解析 JSON 请求体并确保是普通对象 */
 async function bodyOf(request: Request): Promise<Record<string, unknown>> {
   try {
     const body: unknown = await request.json();
@@ -13,17 +28,21 @@ async function bodyOf(request: Request): Promise<Record<string, unknown>> {
 
 export async function handleTelegramRequest(request: Request, env: Env): Promise<Response> {
   try {
+    // 鉴权取得会话；user_id 是后续所有数据操作的唯一所有者依据
     const session = await requireUser(request, env);
     const url = new URL(request.url);
     if (url.pathname === '/api/tg/credentials') {
+      // 凭据含 api_hash，列表类响应统一 no-store，禁止任何缓存
       if (request.method === 'GET') return json(await getCredentials(env, session.user_id), 200, { 'Cache-Control': 'no-store' });
       if (request.method === 'PUT') return json(await saveCredentials(env, session.user_id, await bodyOf(request)));
+      // cascade=1 表示「连绑定的账号一起删」
       if (request.method === 'DELETE') return json(await removeCredentials(env, session.user_id, url.searchParams.get('cascade') === '1'));
     }
     if (url.pathname === '/api/tg/accounts') {
       if (request.method === 'GET') return json(await getAccounts(env, session.user_id), 200, { 'Cache-Control': 'no-store' });
       if (request.method === 'POST') return json(await bindAccount(env, session.user_id, await bodyOf(request)), 201);
     }
+    // 子资源 id 用字符白名单校验，避免把特殊字符拼进后续查询
     const accountMatch = /^\/api\/tg\/accounts\/([a-zA-Z0-9_-]{1,100})$/.exec(url.pathname);
     if (accountMatch && request.method === 'DELETE') return json(await removeAccount(env, session.user_id, accountMatch[1]!));
     if (url.pathname === '/api/tg/authorizations' && request.method === 'POST') return json(await bindAccount(env, session.user_id, await bodyOf(request)), 201);
@@ -34,6 +53,7 @@ export async function handleTelegramRequest(request: Request, env: Env): Promise
     }
     return json({ error: 'NOT_FOUND', message: '接口不存在' }, 404);
   } catch (error) {
+    // 只把业务错误转成 JSON；未知异常向上抛，由 Worker 入口统一记日志 + 500
     if (error instanceof AuthError) return json({ error: error.code, message: error.message }, error.status);
     throw error;
   }
