@@ -15,7 +15,7 @@ function submit() {
   <div v-if="store.loginStage !== 'idle'" class="fixed inset-0 z-50 grid place-items-center bg-background/70 p-4 backdrop-blur-sm">
     <section class="w-full max-w-md rounded-xl border border-border bg-card p-6 shadow-xl">
       <div class="flex items-center justify-between">
-        <h3 class="font-semibold">添加 Telegram 账户</h3>
+        <h3 class="font-semibold">{{ store.loginTargetUserId ? '为此账户添加设备' : '添加 Telegram 账户' }}</h3>
         <button type="button" class="text-muted-foreground hover:text-foreground" @click="store.closeLogin">关闭</button>
       </div>
 
@@ -29,7 +29,9 @@ function submit() {
             class="mx-auto size-56 rounded-lg bg-white p-2"
           >
           <p v-else class="py-16 text-sm text-muted-foreground">正在生成二维码…</p>
-          <p class="text-sm text-muted-foreground">使用 Telegram 手机端扫描二维码，过期后会自动刷新。</p>
+          <p class="text-sm text-muted-foreground">
+            {{ store.loginTargetUserId ? '请使用已绑定的 Telegram 账号扫描；其他账号不会被添加。' : '使用 Telegram 手机端扫描二维码，过期后会自动刷新。' }}
+          </p>
           <button type="button" class="text-xs text-muted-foreground underline" @click="store.switchToPhoneLogin()">改用手机号登录</button>
         </div>
 

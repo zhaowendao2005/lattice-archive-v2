@@ -1,12 +1,34 @@
 import { defineStore } from 'pinia';
 import { tgRemoteDataSource, type TelegramAccount, type TelegramCredentials, type TelegramAuthorization } from '../data-sources/tgRemoteDataSource';
-import { MtprotoBridge, type LoginEvent, type ValidationReport } from '../data-sources/mtprotoBridge';
+import { MtprotoBridge, type LoginEvent, type RestoreFailure, type ValidationReport } from '../data-sources/mtprotoBridge';
 import { tgSessionVault } from '../data-sources/tgSessionVault';
 
 export type LoginStage = 'idle' | 'qr' | 'phone' | 'code' | 'password' | 'ready';
 
 const APP_VERSION = '2.0.0';
 const PLATFORM = 'web' as const;
+const DEVICE_HEARTBEAT_INTERVAL_MS = 30_000;
+const ONLINE_WINDOW_MS = 90_000;
+const PRESENCE_CLOCK_INTERVAL_MS = 15_000;
+const ACTIVE_ACCOUNT_KEY = 'lattice.telegram.active-account';
+
+function readActiveAccountId() { return window.localStorage.getItem(ACTIVE_ACCOUNT_KEY) ?? undefined; }
+function writeActiveAccountId(accountId: string) { window.localStorage.setItem(ACTIVE_ACCOUNT_KEY, accountId); }
+
+let deviceHeartbeatTimer: number | undefined;
+let heartbeatAccountId: string | undefined;
+let heartbeatGeneration = 0;
+let presenceQueue: Promise<void> = Promise.resolve();
+let presenceClockTimer: number | undefined;
+let restoreSessionsPromise: Promise<void> | undefined;
+/** 会话恢复失败后的退避重试：10s / 30s / 60s，之后停止并提示手动重连。 */
+const RESTORE_RETRY_DELAYS_MS = [10_000, 30_000, 60_000];
+let restoreAttempts = 0;
+let restoreRetryTimer: number | undefined;
+function clearRestoreRetry() {
+  if (restoreRetryTimer) window.clearTimeout(restoreRetryTimer);
+  restoreRetryTimer = undefined;
+}
 
 /** 单例接线器不能进 Pinia state（store 只存可序列化页面态），因此放在模块作用域。 */
 let bridge: MtprotoBridge | null = null;
@@ -18,6 +40,10 @@ export const useTelegramStore = defineStore('telegram', {
     credentials: null as TelegramCredentials | null,
     validationReport: null as ValidationReport | null,
     accounts: [] as TelegramAccount[],
+    connectionStates: {} as Record<string, 'connecting' | 'online' | 'reconnecting' | 'offline' | 'auth-expired' | 'error'>,
+    connectionNotices: {} as Record<string, string>,
+    loginTargetUserId: null as string | null,
+    presenceNow: Date.now(),
     isLoading: false,
     isValidating: false,
     error: null as string | null,
@@ -31,9 +57,26 @@ export const useTelegramStore = defineStore('telegram', {
   }),
   getters: {
     hasCredentials: (state): boolean => state.credentials !== null,
-    activeAuthorizations: (state): TelegramAuthorization[] => state.accounts
-      .flatMap((account) => account.authorizations)
-      .filter((item) => item.session_state === 'active'),
+    /** 把验证报告整理为可读的「标签 / 值」对，供凭据卡片展示，避免视图直接输出 JSON。 */
+    credentialFacts: (state): { label: string; value: string }[] => {
+      const raw = (state.validationReport ?? state.credentials?.report ?? null) as Partial<ValidationReport> | null;
+      const facts: { label: string; value: string }[] = [];
+      if (raw && typeof raw === 'object') {
+        if (typeof raw.dcId === 'number') facts.push({ label: '数据中心', value: `DC ${raw.dcId}` });
+        if (typeof raw.country === 'string' && raw.country) facts.push({ label: '出口地区', value: raw.country });
+        if (typeof raw.latencyMs === 'number') facts.push({ label: '延迟', value: `${Math.round(raw.latencyMs)} ms` });
+        if (typeof raw.layer === 'number') facts.push({ label: '协议层', value: `Layer ${raw.layer}` });
+      }
+      const validatedAt = state.credentials?.validatedAt;
+      if (validatedAt) facts.push({ label: '验证时间', value: new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(validatedAt) });
+      return facts;
+    },
+    deviceId: (): string => tgSessionVault.deviceId(),
+    onlineAuthorizations: (state): TelegramAuthorization[] => state.accounts.flatMap((account) => account.authorizations.filter((authorization) => {
+      if (authorization.session_state !== 'active') return false;
+      if (authorization.device_id === tgSessionVault.deviceId()) return state.connectionStates[account.tg_user_id] === 'online';
+      return authorization.reachability === 'ok' && state.presenceNow - authorization.last_seen_at <= ONLINE_WINDOW_MS;
+    })),
   },
   actions: {
     setApiIdInput(value: string) { this.apiIdInput = value; this.error = null; },
@@ -43,6 +86,9 @@ export const useTelegramStore = defineStore('telegram', {
     setPasswordInput(value: string) { this.passwordInput = value; },
 
     async load() {
+      if (!presenceClockTimer) {
+        presenceClockTimer = window.setInterval(() => { this.presenceNow = Date.now(); }, PRESENCE_CLOCK_INTERVAL_MS);
+      }
       this.isLoading = true;
       this.error = null;
       try {
@@ -53,6 +99,7 @@ export const useTelegramStore = defineStore('telegram', {
         this.credentials = credentials;
         this.accounts = accounts;
         this.apiIdInput = credentials ? String(credentials.apiId) : '';
+        if (credentials) await this.restoreLocalSessions();
       } catch (error) {
         this.error = this.readError(error);
       } finally {
@@ -97,12 +144,152 @@ export const useTelegramStore = defineStore('telegram', {
       }
     },
 
+    /** 从本机加密 vault 恢复会话；无本地会话的账户保持离线，不触碰远端设备记录。 */
+    async restoreLocalSessions() {
+      if (!this.credentials) return;
+      // load() 与「当选主标签页」都会触发恢复，合并为一次，避免并发建连。
+      if (restoreSessionsPromise) return restoreSessionsPromise;
+      restoreSessionsPromise = this.restoreLocalSessionsOnce().finally(() => { restoreSessionsPromise = undefined; });
+      return restoreSessionsPromise;
+    },
+
+    async restoreLocalSessionsOnce() {
+      if (!this.credentials) return;
+      // 本地 Worker 同时只持有一条 MTProto 连接，因此只恢复最近使用的账户，避免反复建连。
+      const preferred = readActiveAccountId();
+      const candidates = preferred
+        ? this.accounts.filter((account) => account.tg_user_id === preferred)
+        : this.accounts;
+      for (const account of candidates) {
+        if (this.connectionStates[account.tg_user_id] === 'online') return;
+        if (await this.restoreAccount(account.tg_user_id)) return;
+      }
+    },
+
+    /** 恢复单个账户；返回是否真正发起了恢复（本地无会话时返回 false）。 */
+    async restoreAccount(tgUserId: string): Promise<boolean> {
+      if (!this.credentials) return false;
+      const session = await tgSessionVault.read(tgUserId);
+      if (!session) {
+        this.connectionStates[tgUserId] = 'offline';
+        this.connectionNotices[tgUserId] = '本设备没有该账户的本地会话，请移除本设备后重新添加';
+        return false;
+      }
+      this.connectionStates[tgUserId] = 'connecting';
+      this.connectionNotices[tgUserId] = '正在恢复 Telegram 会话…';
+      // 恢复期间也上报心跳（reachability=offline），让远端「最近活动」能反映本设备仍在。
+      if (heartbeatAccountId !== tgUserId) this.startDeviceHeartbeat(tgUserId);
+      try {
+        await this.ensureBridge().restoreSession(this.credentials.apiId, this.credentials.apiHash, tgUserId, session.stringSession);
+      } catch {
+        this.handleRestoreFailure(tgUserId, 'error', 'Telegram 会话恢复失败');
+      }
+      return true;
+    },
+
+    /** 用户手动重连：清空自动重试计数后立即恢复。 */
+    async reconnectAccount(tgUserId: string) {
+      clearRestoreRetry();
+      restoreAttempts = 0;
+      writeActiveAccountId(tgUserId);
+      await this.restoreAccount(tgUserId);
+    },
+
+    handleRestoreFailure(tgUserId: string, reason: RestoreFailure, message: string) {
+      clearRestoreRetry();
+      if (reason === 'auth-invalid') {
+        // 空会话探测已证明 DC 可达，旧 auth_key 不会再自行恢复，重试没有意义。
+        this.connectionStates[tgUserId] = 'auth-expired';
+        this.connectionNotices[tgUserId] = message;
+        restoreAttempts = 0;
+        void tgSessionVault.remove(tgUserId);
+        return;
+      }
+      this.connectionStates[tgUserId] = 'offline';
+      if (restoreAttempts >= RESTORE_RETRY_DELAYS_MS.length) {
+        this.connectionNotices[tgUserId] = `${message}，已停止自动重试，可点击「重新连接」`;
+        return;
+      }
+      const delay = RESTORE_RETRY_DELAYS_MS[restoreAttempts];
+      restoreAttempts += 1;
+      this.connectionNotices[tgUserId] = `${message}，${delay / 1000} 秒后自动重试（${restoreAttempts}/${RESTORE_RETRY_DELAYS_MS.length}）`;
+      restoreRetryTimer = window.setTimeout(() => {
+        restoreRetryTimer = undefined;
+        void this.restoreAccount(tgUserId);
+      }, delay);
+    },
+
     async refreshAccounts() {
       try {
         this.accounts = await tgRemoteDataSource.getAccounts();
+        this.presenceNow = Date.now();
       } catch (error) {
         this.error = this.readError(error);
       }
+    },
+
+    startDeviceHeartbeat(tgUserId: string) {
+      if (deviceHeartbeatTimer) window.clearInterval(deviceHeartbeatTimer);
+      heartbeatAccountId = tgUserId;
+      const generation = ++heartbeatGeneration;
+      void this.sendDeviceHeartbeat(tgUserId, generation);
+      deviceHeartbeatTimer = window.setInterval(() => { void this.sendDeviceHeartbeat(tgUserId, generation); }, DEVICE_HEARTBEAT_INTERVAL_MS);
+    },
+
+    async sendDeviceHeartbeat(tgUserId: string, generation = heartbeatGeneration) {
+      if (generation !== heartbeatGeneration) return;
+      let isTelegramOnline = false;
+      try { isTelegramOnline = await this.ensureBridge().checkConnection(tgUserId); } catch { /* Treat a failed probe as offline. */ }
+      if (generation !== heartbeatGeneration) return;
+      const current = this.connectionStates[tgUserId];
+      if (isTelegramOnline) {
+        this.connectionStates[tgUserId] = 'online';
+        delete this.connectionNotices[tgUserId];
+      } else if (current !== 'connecting' && current !== 'reconnecting' && current !== 'auth-expired') {
+        // 恢复中 / 已判定失效时，不能让心跳探测覆盖更准确的状态与提示。
+        this.connectionStates[tgUserId] = 'offline';
+        if (!this.connectionNotices[tgUserId]) this.connectionNotices[tgUserId] = 'Telegram 连接暂时不可用';
+      }
+      const account = this.accounts.find((item) => item.tg_user_id === tgUserId);
+      const authorization = account?.authorizations.find((item) => item.device_id === this.deviceId);
+      if (!authorization) return;
+      const update = async () => {
+        if (generation !== heartbeatGeneration) return;
+        try {
+          const result = await tgRemoteDataSource.updateAuthorization(authorization.id, {
+            reachability: isTelegramOnline ? 'ok' : 'offline',
+          });
+          if (result.accounts) this.accounts = result.accounts;
+          this.presenceNow = Date.now();
+        } catch {
+          // Telegram connection state remains local; temporary Lattice API failures must not stop the session.
+        }
+      };
+      presenceQueue = presenceQueue.then(update, update);
+      await presenceQueue;
+    },
+
+    async stopDeviceHeartbeat(tgUserId: string) {
+      if (heartbeatAccountId !== tgUserId) return;
+      if (deviceHeartbeatTimer) window.clearInterval(deviceHeartbeatTimer);
+      deviceHeartbeatTimer = undefined;
+      heartbeatAccountId = undefined;
+      const generation = ++heartbeatGeneration;
+      const account = this.accounts.find((item) => item.tg_user_id === tgUserId);
+      const authorization = account?.authorizations.find((item) => item.device_id === this.deviceId);
+      if (!authorization) return;
+      const update = async () => {
+        try {
+          const result = await tgRemoteDataSource.updateAuthorization(authorization.id, { reachability: 'offline' });
+          if (result.accounts) this.accounts = result.accounts;
+          this.presenceNow = Date.now();
+        } catch {
+          // Heartbeats expire on the server if this best-effort offline update cannot be delivered.
+        }
+      };
+      presenceQueue = presenceQueue.then(update, update);
+      await presenceQueue;
+      if (generation !== heartbeatGeneration) return;
     },
 
     async removeAccount(id: string) {
@@ -125,21 +312,32 @@ export const useTelegramStore = defineStore('telegram', {
 
     resetQrState() { this.qrToken = ''; this.qrImage = ''; this.qrExpiresAt = 0; },
 
-    openLogin() {
+    openLogin(targetUserId?: string) {
       if (!this.credentials) { this.error = '请先验证并保存应用凭据'; return; }
+      if (targetUserId && this.accounts.find((account) => account.tg_user_id === targetUserId)?.authorizations.some((item) => item.device_id === this.deviceId)) {
+        this.error = '本设备已添加到此 Telegram 账户';
+        return;
+      }
       this.error = null;
+      this.loginTargetUserId = targetUserId ?? null;
       this.phoneInput = ''; this.codeInput = ''; this.passwordInput = '';
       this.startQrLogin();
     },
+
+    openDeviceLogin(tgUserId: string) { this.openLogin(tgUserId); },
 
     startQrLogin() {
       if (!this.credentials) { this.error = '请先验证并保存应用凭据'; return; }
       this.resetQrState();
       this.loginStage = 'qr';
+      if (this.loginTargetUserId) this.connectionStates[this.loginTargetUserId] = 'connecting';
+      const exceptIds = this.accounts.map((account) => account.tg_user_id)
+        .filter((id) => id !== this.loginTargetUserId);
       this.ensureBridge().beginQrLogin(
         this.credentials.apiId,
         this.credentials.apiHash,
-        this.accounts.map((account) => account.tg_user_id),
+        exceptIds,
+        this.loginTargetUserId ?? undefined,
       );
     },
 
@@ -150,7 +348,8 @@ export const useTelegramStore = defineStore('telegram', {
       this.error = null;
       this.resetQrState();
       this.loginStage = 'phone';
-      this.ensureBridge().beginPhoneLogin(this.credentials.apiId, this.credentials.apiHash);
+      if (this.loginTargetUserId) this.connectionStates[this.loginTargetUserId] = 'connecting';
+      this.ensureBridge().beginPhoneLogin(this.credentials.apiId, this.credentials.apiHash, this.loginTargetUserId ?? undefined);
     },
 
     submitLoginValue(value: string) {
@@ -162,7 +361,14 @@ export const useTelegramStore = defineStore('telegram', {
 
     closeLogin() {
       this.ensureBridge().cancel();
+      if (this.loginTargetUserId) this.connectionStates[this.loginTargetUserId] = 'offline';
+      this.finishLoginUi();
+    },
+
+    /** 认证完成后仅关闭登录 UI；保留本机 MTProto 连接及设备锁。 */
+    finishLoginUi() {
       this.loginStage = 'idle';
+      this.loginTargetUserId = null;
       this.resetQrState();
       this.phoneInput = ''; this.codeInput = ''; this.passwordInput = '';
     },
@@ -176,8 +382,53 @@ export const useTelegramStore = defineStore('telegram', {
         return;
       }
       if (event.type === 'stage') { this.loginStage = event.stage; return; }
-      if (event.type === 'authorized') { await this.persistAuthorization(event); return; }
+      if (event.type === 'authorized') {
+        this.connectionStates[event.user.id] = 'online';
+        await this.persistAuthorization(event);
+        return;
+      }
+      if (event.type === 'connectionState') {
+        this.connectionStates[event.accountId] = event.state;
+        if (event.message) this.connectionNotices[event.accountId] = event.message;
+        else delete this.connectionNotices[event.accountId];
+        return;
+      }
+      if (event.type === 'restored') {
+        clearRestoreRetry();
+        restoreAttempts = 0;
+        this.connectionStates[event.user.id] = 'online';
+        delete this.connectionNotices[event.user.id];
+        this.startDeviceHeartbeat(event.user.id);
+        return;
+      }
+      if (event.type === 'restoreFailed') {
+        this.handleRestoreFailure(event.accountId, event.reason, event.message);
+        return;
+      }
+      if (event.type === 'elected') {
+        if (this.loginStage === 'qr' || this.loginStage === 'phone') this.startQrLogin();
+        else if (this.loginStage === 'idle') void this.restoreLocalSessions();
+        return;
+      }
+      if (event.type === 'accountDisconnected' || event.type === 'sessionStopped') {
+        if (event.accountId) {
+          this.connectionStates[event.accountId] = 'offline';
+          await this.stopDeviceHeartbeat(event.accountId);
+        }
+        return;
+      }
+      if (event.type === 'error') {
+        const transient = event.code === 'CONNECTION_NOT_INITED' || event.code === 'CONNECTION_TIMEOUT' || event.code === 'TIMEOUT' || event.message.toUpperCase().includes('DISCONNECTED');
+        if (transient) {
+          if (this.loginTargetUserId) this.connectionNotices[this.loginTargetUserId] = 'Telegram 连接短暂中断，正在重连…';
+          return;
+        }
+      }
       this.error = event.code ? `${event.message}（${event.code}）` : event.message;
+      if (event.code?.startsWith('DEVICE_') || event.code === 'TG_ACCOUNT_MISMATCH') {
+        if (this.loginTargetUserId) this.connectionStates[this.loginTargetUserId] = 'offline';
+        this.finishLoginUi();
+      }
     },
 
     /** 会话只在本机加密落盘；远端只记录「哪个设备授权了哪个账户」。 */
@@ -186,6 +437,7 @@ export const useTelegramStore = defineStore('telegram', {
       this.loginStage = 'ready';
       try {
         await tgSessionVault.save(user.id, { dcId: user.dcId ?? 2, stringSession: session });
+        writeActiveAccountId(user.id);
         await tgRemoteDataSource.bindAccount({
           tgUserId: user.id,
           username: user.username,
@@ -202,8 +454,10 @@ export const useTelegramStore = defineStore('telegram', {
           },
         });
         await this.refreshAccounts();
-        this.closeLogin();
+        if (this.connectionStates[user.id] === 'online') this.startDeviceHeartbeat(user.id);
+        this.finishLoginUi();
       } catch (error) {
+        this.ensureBridge().cancel();
         this.error = `登录成功，但绑定同步失败：${this.readError(error)}`;
         this.loginStage = 'idle';
       }

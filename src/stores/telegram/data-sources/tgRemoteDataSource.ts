@@ -19,6 +19,7 @@ export const tgRemoteDataSource = {
   removeCredentials: (cascade: boolean) => request('/api/tg/credentials?cascade=' + (cascade ? '1' : '0'), 'DELETE'),
   getAccounts: async () => (await request<Envelope>('/api/tg/accounts')).accounts ?? [],
   bindAccount: (payload: unknown) => request<Envelope>('/api/tg/accounts', 'POST', payload),
+  updateAuthorization: (id: string, payload: { sessionState?: string; reachability: string; latencyMs?: number }) => request<Envelope>(`/api/tg/authorizations/${id}`, 'PATCH', payload),
   removeAccount: (id: string) => request(`/api/tg/accounts/${id}`, 'DELETE'),
   removeAuthorization: (id: string) => request(`/api/tg/authorizations/${id}`, 'DELETE'),
 };

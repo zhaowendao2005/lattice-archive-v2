@@ -30,14 +30,22 @@ export async function getAccounts(env: Env, userId: string) {
 }
 export async function bindAccount(env: Env, userId: string, body: AccountInput) {
   const tgUserId = requiredText(body.tgUserId, 'Telegram 用户 ID', 80);
-  const count = await repository.countAccounts(env.AUTH_DB, userId);
-  if ((count?.count ?? 0) >= MAX_ACCOUNTS) throw new AuthError('ACCOUNT_LIMIT', `每位用户最多绑定 ${MAX_ACCOUNTS} 个 Telegram 账户`, 409);
+  const existingAccount = await repository.getAccountByTelegramId(env.AUTH_DB, userId, tgUserId);
+  if (!existingAccount) {
+    const count = await repository.countAccounts(env.AUTH_DB, userId);
+    if ((count?.count ?? 0) >= MAX_ACCOUNTS) throw new AuthError('ACCOUNT_LIMIT', `每位用户最多绑定 ${MAX_ACCOUNTS} 个 Telegram 账户`, 409);
+  }
   const device = body.device && typeof body.device === 'object' ? body.device as AuthorizationInput : {};
   const deviceId = requiredText(device.deviceId, '设备 ID', 120);
   const platform = requiredText(device.platform, '设备平台', 20);
   if (!['web', 'electron', 'ios'].includes(platform)) throw new AuthError('INVALID_REQUEST', '设备平台无效');
-  const deviceCount = await env.AUTH_DB.prepare('SELECT COUNT(*) AS count FROM tg_authorizations WHERE account_id IN (SELECT id FROM tg_accounts WHERE user_id = ? AND tg_user_id = ?)').bind(userId, tgUserId).first<{ count: number }>();
-  if ((deviceCount?.count ?? 0) >= MAX_DEVICES) throw new AuthError('DEVICE_LIMIT', `每个 Telegram 账户最多 ${MAX_DEVICES} 台设备`, 409);
+  const isKnownDevice = existingAccount
+    ? Boolean(await repository.getAuthorizationByDeviceId(env.AUTH_DB, existingAccount.id, deviceId))
+    : false;
+  if (!isKnownDevice) {
+    const deviceCount = await env.AUTH_DB.prepare('SELECT COUNT(*) AS count FROM tg_authorizations WHERE account_id IN (SELECT id FROM tg_accounts WHERE user_id = ? AND tg_user_id = ?)').bind(userId, tgUserId).first<{ count: number }>();
+    if ((deviceCount?.count ?? 0) >= MAX_DEVICES) throw new AuthError('DEVICE_LIMIT', `每个 Telegram 账户最多 ${MAX_DEVICES} 台设备`, 409);
+  }
   const now = Date.now();
   await repository.bindAccountAndAuthorization(env.AUTH_DB, {
     account: { id: crypto.randomUUID(), userId, tgUserId, username: optionalText(body.username), firstName: optionalText(body.firstName), lastName: optionalText(body.lastName), phoneMask: optionalText(body.phone), isPremium: body.isPremium === true ? 1 : 0, homeDc: typeof body.homeDc === 'number' ? body.homeDc : null, now },
@@ -46,8 +54,8 @@ export async function bindAccount(env: Env, userId: string, body: AccountInput) 
   return getAccounts(env, userId);
 }
 export async function updateAuthorization(env: Env, userId: string, authId: string, body: AuthorizationInput) {
-  const state = requiredText(body.sessionState ?? 'active', '授权状态', 20);
-  if (!['active', 'expired', 'revoked', 'duplicated'].includes(state)) throw new AuthError('INVALID_REQUEST', '授权状态无效');
+  const state = body.sessionState === undefined ? undefined : requiredText(body.sessionState, '授权状态', 20);
+  if (state && !['active', 'expired', 'revoked', 'duplicated'].includes(state)) throw new AuthError('INVALID_REQUEST', '授权状态无效');
   await repository.touchAuthorization(env.AUTH_DB, userId, authId, { state, reachability: optionalText(body.reachability, 20), latency: typeof body.latencyMs === 'number' ? body.latencyMs : null, now: Date.now() });
   return getAccounts(env, userId);
 }

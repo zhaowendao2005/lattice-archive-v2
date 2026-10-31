@@ -17,6 +17,8 @@ export function saveApp(db: D1Database, userId: string, apiId: number, apiHash: 
 }
 export function deleteApp(db: D1Database, userId: string) { return db.prepare('DELETE FROM tg_apps WHERE user_id = ?').bind(userId).run(); }
 export function getAccount(db: D1Database, userId: string, accountId: string) { return db.prepare('SELECT id FROM tg_accounts WHERE id = ? AND user_id = ?').bind(accountId, userId).first<{ id: string }>(); }
+export function getAccountByTelegramId(db: D1Database, userId: string, tgUserId: string) { return db.prepare('SELECT id FROM tg_accounts WHERE user_id = ? AND tg_user_id = ?').bind(userId, tgUserId).first<{ id: string }>(); }
+export function getAuthorizationByDeviceId(db: D1Database, accountId: string, deviceId: string) { return db.prepare('SELECT id FROM tg_authorizations WHERE account_id = ? AND device_id = ?').bind(accountId, deviceId).first<{ id: string }>(); }
 export function countAccounts(db: D1Database, userId: string) { return db.prepare('SELECT COUNT(*) AS count FROM tg_accounts WHERE user_id = ?').bind(userId).first<{ count: number }>(); }
 export function bindAccountAndAuthorization(db: D1Database, data: {
   account: { id: string; userId: string; tgUserId: string; username: string | null; firstName: string | null; lastName: string | null; phoneMask: string | null; isPremium: number; homeDc: number | null; now: number };
@@ -33,9 +35,9 @@ export function bindAccountAndAuthorization(db: D1Database, data: {
   // D1 batch is transactional: account metadata and device authorization cannot be partially persisted.
   return db.batch([accountUpsert, authorizationUpsert]);
 }
-export function touchAuthorization(db: D1Database, userId: string, authId: string, data: { state: string; reachability: string | null; latency: number | null; now: number }) {
-  return db.prepare(`UPDATE tg_authorizations SET session_state = ?, reachability = ?, latency_ms = ?, last_seen_at = ?, revoked_at = CASE WHEN ? IN ('revoked', 'expired', 'duplicated') THEN ? ELSE revoked_at END
-    WHERE id = ? AND account_id IN (SELECT id FROM tg_accounts WHERE user_id = ?)`).bind(data.state, data.reachability, data.latency, data.now, data.state, data.now, authId, userId).run();
+export function touchAuthorization(db: D1Database, userId: string, authId: string, data: { state?: string; reachability: string | null; latency: number | null; now: number }) {
+  return db.prepare(`UPDATE tg_authorizations SET session_state = COALESCE(?, session_state), reachability = ?, latency_ms = ?, last_seen_at = ?, revoked_at = CASE WHEN ? IN ('revoked', 'expired', 'duplicated') THEN ? ELSE revoked_at END
+    WHERE id = ? AND account_id IN (SELECT id FROM tg_accounts WHERE user_id = ?)`).bind(data.state ?? null, data.reachability, data.latency, data.now, data.state ?? '', data.now, authId, userId).run();
 }
 export function deleteAuthorization(db: D1Database, userId: string, authId: string) { return db.prepare('DELETE FROM tg_authorizations WHERE id = ? AND account_id IN (SELECT id FROM tg_accounts WHERE user_id = ?)').bind(authId, userId).run(); }
 export function deleteAccount(db: D1Database, userId: string, accountId: string) { return db.prepare('DELETE FROM tg_accounts WHERE id = ? AND user_id = ?').bind(accountId, userId).run(); }
