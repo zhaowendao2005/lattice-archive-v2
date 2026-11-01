@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
+import type { AggregateSearchResultItem } from '@/stores/archive/types';
 import type {
   ContextMenuState,
   DragState,
@@ -10,6 +11,27 @@ import type {
   TileGroupData,
   TileSize,
 } from '../types/tile';
+
+export const SYSTEM_SEARCH_TILE_ID = 'tile-system-search';
+
+function createSystemSearchTile(groupId = 'group-common', x = 0, y = 4): FileTileData {
+  return {
+    id: SYSTEM_SEARCH_TILE_ID,
+    type: 'file',
+    title: '聚合搜索',
+    size: 'medium',
+    groupId,
+    x,
+    y,
+    fileType: 'exec',
+    extension: 'SEARCH',
+    description: '跨会话多源流式聚合检索与磁贴拓扑归档系统',
+    systemApp: 'aggregate-search',
+    undeletable: true,
+    createdAt: '2026-10-01',
+    updatedAt: '2026-11-01',
+  };
+}
 
 const STORAGE_KEY = 'lattice_archive_tiles_win10_v2';
 
@@ -297,6 +319,7 @@ function getDefaultTiles(): TileData[] {
       createdAt: '2026-10-01',
       updatedAt: '2026-10-10',
     },
+    createSystemSearchTile('group-common', 0, 4),
 
     // --- Group 2: 开发与研发 (Work) ---
     {
@@ -325,26 +348,51 @@ function getDefaultTiles(): TileData[] {
         {
           id: 'sub-chat-1',
           type: 'file',
-          title: '设计讨论记录',
+          title: 'Lattice 核心研发讨论',
           size: 'small',
           groupId: 'group-work',
           x: 0,
           y: 0,
-          fileType: 'text',
-          extension: 'md',
+          fileType: 'doc',
+          extension: 'session',
+          sessionId: 'session-joined-1',
+          sessionTitle: 'Lattice 核心研发架构讨论',
+          isSessionLink: true,
+          description: '内部核心协议与双向同步研发群',
           createdAt: '2026-10-08',
           updatedAt: '2026-10-10',
         },
         {
           id: 'sub-chat-2',
           type: 'file',
-          title: '联调问题汇总',
+          title: 'Telegram 协议研讨',
           size: 'small',
           groupId: 'group-work',
           x: 0,
           y: 0,
-          fileType: 'doc',
-          extension: 'docx',
+          fileType: 'code',
+          extension: 'session',
+          sessionId: 'session-joined-2',
+          sessionTitle: 'Telegram MTProto 协议中文讨论组',
+          isSessionLink: true,
+          description: 'MTProto 2.0 传输层性能调优讨论',
+          createdAt: '2026-10-08',
+          updatedAt: '2026-10-10',
+        },
+        {
+          id: 'sub-chat-3',
+          type: 'file',
+          title: 'Cloudflare Workers 研发群',
+          size: 'small',
+          groupId: 'group-work',
+          x: 0,
+          y: 0,
+          fileType: 'data',
+          extension: 'session',
+          sessionId: 'session-joined-3',
+          sessionTitle: 'Cloudflare Workers & D1 研发群',
+          isSessionLink: true,
+          description: '边缘计算与 D1 数据库存储架构',
           createdAt: '2026-10-08',
           updatedAt: '2026-10-10',
         },
@@ -778,6 +826,21 @@ export const useTileStore = defineStore('tileBoard', () => {
     displacedPositions: {},
   });
 
+  function ensureSystemSearchTile(): boolean {
+    const existing = tiles.value.find(
+      t => t.systemApp === 'aggregate-search' || t.id === SYSTEM_SEARCH_TILE_ID,
+    );
+    if (existing) {
+      existing.systemApp = 'aggregate-search';
+      existing.undeletable = true;
+      return false;
+    }
+    const targetGroupId = groups.value[0]?.id || 'group-common';
+    const slot = findNearestFreeSlot(targetGroupId, { w: 2, h: 2 }, 0);
+    tiles.value.push(createSystemSearchTile(targetGroupId, slot.x, slot.y));
+    return true;
+  }
+
   function loadState() {
     if (typeof localStorage === 'undefined') {
       groups.value = getDefaultGroups();
@@ -794,6 +857,9 @@ export const useTileStore = defineStore('tileBoard', () => {
           tiles.value = parsed.tiles;
           if (parsed.wallpaper) wallpaper.value = parsed.wallpaper;
           normalizeGroupOrders();
+          if (ensureSystemSearchTile()) {
+            saveState();
+          }
           return;
         }
       }
@@ -803,6 +869,7 @@ export const useTileStore = defineStore('tileBoard', () => {
 
     groups.value = getDefaultGroups();
     tiles.value = getDefaultTiles();
+    ensureSystemSearchTile();
     saveState();
   }
 
@@ -1153,7 +1220,27 @@ export const useTileStore = defineStore('tileBoard', () => {
   }
 
   function deleteTile(tileId: string) {
+    const target = getTileById(tileId);
+    if (!target || target.undeletable || target.systemApp) return;
     tiles.value = tiles.value.filter(t => t.id !== tileId);
+    saveState();
+  }
+
+  function renameChildFile(folderId: string, fileId: string, newTitle: string) {
+    const folder = getTileById(folderId);
+    if (!folder || folder.type !== 'folder' || !newTitle.trim()) return;
+    const child = folder.children.find(f => f.id === fileId);
+    if (!child) return;
+    child.title = newTitle.trim();
+    child.updatedAt = new Date().toISOString().slice(0, 10);
+    saveState();
+  }
+
+  function deleteChildFile(folderId: string, fileId: string) {
+    const folder = getTileById(folderId);
+    if (!folder || folder.type !== 'folder') return;
+    folder.children = folder.children.filter(f => f.id !== fileId);
+    folder.updatedAt = new Date().toISOString().slice(0, 10);
     saveState();
   }
 
@@ -1270,6 +1357,7 @@ export const useTileStore = defineStore('tileBoard', () => {
     const folder = getTileById(folderId);
     const file = getTileById(fileId);
     if (!folder || folder.type !== 'folder' || !file || file.type !== 'file') return;
+    if (file.systemApp || file.undeletable) return;
 
     tiles.value = tiles.value.filter(t => t.id !== fileId);
     file.groupId = folder.groupId;
@@ -1298,6 +1386,7 @@ export const useTileStore = defineStore('tileBoard', () => {
     const file1 = getTileById(file1Id);
     const file2 = getTileById(file2Id);
     if (!file1 || file1.type !== 'file' || !file2 || file2.type !== 'file') return;
+    if (file1.systemApp || file1.undeletable || file2.systemApp || file2.undeletable) return;
 
     const newFolderId = `folder-${Date.now()}`;
     const newFolder: FolderTileData = {
@@ -1338,19 +1427,22 @@ export const useTileStore = defineStore('tileBoard', () => {
   function addNewFile(data: Partial<FileTileData>, targetGroupId?: string) {
     const id = `file-${Date.now()}`;
     const gid = targetGroupId || groups.value[0]?.id || 'group-common';
+    const size = data.size || 'medium';
+    const slot = findNearestFreeSlot(gid, getTileSpan(size, data.customSpan), 0);
     const newFile: FileTileData = {
       id,
       type: 'file',
       title: data.title?.trim() || '未命名文件',
-      size: data.size || 'medium',
+      size,
       groupId: gid,
-      x: 0,
-      y: 999,
+      x: slot.x,
+      y: slot.y,
       fileType: data.fileType || 'doc',
       extension: data.extension || 'txt',
       description: data.description || '',
       content: data.content || '',
       tags: data.tags || [],
+      sourceResultId: data.sourceResultId,
       createdAt: new Date().toISOString().slice(0, 10),
       updatedAt: new Date().toISOString().slice(0, 10),
     };
@@ -1363,14 +1455,15 @@ export const useTileStore = defineStore('tileBoard', () => {
   function addNewFolder(title: string, targetGroupId?: string) {
     const id = `folder-${Date.now()}`;
     const gid = targetGroupId || groups.value[0]?.id || 'group-common';
+    const slot = findNearestFreeSlot(gid, { w: 2, h: 2 }, 0);
     const newFolder: FolderTileData = {
       id,
       type: 'folder',
       title: title.trim() || '新文件夹',
       size: 'medium',
       groupId: gid,
-      x: 0,
-      y: 999,
+      x: slot.x,
+      y: slot.y,
       children: [],
       createdAt: new Date().toISOString().slice(0, 10),
       updatedAt: new Date().toISOString().slice(0, 10),
@@ -1379,6 +1472,119 @@ export const useTileStore = defineStore('tileBoard', () => {
     tiles.value.push(newFolder);
     saveState();
     return newFolder;
+  }
+
+  /**
+   * 记录已归入磁贴拓扑的搜索结果 ID → 所在位置文案映射
+   */
+  const archivedSourceMap = computed(() => {
+    const map = new Map<string, string>();
+    const groupTitleMap = new Map<string, string>();
+    for (const g of groups.value) {
+      groupTitleMap.set(g.id, g.title);
+    }
+    for (const t of tiles.value) {
+      const gTitle = groupTitleMap.get(t.groupId) || '磁贴分组';
+      if (t.type === 'file' && t.sourceResultId) {
+        map.set(t.sourceResultId, gTitle);
+      } else if (t.type === 'folder') {
+        for (const child of t.children) {
+          if (child.sourceResultId) {
+            map.set(child.sourceResultId, `${gTitle} / ${t.title}`);
+          }
+        }
+      }
+    }
+    return map;
+  });
+
+  /**
+   * 将从聚合搜索拖拽过来的 1~N 条搜索结果导入磁贴目录拓扑（分组或文件夹）
+   */
+  function importSearchResultsToTopology(
+    items: AggregateSearchResultItem[],
+    targetType: 'group' | 'folder',
+    targetId: string,
+  ): number {
+    if (!items || items.length === 0) return 0;
+    const today = new Date().toISOString().slice(0, 10);
+    let importedCount = 0;
+
+    if (targetType === 'group') {
+      const group = groups.value.find(g => g.id === targetId);
+      if (!group) return 0;
+
+      for (const item of items) {
+        // 避免同一分组重复导入同一搜索条目
+        const alreadyInGroup = tiles.value.some(
+          t => t.groupId === group.id && t.type === 'file' && t.sourceResultId === item.id,
+        );
+        if (alreadyInGroup) continue;
+
+        const slot = findNearestFreeSlot(group.id, { w: 2, h: 2 }, 0);
+        const newFile: FileTileData = {
+          id: `tile-sr-${item.id}-${Date.now()}-${importedCount}`,
+          type: 'file',
+          title: item.title,
+          size: 'medium',
+          groupId: group.id,
+          x: slot.x,
+          y: slot.y,
+          fileType: item.fileType,
+          extension: item.extension,
+          fileSize: item.fileSize,
+          description: `${item.snippet}\n\n来源会话：${item.sessionTitle}`,
+          tags: [item.categoryLabel, item.sessionTitle],
+          sourceResultId: item.id,
+          sessionId: item.sessionId,
+          sessionTitle: item.sessionTitle,
+          isSessionLink: item.category === 'session',
+          createdAt: item.updatedAt || today,
+          updatedAt: today,
+        };
+        tiles.value.push(newFile);
+        importedCount++;
+      }
+    } else if (targetType === 'folder') {
+      const folder = getTileById(targetId);
+      if (!folder || folder.type !== 'folder') return 0;
+
+      for (const item of items) {
+        const alreadyInFolder = folder.children.some(c => c.sourceResultId === item.id);
+        if (alreadyInFolder) continue;
+
+        const newChild: FileTileData = {
+          id: `sub-sr-${item.id}-${Date.now()}-${importedCount}`,
+          type: 'file',
+          title: item.title,
+          size: 'small',
+          groupId: folder.groupId,
+          x: 0,
+          y: 0,
+          fileType: item.fileType,
+          extension: item.extension,
+          fileSize: item.fileSize,
+          description: `${item.snippet}\n\n来源会话：${item.sessionTitle}`,
+          tags: [item.categoryLabel, item.sessionTitle],
+          sourceResultId: item.id,
+          sessionId: item.sessionId,
+          sessionTitle: item.sessionTitle,
+          isSessionLink: item.category === 'session',
+          createdAt: item.updatedAt || today,
+          updatedAt: today,
+        };
+        folder.children.push(newChild);
+        importedCount++;
+      }
+      if (importedCount > 0) {
+        folder.updatedAt = today;
+      }
+    }
+
+    if (importedCount > 0) {
+      saveState();
+    }
+    return importedCount;
   }
 
   loadState();
@@ -1414,6 +1620,8 @@ export const useTileStore = defineStore('tileBoard', () => {
     resizeTileSpan,
     renameTile,
     deleteTile,
+    renameChildFile,
+    deleteChildFile,
     renameGroup,
     addNewGroup,
     deleteGroup,
@@ -1429,6 +1637,8 @@ export const useTileStore = defineStore('tileBoard', () => {
     moveTile,
     addNewFile,
     addNewFolder,
+    archivedSourceMap,
+    importSearchResultsToTopology,
     applyDisplacedPositions: (groupId: string, positions: Record<string, { x: number; y: number }>) => {
       const list = tiles.value.filter(t => t.groupId === groupId);
       for (const t of list) {

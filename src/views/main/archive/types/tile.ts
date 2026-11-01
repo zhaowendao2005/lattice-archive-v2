@@ -25,6 +25,12 @@ export interface BaseTileData {
   y: number;
   color?: string;
   customSpan?: { w: number; h: number }; // 允许通过右下角 handle 拖拽自定义尺寸（最小单位格）
+  /** 系统级内置应用标识（如聚合搜索），决定点击行为与特殊视觉呈现 */
+  systemApp?: 'aggregate-search';
+  /** 是否为常驻系统磁贴（禁止从磁贴板移除） */
+  undeletable?: boolean;
+  /** 若由聚合搜索结果拖入生成，记录来源搜索条目 ID */
+  sourceResultId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -39,6 +45,10 @@ export interface FileTileData extends BaseTileData {
   tags?: string[];
   filePath?: string;
   iconName?: string;
+  /** 会话对象支持：会话作为对象/链接存储在 Explore 虚拟文件系统中 */
+  sessionId?: string;
+  sessionTitle?: string;
+  isSessionLink?: boolean;
 }
 
 export interface FolderTileData extends BaseTileData {

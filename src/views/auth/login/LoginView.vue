@@ -9,16 +9,27 @@
 -->
 <script setup lang="ts">
 import { useRouter } from 'vue-router';
-import { ArrowRight, Eye, EyeOff, ShieldCheck } from '@lucide/vue';
+import { ArrowRight, Eye, EyeOff, ShieldCheck, Sparkles } from '@lucide/vue';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { isMockDev } from '@/config/env';
 import { useAuthStore } from '@/stores/auth/stores/authStore';
 import TurnstileWidget from '@/views/auth/components/TurnstileWidget.vue';
 
 const authStore = useAuthStore();
 const router = useRouter();
 
+async function handleDirectMockEnter() {
+  authStore.bypassLoginDirectly('user');
+  await router.push({ name: 'chats' });
+}
+
 async function handleSubmit() {
+  if (isMockDev) {
+    authStore.bypassLoginDirectly('user');
+    await router.push({ name: 'chats' });
+    return;
+  }
   // 主按钮永远可点：点击后再校验，并聚焦到第一个缺失项（项目硬约束，不用 disabled 置灰）
   if (!authStore.emailInput.trim() || !authStore.passwordInput) {
     authStore.setAuthError('请输入邮箱和密码');
@@ -35,6 +46,22 @@ async function handleSubmit() {
 <template>
   <div>
     <header class="mb-6 lg:mb-7 [@media(max-height:560px)]:mb-3">
+      <div
+        v-if="isMockDev"
+        class="mb-3 flex items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-200"
+      >
+        <span class="flex items-center gap-1.5">
+          <Sparkles class="size-3.5 text-amber-400" />
+          <span>开发环境 · Mock 分支（免密直通）</span>
+        </span>
+        <button
+          type="button"
+          class="cursor-pointer rounded bg-amber-400 px-2 py-0.5 font-medium text-slate-950 transition-colors hover:bg-amber-300"
+          @click="handleDirectMockEnter"
+        >
+          立即秒进
+        </button>
+      </div>
       <h1 class="text-2xl font-semibold leading-tight tracking-tight text-foreground sm:text-[28px]">欢迎回来</h1>
       <p class="mt-2 text-sm leading-relaxed text-muted-foreground [@media(max-height:560px)]:hidden">
         请输入账户凭证，继续你的归档工作区。

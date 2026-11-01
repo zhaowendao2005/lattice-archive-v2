@@ -11,6 +11,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from 'vue';
 import { Archive, MessagesSquare, PanelLeft, Settings } from '@lucide/vue';
+import { isMockDev, isRealDev } from '@/config/env';
 import { useAppStore } from '@/stores/app/stores/appStore';
 import { useAuthStore } from '@/stores/auth/stores/authStore';
 import { useChatStore } from '@/stores/chat/stores/chatStore';
@@ -52,7 +53,21 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', handlePointerD
       <div class="mx-1.5 size-7 shrink-0 rounded-md bg-primary text-primary-foreground text-sm font-semibold flex items-center justify-center">
         L
       </div>
-      <span :class="[textClass, 'text-sm font-semibold tracking-tight']">Lattice Archive</span>
+      <span :class="[textClass, 'text-sm font-semibold tracking-tight flex items-center gap-1.5']">
+        <span>Lattice Archive</span>
+        <span
+          v-if="isMockDev"
+          class="rounded-[2px] border border-amber-400/40 bg-amber-500/15 px-1 py-0.2 font-mono text-[9px] text-amber-300 font-normal"
+        >
+          Mock Dev
+        </span>
+        <span
+          v-else-if="isRealDev"
+          class="rounded-[2px] border border-emerald-400/40 bg-emerald-500/15 px-1 py-0.2 font-mono text-[9px] text-emerald-300 font-normal"
+        >
+          Real Dev
+        </span>
+      </span>
     </div>
 
     <!-- 主导航 -->

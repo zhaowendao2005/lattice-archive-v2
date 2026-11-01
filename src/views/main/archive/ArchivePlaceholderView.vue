@@ -9,13 +9,16 @@ import {
   Search,
   X,
 } from '@lucide/vue';
+import { useAggregateSearchStore } from '@/stores/archive/stores/aggregateSearchStore';
 import { useTileStore } from './store/tileStore';
 import TileBoard from './components/board/TileBoard.vue';
 import TileFolderModal from './components/folder-modal/TileFolderModal.vue';
 import FileDetailModal from './components/file-modal/FileDetailModal.vue';
 import TileContextMenu from './components/context-menu/TileContextMenu.vue';
+import AggregateSearchModal from './components/search-modal/AggregateSearchModal.vue';
 
 const tileStore = useTileStore();
+const aggregateSearchStore = useAggregateSearchStore();
 
 const totalTilesCount = computed(() => tileStore.tiles.length);
 
@@ -167,6 +170,11 @@ function handleChangeWallpaper() {
         :file="tileStore.selectedFile"
         @close="tileStore.closeFile"
       />
+    </Transition>
+
+    <!-- Aggregate Search System Modal (参照文件夹对话框合成管线，尺寸再大一圈) -->
+    <Transition name="archive-pop">
+      <AggregateSearchModal v-if="aggregateSearchStore.isModalOpen" />
     </Transition>
 
     <!-- Windows 10 Context Menu -->

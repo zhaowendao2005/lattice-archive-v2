@@ -1,6 +1,7 @@
 // vue-router 的工厂函数 + 路由记录类型；createWebHistory 表示用 HTML5 History 模式（无 # 号）
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router';
 // 守卫里需要读取登录态，所以直接引入鉴权 Store（Pinia 已在 main.ts 中先于 router 安装）
+import { isMockDev } from '@/config/env';
 import { useAuthStore } from '@/stores/auth/stores/authStore';
 import { installWorkspaceTransition } from './workspaceTransition';
 
@@ -120,6 +121,11 @@ const router = createRouter({
 router.beforeEach((to) => {
   // 拿到（或创建）鉴权 Store 单例。此处只在守卫里调用，不进 setup，避免组件时序问题
   const auth = useAuthStore();
+
+  // Mock 开发环境：检测到未登录时直接秒进工作区，免密直通
+  if (isMockDev && !auth.isLoggedIn) {
+    auth.bypassLoginDirectly(to.meta.requiresAdmin ? 'admin' : 'user');
+  }
 
   // 【乐观放行 + 后台校准】
   // 本地若已存有 Token，先不阻塞用户跳转（0ms），同时在后台向 /api/auth/me 校验；

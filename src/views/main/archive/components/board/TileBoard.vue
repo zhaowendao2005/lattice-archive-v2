@@ -14,6 +14,7 @@ import { computeDisplacedPositions } from '../../utils/layoutEngine';
 import TileGroupContainer from './TileGroupContainer.vue';
 import FileTile from '../tiles/FileTile.vue';
 import FolderTile from '../tiles/FolderTile.vue';
+import SearchAppTile from '../tiles/SearchAppTile.vue';
 
 const tileStore = useTileStore();
 const boardRef = ref<HTMLElement | null>(null);
@@ -163,7 +164,7 @@ function evaluateFolderCandidate(
   dragged: TileData,
   srcFolderId: string | null,
 ): FolderCandidate | null {
-  if (dragged.type !== 'file') return null;
+  if (dragged.type !== 'file' || dragged.systemApp || dragged.undeletable) return null;
 
   let best: FolderCandidate | null = null;
 
@@ -614,9 +615,9 @@ function onGlobalPointerMove(event: PointerEvent) {
     let fileTarget: TileData | null = null;
     let fileTargetDistance = Number.POSITIVE_INFINITY;
 
-    if (dragged.type === 'file' && !srcFolderId) {
+    if (dragged.type === 'file' && !dragged.systemApp && !dragged.undeletable && !srcFolderId) {
       for (const t of groupTiles) {
-        if (t.type !== 'file' || t.id === dragged.id) continue;
+        if (t.type !== 'file' || t.systemApp || t.undeletable || t.id === dragged.id) continue;
 
         const tSpan = getTileSpan(t.size, t.customSpan);
         const tLeft = groupRect.left + t.x * (UNIT_SIZE + GRID_GAP);
@@ -1048,8 +1049,16 @@ onUnmounted(() => {
       class="pointer-events-none fixed z-[9999] opacity-95 shadow-2xl"
       :style="dragPreviewStyle"
     >
+      <SearchAppTile
+        v-if="
+          tileStore.dragState.tile.type === 'file' &&
+          tileStore.dragState.tile.systemApp === 'aggregate-search'
+        "
+        :tile="tileStore.dragState.tile"
+        :is-preview="true"
+      />
       <FolderTile
-        v-if="tileStore.dragState.tile.type === 'folder'"
+        v-else-if="tileStore.dragState.tile.type === 'folder'"
         :folder="tileStore.dragState.tile"
         :is-preview="true"
       />

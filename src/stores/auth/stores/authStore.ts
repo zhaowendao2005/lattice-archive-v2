@@ -13,6 +13,7 @@
  *   3. 真正的会话有效性由 initializeSessionConnection 在后台校准，401 才清理。
  */
 import { defineStore } from 'pinia';
+import { isMockDev } from '@/config/env';
 import { authSessionStorage } from '../data-sources/authSessionStorage';
 import { authRemoteDataSource, RemoteAuthError } from '../data-sources/authRemoteDataSource';
 import { turnstileBridge } from '../data-sources/turnstileBridge';
@@ -92,6 +93,27 @@ export const useAuthStore = defineStore('auth', {
     toggleUserPasswordVisible() { this.isUserPasswordVisible = !this.isUserPasswordVisible; },
     toggleAdminPasswordVisible() { this.isAdminPasswordVisible = !this.isAdminPasswordVisible; },
 
+    /** Mock 开发环境专属：免密直接直通工作区 */
+    bypassLoginDirectly(role: UserRole = 'user') {
+      const mockUser: UserProfile = {
+        id: 'mock-dev-user-001',
+        name: role === 'admin' ? '系统管理员 (Mock)' : '开发者 (Mock)',
+        email: role === 'admin' ? 'admin@lattice.local' : 'dev@lattice.local',
+        initials: role === 'admin' ? 'AD' : 'MK',
+        role,
+      };
+      const mockToken = `mock-dev-token-${Date.now()}`;
+      const expiresAt = Date.now() + 30 * 24 * 3600 * 1000;
+      this.applySession(mockUser, mockToken, expiresAt);
+      this.isConnectedToServer = true;
+      this.hasInitializedConnection = true;
+      this.authError = null;
+      this.passwordInput = '';
+      this.adminPasswordInput = '';
+      this.closeAccountMenu();
+      return true;
+    },
+
     // ── 三个提交入口：都把「读表单 → 发请求 → 落会话」交给 submitWith 统一处理 ──
     /** 用户登录 */
     async submitLogin() {
@@ -115,7 +137,11 @@ export const useAuthStore = defineStore('auth', {
     async submitWith(request: () => Promise<{ user: UserProfile; session: { token: string; expiresAt: number } }>) {
       this.authError = null;
       if (this.isSubmitting) return false; // 双击/回车连按保护
-      if (!this.turnstileToken) { this.authError = '请先完成人机安全验证'; return false; }
+      if (isMockDev) {
+        if (!this.turnstileToken) this.turnstileToken = 'mock-dev-turnstile-token';
+      } else {
+        if (!this.turnstileToken) { this.authError = '请先完成人机安全验证'; return false; }
+      }
       this.isSubmitting = true;
       let succeeded = false;
       try {
@@ -130,6 +156,10 @@ export const useAuthStore = defineStore('auth', {
         succeeded = true;
         return true;
       } catch (error) {
+        if (isMockDev) {
+          this.bypassLoginDirectly();
+          return true;
+        }
         // 只把后端给的中文 message 透给用户，其余一律兜底文案
         this.authError = error instanceof RemoteAuthError ? error.message : '认证失败，请稍后重试';
         return false;
@@ -157,6 +187,14 @@ export const useAuthStore = defineStore('auth', {
      *     只在真正拿到 401 时才登出，避免「地铁里打开 App 就被登出」。
      */
     async initializeSessionConnection(onUnauthorized?: (previousRole?: UserRole) => void) {
+      if (isMockDev) {
+        if (!this.sessionToken || !this.user) {
+          this.bypassLoginDirectly('user');
+        }
+        this.isConnectedToServer = true;
+        this.hasInitializedConnection = true;
+        return true;
+      }
       if (this.hasInitializedConnection) return this.isLoggedIn;
       if (!this.sessionToken || !this.user) {
         // 没有本地会话：标记已初始化，后续不再重复进入

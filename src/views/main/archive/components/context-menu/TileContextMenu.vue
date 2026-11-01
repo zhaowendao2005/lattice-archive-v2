@@ -14,9 +14,11 @@ import {
   UnfoldHorizontal,
 } from '@lucide/vue';
 import type { TileSize } from '../../types/tile';
+import { useAggregateSearchStore } from '@/stores/archive/stores/aggregateSearchStore';
 import { useTileStore } from '../../store/tileStore';
 
 const tileStore = useTileStore();
+const aggregateSearchStore = useAggregateSearchStore();
 const menuRef = ref<HTMLElement | null>(null);
 
 const activeTile = computed(() => {
@@ -56,6 +58,11 @@ function handleRename() {
 
 function handleOpen() {
   if (!activeTile.value) return;
+  if (activeTile.value.systemApp === 'aggregate-search') {
+    aggregateSearchStore.openModal();
+    tileStore.closeContextMenu();
+    return;
+  }
   if (activeTile.value.type === 'file') {
     tileStore.openFile(activeTile.value);
   } else if (activeTile.value.type === 'folder') {
@@ -227,7 +234,15 @@ onUnmounted(() => {
         @click="handleOpen"
       >
         <ExternalLink class="size-3.5 text-white/60" />
-        <span>{{ activeTile.type === 'folder' ? '展开文件夹' : '查看文件详情' }}</span>
+        <span>
+          {{
+            activeTile.systemApp === 'aggregate-search'
+              ? '打开聚合搜索系统'
+              : activeTile.type === 'folder'
+                ? '展开文件夹'
+                : '查看文件详情'
+          }}
+        </span>
       </button>
 
       <!-- Rename -->
@@ -253,8 +268,9 @@ onUnmounted(() => {
 
       <div class="my-1 border-t border-white/10" />
 
-      <!-- Delete / Unpin -->
+      <!-- Delete / Unpin (Hidden for undeletable system app tiles) -->
       <button
+        v-if="!activeTile.undeletable && !activeTile.systemApp"
         type="button"
         class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-rose-400 hover:bg-rose-500/20 transition-colors"
         @click="handleDelete"
@@ -262,6 +278,12 @@ onUnmounted(() => {
         <Trash2 class="size-3.5 text-rose-400" />
         <span>从磁贴板移除</span>
       </button>
+      <div
+        v-else
+        class="px-3 py-1.5 text-[10px] font-mono text-sky-300/65 select-none"
+      >
+        系统常驻磁贴 · 不可删除
+      </div>
     </template>
 
     <!-- 2. Group Header Context Actions -->

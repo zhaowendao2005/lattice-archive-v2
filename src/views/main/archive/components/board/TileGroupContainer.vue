@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { GripVertical, Pencil, Plus } from '@lucide/vue';
+import { useAggregateSearchStore } from '@/stores/archive/stores/aggregateSearchStore';
 import type { TileData, TileGroupData } from '../../types/tile';
 import {
   getTilePixelDimensions,
@@ -12,6 +13,7 @@ import {
 } from '../../store/tileStore';
 import FileTile from '../tiles/FileTile.vue';
 import FolderTile from '../tiles/FolderTile.vue';
+import SearchAppTile from '../tiles/SearchAppTile.vue';
 
 const props = defineProps<{
   group: TileGroupData;
@@ -24,6 +26,7 @@ const emit = defineEmits<{
 }>();
 
 const tileStore = useTileStore();
+const aggregateSearchStore = useAggregateSearchStore();
 const groupGridRef = ref<HTMLElement | null>(null);
 const isEditingTitle = ref(false);
 const titleVal = ref(props.group.title);
@@ -108,6 +111,10 @@ const ghostStyle = computed(() => {
 });
 
 function handleTileClick(tile: TileData) {
+  if (tile.systemApp === 'aggregate-search') {
+    aggregateSearchStore.openModal();
+    return;
+  }
   if (tile.type === 'file') {
     tileStore.openFile(tile);
   } else if (tile.type === 'folder') {
@@ -334,8 +341,17 @@ defineExpose({
 
       <!-- Tiles inside this group -->
       <template v-for="tile in tiles" :key="tile.id">
+        <SearchAppTile
+          v-if="tile.type === 'file' && tile.systemApp === 'aggregate-search'"
+          :tile="tile"
+          :is-dragging="tileStore.dragState.isDragging && tileStore.dragState.tile?.id === tile.id"
+          :is-drop-target="tileStore.dragState.hoverTargetTileId === tile.id"
+          @click="handleTileClick(tile)"
+          @contextmenu="handleTileContextMenu($event, tile)"
+          @dragstart="(event, _t, grabOffset) => emit('dragstart', event, tile, grabOffset)"
+        />
         <FolderTile
-          v-if="tile.type === 'folder'"
+          v-else-if="tile.type === 'folder'"
           :folder="tile"
           :is-dragging="tileStore.dragState.isDragging && tileStore.dragState.tile?.id === tile.id"
           :is-drop-target="tileStore.dragState.hoverTargetTileId === tile.id"

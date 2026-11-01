@@ -12,17 +12,21 @@ import { useRouter } from 'vue-router';
 import { ArrowRight, Eye, EyeOff } from '@lucide/vue';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { isMockDev } from '@/config/env';
 import { useAuthStore } from '@/stores/auth/stores/authStore';
 import AuthFormShell from '@/views/auth/components/AuthFormShell.vue';
 import AuthWallpaperPanel from '@/views/auth/components/AuthWallpaperPanel.vue';
 import TurnstileWidget from '@/views/auth/components/TurnstileWidget.vue';
 
-
-
 const authStore = useAuthStore();
 const router = useRouter();
 
 async function handleSubmit() {
+  if (isMockDev) {
+    authStore.bypassLoginDirectly('admin');
+    await router.push({ name: 'admin-users' });
+    return;
+  }
   // 与用户登录同样的策略：可点 + 现场校验 + 聚焦缺失项
   if (!authStore.adminEmailInput.trim() || !authStore.adminPasswordInput) {
     authStore.setAuthError('请输入管理员账号和密码');

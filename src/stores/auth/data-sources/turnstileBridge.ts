@@ -9,6 +9,7 @@
  *
  * 服务端会再校验一次（success + action + hostname），前端这层只是体验优化。
  */
+import { isMockDev } from '@/config/env';
 import { useAuthStore } from '../stores/authStore';
 
 /** Turnstile 的 action 值：必须与服务端校验的白名单一致，否则验证失败 */
@@ -49,6 +50,11 @@ export const turnstileBridge = {
    */
   async mount(action: Action, containerId: string) {
     const store = useAuthStore();
+    if (isMockDev) {
+      store.setTurnstileToken('mock-dev-turnstile-token');
+      store.setTurnstileReady(true);
+      return;
+    }
     const seq = ++mountSequence; // 本次装载的序号，异步返回后比对这个值判是否过时
     store.setTurnstileToken(''); // 每次挂载都清空旧令牌，防止重放
     const siteKey = import.meta.env.VITE_TURNSTILE_SITEKEY as string | undefined;
