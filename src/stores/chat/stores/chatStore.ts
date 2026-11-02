@@ -144,6 +144,8 @@ export const useChatStore = defineStore('chat', {
     highlightedMessageId: null as number | null,
     /** 各会话底部的待发送草稿文本。 */
     drafts: {} as Record<TgPeerKey, string>,
+    /** 各会话最近一次由用户主动发出的文本（用于搜索机器人无 replyToId 时自动关联查询词）。 */
+    lastSentQueryByPeer: {} as Record<TgPeerKey, string>,
     /** 各会话当前选中的待回复消息目标。 */
     replyingTo: {} as Record<TgPeerKey, { id: number; senderName: string; text: string }>,
     /** 正在发送消息或唤醒机器人。 */
@@ -153,6 +155,20 @@ export const useChatStore = defineStore('chat', {
     isCheckingInvite: false,
     isImportingInvite: false,
     inviteError: null as string | null,
+    /** L1 内存热快照缓存（供 P0/P1 多账号 <16ms 零闪烁切换使用） */
+    accountSnapshots: {} as Record<string, {
+      dialogs: Record<TgPeerKey, TgDialogDto>;
+      pinnedOrder: TgPeerKey[];
+      archivePinnedOrder: TgPeerKey[];
+      activeChatKey: TgPeerKey | null;
+      windows: Record<TgPeerKey, MessageWindow>;
+      updatesState: TgUpdatesState | null;
+      hasArchivedChats: boolean;
+      dialogTotal: number;
+      archiveTotal: number;
+    }>,
+    /** 会话栏顶部多账号快切弹出层开关（零本地 ref） */
+    isAccountSwitcherOpen: false,
   }),
 
   getters: {
@@ -373,8 +389,12 @@ export const useChatStore = defineStore('chat', {
       return state.activeChatKey ? (state.replyingTo[state.activeChatKey] ?? null) : null;
     },
     isSpoilerRevealed: (state) => (key?: string): boolean => Boolean(key && state.revealedSpoilers[key]),
-    isCallbackPending: (state) => (messageId: number, rowIdx: number, colIdx: number): boolean =>
-      Boolean(state.pendingCallbacks[`${messageId}:${rowIdx}:${colIdx}`]),
+    isCallbackPending: (state) => (messageId: number, rowIdx: number, colIdx: number, buttonText?: string): boolean => {
+      if (buttonText !== undefined) {
+        return Boolean(state.pendingCallbacks[`${messageId}:${rowIdx}:${colIdx}:${buttonText}`]);
+      }
+      return Boolean(state.pendingCallbacks[`${messageId}:${rowIdx}:${colIdx}`]);
+    },
   },
 
   actions: {
@@ -410,10 +430,24 @@ export const useChatStore = defineStore('chat', {
       this.handleConnectionChange(telegram.currentConnectionState);
     },
 
-    /** 账户切换（或解绑）：代次 +1 使旧账户的在飞请求全部失效，然后重新加载 */
+    /** 账户切换（或解绑）：代次 +1 使旧账户的在飞请求全部失效，优先命中 L1 热快照实现 <16ms 零闪烁切换 */
     async bindAccount(accountId: string | null) {
       if (accountId === this.accountId && this.syncPhase !== 'no-account') return;
-      if (this.accountId) void this.persistNow();
+      if (this.accountId) {
+        // 保存切出账户的 L1 热快照
+        this.accountSnapshots[this.accountId] = {
+          dialogs: { ...this.dialogs },
+          pinnedOrder: [...this.pinnedOrder],
+          archivePinnedOrder: [...this.archivePinnedOrder],
+          activeChatKey: this.activeChatKey,
+          windows: { ...this.windows },
+          updatesState: this.updatesState ? { ...this.updatesState } : null,
+          hasArchivedChats: this.hasArchivedChats,
+          dialogTotal: this.dialogTotal,
+          archiveTotal: this.archiveTotal,
+        };
+        void this.persistNow();
+      }
       const generation = ++accountGeneration;
       // 冷启动时路由可能先于账户确定选中会话，首次绑定保留它；切换账户则清空。
       const keepActive = this.accountId === null ? this.activeChatKey : null;
@@ -425,10 +459,96 @@ export const useChatStore = defineStore('chat', {
         cacheLoadPromise = Promise.resolve();
         return;
       }
+      // L1 内存热快照命中：<16ms 同步恢复会话列表与窗口，无骨架屏闪烁
+      const l1 = this.accountSnapshots[accountId];
+      if (l1 && Object.keys(l1.dialogs).length > 0) {
+        this.dialogs = { ...l1.dialogs };
+        this.pinnedOrder = [...l1.pinnedOrder];
+        this.archivePinnedOrder = [...l1.archivePinnedOrder];
+        this.activeChatKey = keepActive ?? l1.activeChatKey;
+        this.windows = { ...l1.windows };
+        this.updatesState = l1.updatesState ? { ...l1.updatesState } : null;
+        this.hasArchivedChats = l1.hasArchivedChats;
+        this.dialogTotal = l1.dialogTotal;
+        this.archiveTotal = l1.archiveTotal;
+        this.hasCache = true;
+        this.syncPhase = this.isOnline ? 'live' : 'cache';
+        cacheLoadPromise = Promise.resolve();
+        if (generation === accountGeneration && this.isOnline) void this.syncNow();
+        return;
+      }
       this.syncPhase = 'connecting';
       cacheLoadPromise = this.loadCache(this.ownerId, accountId, generation);
       await cacheLoadPromise;
       if (generation === accountGeneration && this.isOnline) void this.syncNow();
+    },
+
+    toggleAccountSwitcher() {
+      this.isAccountSwitcherOpen = !this.isAccountSwitcherOpen;
+    },
+
+    closeAccountSwitcher() {
+      this.isAccountSwitcherOpen = false;
+    },
+
+    /** 切换前台活跃账号（<16ms 热快照替换 + Worker P0/P1 焦点切换） */
+    async switchForegroundAccount(accountId: string) {
+      this.isAccountSwitcherOpen = false;
+      if (accountId === this.accountId) return;
+      const telegram = useTelegramStore();
+      await telegram.switchActiveAccount(accountId);
+      await this.bindAccount(accountId);
+    },
+
+    /** 批量加入并可选在 Telegram 侧静默归档（folder_id = 1） */
+    async batchJoinAndArchive(
+      items: { peer?: TgPeerRef; inviteHash?: string; username?: string }[],
+      archiveInTg = true,
+    ): Promise<TgDialogDto[]> {
+      const accountId = this.accountId;
+      if (!accountId) return [];
+      const joinedDialogs: TgDialogDto[] = [];
+      const peersToArchive: TgPeerRef[] = [];
+
+      for (const item of items) {
+        try {
+          let dialog: TgDialogDto | null = null;
+          if (item.inviteHash) {
+            const res = await chatDataSource.importChatInvite(accountId, item.inviteHash);
+            dialog = res.dialog ?? null;
+          } else if (item.peer) {
+            const res = await chatDataSource.joinChat(accountId, item.peer);
+            dialog = res.dialog ?? null;
+          } else if (item.username) {
+            const resolved = await chatDataSource.resolveUsername(accountId, item.username);
+            if (resolved) {
+              const res = await chatDataSource.joinChat(accountId, resolved.peer);
+              dialog = res.dialog ?? null;
+            }
+          }
+          if (dialog) {
+            if (archiveInTg) {
+              dialog = { ...dialog, folderId: 1 };
+              peersToArchive.push(dialog.peer);
+            }
+            this.dialogs[dialog.key] = dialog;
+            joinedDialogs.push(dialog);
+          }
+        } catch {
+          // 单个会话失败不中断整批任务
+        }
+      }
+
+      if (archiveInTg && peersToArchive.length > 0) {
+        try {
+          await chatDataSource.batchSetDialogsArchived(accountId, peersToArchive, true);
+          this.hasArchivedChats = true;
+        } catch {
+          // 忽略批量归档非致命异常
+        }
+      }
+      this.scheduleSave();
+      return joinedDialogs;
     },
 
     /** 清空所有账户相关内容（切换账户/退出时调用），避免上一个账户的数据残留 */
@@ -786,6 +906,91 @@ export const useChatStore = defineStore('chat', {
       return this.dialogs[key]?.peer ?? (this.resolvedDialog?.key === key ? this.resolvedDialog.peer : null) ?? peerRefFromKey(key);
     },
 
+    /**
+     * 从磁贴 / 聚合搜索卡片跳转打开会话阅读流（并可选定位到具体消息 ID）：
+     * - 自动补充磁贴携带的 accessHash / title / username / inviteHash 到 resolvedDialog，避免归档会话或临时凭据会话未在主列表时出现「无法识别该会话」；
+     * - 若未在已加载列表中，后台自动触发一次归档列表拉取或用户名/邀请解析。
+     */
+    async openSessionFromTile(options: {
+      peerKey: TgPeerKey;
+      peerType?: 'user' | 'chat' | 'channel';
+      accessHash?: string;
+      title?: string;
+      username?: string;
+      inviteHash?: string;
+      accountId?: string;
+      messageId?: number;
+      avatarThumb?: string;
+    }) {
+      const key = options.peerKey;
+      if (!key) return;
+      if (options.accountId && options.accountId !== this.accountId) {
+        const telegram = useTelegramStore();
+        await telegram.switchActiveAccount(options.accountId);
+        await this.bindAccount(options.accountId);
+      }
+
+      if (!this.dialogs[key]) {
+        const fallbackRef = peerRefFromKey(key);
+        const type = options.peerType ?? fallbackRef?.type ?? 'channel';
+        const id = fallbackRef?.id ?? key.replace(/^(user|chat|channel)-/, '');
+        this.resolvedDialog = {
+          key,
+          peer: {
+            type,
+            id,
+            accessHash: options.accessHash ?? (this.resolvedDialog?.key === key ? this.resolvedDialog.peer.accessHash : undefined),
+          },
+          kind: type === 'channel' ? 'channel' : type === 'chat' ? 'group' : 'user',
+          title: options.title || this.resolvedDialog?.title || key,
+          username: options.username,
+          avatar: options.avatarThumb ? { photoId: 'tile', dcId: 0, thumb: options.avatarThumb } : undefined,
+          pinned: false,
+          folderId: 0,
+          muted: false,
+          unreadCount: 0,
+          unreadMentions: 0,
+          unreadMark: false,
+          readInboxMaxId: 0,
+          readOutboxMaxId: 0,
+          topMessageId: options.messageId ?? 0,
+          date: Math.floor(Date.now() / 1000),
+        };
+
+        const accountId = this.accountId;
+        if (accountId && this.isOnline) {
+          if (!options.accessHash && options.username) {
+            try {
+              const resolved = await chatDataSource.resolveUsername(accountId, options.username);
+              if (resolved) {
+                this.resolvedDialog = resolved;
+              }
+            } catch {
+              // 忽略解析异常，继续走 getHistory / getDialogs 兜底
+            }
+          } else if (!options.accessHash && options.inviteHash) {
+            try {
+              const preview = await chatDataSource.checkChatInvite(accountId, options.inviteHash);
+              if (preview.dialog) {
+                this.resolvedDialog = preview.dialog;
+              }
+            } catch {
+              // 忽略解析异常
+            }
+          }
+          if (!this.archiveLoaded) {
+            void this.refreshArchiveDialogs().catch(() => undefined);
+          }
+        }
+      }
+
+      if (options.messageId) {
+        await this.focusMessageInChat(key, options.messageId);
+      } else {
+        await this.openChat(key);
+      }
+    },
+
     /** 路由驱动：打开会话，保存上一会话的阅读位置，按栈原则记录历史，必要时刷新最新页。 */
     async openChat(key: TgPeerKey, options?: { isBack?: boolean }) {
       const previous = this.activeChatKey;
@@ -949,8 +1154,10 @@ export const useChatStore = defineStore('chat', {
     handleLiveUpdates(accountId: string, updates: TgChatUpdate[], state?: TgUpdatesState) {
       if (accountId !== this.accountId) return;
       this.applyUpdates(updates);
-      // 只有已完成补差的标签页才能前移本地状态，否则会跳过自己尚未见过的更新。
-      if (state && this.syncPhase === 'live') this.updatesState = state;
+      // 只要 Worker 推来的 pts 水位不低于当前基线即前移，防止发送消息或短暂重同步期间滞后引发假性 Gap
+      if (state && (!this.updatesState || state.pts >= this.updatesState.pts)) {
+        this.updatesState = state;
+      }
       this.scheduleSave();
     },
 
@@ -1031,8 +1238,14 @@ export const useChatStore = defineStore('chat', {
       if (win?.continuous) upsertMessage(win, message);
     },
 
-    /** 编辑消息：替换窗口中的同 id 消息并更新摘要 */
+    /** 编辑消息：替换窗口中的同 id 消息、清理该消息挂起的按钮旋转加载态并更新摘要 */
     applyEditedMessage(message: TgMessageDto) {
+      const prefix = `${message.id}:`;
+      for (const k of Object.keys(this.pendingCallbacks)) {
+        if (k.startsWith(prefix)) {
+          delete this.pendingCallbacks[k];
+        }
+      }
       const win = this.windows[message.peerKey];
       if (win && win.messages.some((item) => item.id === message.id)) upsertMessage(win, message);
       const dialog = this.dialogs[message.peerKey];
@@ -1040,12 +1253,14 @@ export const useChatStore = defineStore('chat', {
     },
 
     /** peerKey 缺省时属于公共消息盒，ID 在私聊与基础群之间全局唯一。 */
-    /** 删除消息：从窗口中移除（peerKey 缺省时全局按 id 删） */
+    /** 删除消息：从窗口中移除，若删到会话最后一条消息则触发一次列表刷新 */
     applyDeletedMessages(ids: number[], peerKey?: TgPeerKey) {
       const removed = new Set(ids);
       const matches = (key: TgPeerKey) => (peerKey ? key === peerKey : !key.startsWith('channel-'));
       for (const [key, win] of Object.entries(this.windows)) {
-        if (matches(key)) win.messages = win.messages.filter((message) => !removed.has(message.id));
+        if (matches(key)) {
+          win.messages = win.messages.filter((message) => !removed.has(message.id));
+        }
       }
       const touchedTop = Object.values(this.dialogs).some((dialog) => matches(dialog.key) && removed.has(dialog.topMessageId));
       if (touchedTop) this.scheduleDialogRefresh();
@@ -1432,6 +1647,7 @@ export const useChatStore = defineStore('chat', {
       const generation = accountGeneration;
       this.isSendingMessage = true;
       this.actionError = null;
+      this.lastSentQueryByPeer[key] = trimmed;
       try {
         const sent = await chatDataSource.sendMessage(accountId, peer, trimmed, replyTarget?.id);
         if (generation !== accountGeneration) return;
@@ -1493,7 +1709,7 @@ export const useChatStore = defineStore('chat', {
       }
       if (button.kind !== 'callback' || !button.data) return;
 
-      const cbKey = `${messageId}:${rowIdx}:${colIdx}`;
+      const cbKey = `${messageId}:${rowIdx}:${colIdx}:${button.text}`;
       if (this.pendingCallbacks[cbKey]) return;
       const peer = this.peerRefOf(key);
       if (!peer) return;
@@ -1512,7 +1728,10 @@ export const useChatStore = defineStore('chat', {
         }
       } catch (error) {
         if (generation === accountGeneration) {
-          this.actionError = chatDataSource.readError(error);
+          const msg = chatDataSource.readError(error);
+          if (!msg.includes('机器人响应超时')) {
+            this.actionError = msg;
+          }
         }
       } finally {
         delete this.pendingCallbacks[cbKey];

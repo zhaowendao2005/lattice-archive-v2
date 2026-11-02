@@ -80,9 +80,18 @@
 
 ---
 
-## 五、 可观测性与错误契约
+## 五、 可观测性、顺风车调试头与 Agent 渐进式日志查询契约
 
 * `observability.logs` 与 `observability.traces` 保持开启，日志必须是结构化 JSON。
+* **顺风车调试头（0 额外请求 / 0 Observability Event 配额消耗）**：
+  - 当前端开启 `REMOTE` 调试标签时，请求携带 `X-Lattice-Debug: 1` 与 `X-Lattice-Trace-Id`；
+  - Worker 在响应头回写 `X-Lattice-Debug-Trace`（URL 编码的结构化 Span JSON），且跳过常规 `console.log('request.complete')`，从而既不产生额外 HTTP 请求，也不消耗 Cloudflare Observability Events 免费额度。
+* **日志快照记录与 D1 分片（`/api/debug/snapshots`）**：
+  - 每次上传创建一条归属于当前账号的 `debug_snapshots` 快照记录，不再按 `user_id` 覆盖；客户端通过 `CompressionStream('gzip')` 压缩三端（`local` / `remote` / `frontend`）环形缓冲区日志并 Base64 编码；
+  - Cloudflare D1 单个字符串、BLOB 或表行上限为 `2,000,000` 字节，因此单条快照按约 `1,900,000` 字节的保守预算拆成 `ceil(载荷字节 / 预算)` 个连续分片行，小快照只写 1 行；服务端校验总分片数、单片大小、Base64 边界、解压后数组条数与时间范围，并用 D1 batch 原子写入；
+  - `GET /api/debug/snapshots` 只返回快照元数据（行数、压缩载荷大小、分片数、时间范围），不得返回压缩正文；`DELETE /api/debug/snapshots/:id` 只删除当前会话账号拥有的目标快照及其全部分片，重复删除幂等；
+  - Agent 查询将所有快照解压后按整体日志时间线合并，不按提交记录分组；`agent_debug_keys` 表仅存储 `lat_agk_` 密钥的 SHA-256 哈希与过期生命周期（`1h` / `24h` / `7d` / `30d` / `never`），明文密钥仅在创建时返回一次；
+  - `GET /api/debug/agent/query` 使用 `Authorization: Bearer lat_agk_<token>` 鉴权（自动校验过期并更新 `last_used_at`），提供四级渐进式查询模式（`mode=overview | timeline | grep | trace`，均支持 `from` / `to` 时间区间过滤），供外部 AI Agent 在数次请求内自顶向下定位问题。
 * API 错误统一返回 `{ error, message }`，`message` 为可直接展示的中文；不得把内部堆栈返回给客户端。
 * 未捕获异常返回 500，并记录 `request.failed` 事件（包含 path，不含密钥/密码）。
 

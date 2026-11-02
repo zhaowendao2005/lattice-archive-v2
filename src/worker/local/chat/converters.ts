@@ -7,6 +7,7 @@
  */
 import { Api } from 'telegram/tl';
 import { strippedPhotoToJpg } from 'telegram/Utils';
+import { emitLocalSpan } from './mtprotoGateway';
 import type {
   TgAvatarInfo, TgChatKind, TgDialogDto, TgFileInfo, TgInlineButton, TgMessageDto, TgMessageEntity, TgMessageMedia,
   TgPeerKey, TgPeerRef, TgPhotoInfo, TgPhotoSize, TgReplyInfo, TgVideoInfo, TgVideoQuality, TgWebPagePreview,
@@ -27,6 +28,7 @@ export interface PeerInfo {
   kicked?: boolean;
   creator?: boolean;
   joinRequest?: boolean;
+  noforwards?: boolean;
 }
 
 /** 实体名称 / 引用缓存：会话、历史、更新与差异结果都会写入，用于给缺少实体的更新补全发送者。 */
@@ -53,6 +55,17 @@ export function selfUserId(): string | undefined { return selfKey?.slice('user-'
 /** 把 strippedThumb（极小的渐进式 JPEG 字节）转成 data URL，作为模糊占位图 */
 function strippedBytesToDataUrl(bytes: Uint8Array | undefined): string | undefined {
   if (!bytes || bytes.length < 3) return undefined;
+  const version = bytes[0];
+  if (version !== 1 && !warnedStrippedVersions.has(version)) {
+    warnedStrippedVersions.add(version);
+    emitLocalSpan({
+      domain: 'chat.media',
+      action: 'stripped_version_unexpected',
+      level: 'WARN',
+      message: 'stripped thumb 的版本字节不是 1，当前拼接逻辑可能生成无效 JPEG',
+      tags: { version, bytes: bytes.length },
+    });
+  }
   try { return `data:image/jpeg;base64,${strippedPhotoToJpg(bytes as never).toString('base64')}`; } catch { return undefined; }
 }
 
@@ -116,6 +129,7 @@ function rememberEntity(entity: AnyEntity) {
       kicked: isForbidden,
       creator: chat instanceof Api.Channel ? (isMin ? previous?.creator : Boolean(chat.creator)) : false,
       joinRequest: chat instanceof Api.Channel ? (Boolean(chat.joinRequest) || undefined) : undefined,
+      noforwards: chat instanceof Api.Channel ? (Boolean(chat.noforwards) || undefined) : previous?.noforwards,
     });
     return;
   }
@@ -131,6 +145,7 @@ function rememberEntity(entity: AnyEntity) {
     left: isForbidden ? true : chat instanceof Api.Chat ? Boolean(chat.left) : false,
     kicked: isForbidden,
     creator: chat instanceof Api.Chat ? Boolean(chat.creator) : false,
+    noforwards: chat instanceof Api.Chat ? (Boolean(chat.noforwards) || undefined) : previous?.noforwards,
   });
 }
 
@@ -152,6 +167,9 @@ function photoSizeOf(size: Api.TypePhotoSize): TgPhotoSize | undefined {
   if (size instanceof Api.PhotoCachedSize) return { type: size.type, width: size.w, height: size.h, bytes: size.bytes.length };
   return undefined;
 }
+
+/** 已告警过的 stripped thumb 版本，避免逐条消息刷屏。 */
+const warnedStrippedVersions = new Set<number>();
 
 /** 找出 PhotoStrippedSize 并转成占位图 data URL */
 function strippedThumbOf(sizes: Api.TypePhotoSize[]): string | undefined {
@@ -303,6 +321,8 @@ function fileInfoOf(document: Api.Document, fileName: string | undefined): TgFil
     mimeType: document.mimeType || 'application/octet-stream',
     size,
     fileName,
+    thumb: strippedThumbOf(document.thumbs ?? []),
+    preview: documentPreviewOf(document),
   };
 }
 
@@ -513,6 +533,8 @@ export function toMessage(message: Api.TypeMessage | undefined): TgMessageDto | 
     groupedId: message.groupedId ? message.groupedId.toString() : undefined,
     forwardedFrom,
     views: message.views,
+    noforwards: Boolean(message.noforwards || peers.get(peerKey)?.noforwards) || undefined,
+    ttlPeriod: message.ttlPeriod || undefined,
   };
 }
 
@@ -558,6 +580,7 @@ export function toDialog(dialog: Api.Dialog, messages: Map<string, TgMessageDto>
     kicked: info.kicked || undefined,
     creator: info.creator || undefined,
     joinRequest: info.joinRequest,
+    noforwards: info.noforwards,
     pinned: Boolean(dialog.pinned),
     folderId: dialog.folderId === 1 || defaultFolderId === 1 ? 1 : 0,
     muted: muteUntil > Math.floor(Date.now() / 1000),
@@ -588,6 +611,7 @@ export function toPeerDialog(key: TgPeerKey, lastMessage?: TgMessageDto): TgDial
     kicked: info.kicked || undefined,
     creator: info.creator || undefined,
     joinRequest: info.joinRequest,
+    noforwards: info.noforwards,
     pinned: false,
     folderId: 0,
     muted: false,

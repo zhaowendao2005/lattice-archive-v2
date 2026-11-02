@@ -90,7 +90,7 @@ const routes: RouteRecordRaw[] = [
         path: 'settings',
         component: () => import('@/views/main/settings/SettingsView.vue'),
         children: [
-          { path: '', redirect: '/workspace/settings/platform' },
+          { path: '', redirect: '/workspace/settings/telegram' },
           { path: 'platform', name: 'settings-platform', component: () => import('@/views/main/settings/subviews/PlatformSettingsView.vue') },
           { path: 'appearance', name: 'settings-appearance', component: () => import('@/views/main/settings/subviews/AppearanceSettingsView.vue') },
           { path: 'general', name: 'settings-general', component: () => import('@/views/main/settings/subviews/GeneralSettingsView.vue') },

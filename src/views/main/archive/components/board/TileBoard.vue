@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref, watch } from 'vue';
-import { GripVertical, Plus } from '@lucide/vue';
+import { computed, onUnmounted, watch, type ComponentPublicInstance } from 'vue';
+import { FolderInput, GripVertical, Plus, RefreshCw, Trash2, X } from '@lucide/vue';
 import type { TileData, TileGroupData } from '../../types/tile';
 import {
   getTilePixelDimensions,
@@ -10,30 +10,36 @@ import {
   UNIT_SIZE,
   useTileStore,
 } from '../../store/tileStore';
+import { archiveDomRegistry } from '../../store/archiveDomRegistry';
 import { computeDisplacedPositions } from '../../utils/layoutEngine';
 import TileGroupContainer from './TileGroupContainer.vue';
 import FileTile from '../tiles/FileTile.vue';
 import FolderTile from '../tiles/FolderTile.vue';
 import SearchAppTile from '../tiles/SearchAppTile.vue';
+import SessionManagerAppTile from '../tiles/SessionManagerAppTile.vue';
 
 const tileStore = useTileStore();
-const boardRef = ref<HTMLElement | null>(null);
+
+function bindBoardRef(el: Element | ComponentPublicInstance | null) {
+  archiveDomRegistry.setBoardEl(el instanceof HTMLElement ? el : null);
+}
 
 function checkAutoScroll(clientX: number, clientY: number) {
-  if (!boardRef.value) return;
-  const rect = boardRef.value.getBoundingClientRect();
+  const boardEl = archiveDomRegistry.getBoardEl();
+  if (!boardEl) return;
+  const rect = boardEl.getBoundingClientRect();
   const threshold = 60;
   // Vertical auto-scroll
   if (clientY > rect.bottom - threshold && clientY <= rect.bottom + 40) {
-    boardRef.value.scrollTop += 14;
+    boardEl.scrollTop += 14;
   } else if (clientY < rect.top + threshold && clientY >= rect.top - 40) {
-    boardRef.value.scrollTop -= 14;
+    boardEl.scrollTop -= 14;
   }
   // Horizontal auto-scroll
   if (clientX > rect.right - threshold && clientX <= rect.right + 40) {
-    boardRef.value.scrollLeft += 14;
+    boardEl.scrollLeft += 14;
   } else if (clientX < rect.left + threshold && clientX >= rect.left - 40) {
-    boardRef.value.scrollLeft -= 14;
+    boardEl.scrollLeft -= 14;
   }
 }
 
@@ -710,6 +716,33 @@ function onGlobalPointerUp() {
     }
   }
 
+  // 0. 批量多选拖拽（若当前被拖拽磁贴处于已框选/多选集合中且集合数量 > 1）
+  const isBatchDrag =
+    tileStore.selectedTileIds.length > 1 && tileStore.selectedTileIds.includes(tile.id);
+
+  if (isBatchDrag) {
+    if (hoverPhase === 'locked' && hoverTargetType === 'folder' && hoverTargetTileId) {
+      tileStore.batchMoveTilesToFolder(hoverTargetTileId, tileStore.selectedTileIds);
+      cleanupDrag();
+      return;
+    }
+    if (
+      isMergeReady &&
+      hoverTargetType === 'file' &&
+      hoverTargetTileId &&
+      !tileStore.selectedTileIds.includes(hoverTargetTileId)
+    ) {
+      tileStore.batchCreateFolderFromTiles(hoverTargetTileId, tileStore.selectedTileIds);
+      cleanupDrag();
+      return;
+    }
+    if (currentGroupId) {
+      tileStore.batchMoveTilesToGroup(currentGroupId, dropX, dropY, tileStore.selectedTileIds);
+      cleanupDrag();
+      return;
+    }
+  }
+
   // 1. 仅「锁定」档才允许落入文件夹（候选档只提示不吞）
   if (
     tile.type === 'file' &&
@@ -958,15 +991,154 @@ function handleBoardContextMenu(event: MouseEvent) {
   tileStore.openContextMenu(event.clientX, event.clientY, null, undefined, true);
 }
 
+/**
+ * Windows 风格框选 (Rubber-band Marquee Selection)：
+ * 在磁贴板空白处按住左键拖拽即可框选与选区相交的所有非系统磁贴。
+ */
+const marqueeRectStyle = computed(() => {
+  const m = tileStore.marqueeState;
+  if (!m.isSelecting) return null;
+  const left = Math.min(m.startX, m.currentX);
+  const top = Math.min(m.startY, m.currentY);
+  const width = Math.abs(m.currentX - m.startX);
+  const height = Math.abs(m.currentY - m.startY);
+  return {
+    left: `${left}px`,
+    top: `${top}px`,
+    width: `${width}px`,
+    height: `${height}px`,
+  };
+});
+
+function onBoardPointerDown(event: PointerEvent) {
+  if (event.button !== 0) return;
+  if (
+    tileStore.dragState.isDragging ||
+    tileStore.groupDragState.isDragging ||
+    tileStore.resizingGroupWidthId !== null ||
+    tileStore.resizingTileId !== null
+  ) {
+    return;
+  }
+  const target = event.target as HTMLElement | null;
+  if (!target) return;
+
+  // 若点击在磁贴、分组标题栏、分组宽度调节器、按钮、输入框或底部批量操作栏上，不启动框选
+  if (
+    target.closest('.archive-base-tile') ||
+    target.closest('[data-group-header]') ||
+    target.closest('.group-width-resizer') ||
+    target.closest('[data-batch-action-bar]') ||
+    target.closest('button') ||
+    target.closest('input')
+  ) {
+    return;
+  }
+
+  const startX = event.clientX;
+  const startY = event.clientY;
+  const additive = event.ctrlKey || event.metaKey || event.shiftKey;
+  const baseSelectedIds = additive ? [...tileStore.selectedTileIds] : [];
+  let hasMovedMarquee = false;
+
+  const updateMarqueeHits = (currX: number, currY: number) => {
+    const boxLeft = Math.min(startX, currX);
+    const boxRight = Math.max(startX, currX);
+    const boxTop = Math.min(startY, currY);
+    const boxBottom = Math.max(startY, currY);
+
+    const tileEls = Array.from(document.querySelectorAll('[data-board-tile-id]')) as HTMLElement[];
+    const hitIds = new Set<string>(baseSelectedIds);
+
+    for (const el of tileEls) {
+      const tid = el.getAttribute('data-board-tile-id');
+      if (!tid) continue;
+      const tileObj = tileStore.getTileById(tid);
+      if (!tileObj || tileObj.undeletable || tileObj.systemApp) continue;
+
+      const r = el.getBoundingClientRect();
+      const intersects =
+        r.left < boxRight &&
+        r.right > boxLeft &&
+        r.top < boxBottom &&
+        r.bottom > boxTop;
+      if (intersects) {
+        hitIds.add(tid);
+      }
+    }
+
+    tileStore.setSelectedTileIds(Array.from(hitIds));
+  };
+
+  const onMarqueeMove = (moveEvent: PointerEvent) => {
+    if (
+      tileStore.dragState.isDragging ||
+      tileStore.groupDragState.isDragging ||
+      tileStore.resizingGroupWidthId !== null ||
+      tileStore.resizingTileId !== null
+    ) {
+      onMarqueeUp();
+      return;
+    }
+    const dx = Math.abs(moveEvent.clientX - startX);
+    const dy = Math.abs(moveEvent.clientY - startY);
+    if (!hasMovedMarquee && dx < 5 && dy < 5) return;
+
+    if (!hasMovedMarquee) {
+      hasMovedMarquee = true;
+      tileStore.marqueeState = {
+        isSelecting: true,
+        startX,
+        startY,
+        currentX: moveEvent.clientX,
+        currentY: moveEvent.clientY,
+        additive,
+        baseSelectedIds,
+      };
+    } else {
+      tileStore.marqueeState.currentX = moveEvent.clientX;
+      tileStore.marqueeState.currentY = moveEvent.clientY;
+    }
+
+    checkAutoScroll(moveEvent.clientX, moveEvent.clientY);
+    updateMarqueeHits(moveEvent.clientX, moveEvent.clientY);
+  };
+
+  const onMarqueeUp = () => {
+    window.removeEventListener('pointermove', onMarqueeMove);
+    window.removeEventListener('pointerup', onMarqueeUp);
+    window.removeEventListener('pointercancel', onMarqueeUp);
+
+    if (!hasMovedMarquee && !additive && tileStore.selectedTileIds.length > 0) {
+      tileStore.clearSelectedTiles();
+    }
+    tileStore.marqueeState.isSelecting = false;
+  };
+
+  window.addEventListener('pointermove', onMarqueeMove);
+  window.addEventListener('pointerup', onMarqueeUp);
+  window.addEventListener('pointercancel', onMarqueeUp);
+}
+
+function handleBatchDeleteSelected() {
+  const count = tileStore.selectedTileIds.length;
+  if (count === 0) return;
+  if (confirm(`确定要批量删除已选中的 ${count} 项磁贴吗？`)) {
+    tileStore.batchDeleteTiles();
+  }
+}
+
 onUnmounted(() => {
   cleanupDrag();
+  tileStore.marqueeState.isSelecting = false;
 });
 </script>
 
 <template>
   <div
-    ref="boardRef"
+    :ref="bindBoardRef"
     class="relative h-full w-full overflow-x-auto overflow-y-auto px-8 py-6 select-none tile-board-scroll"
+    @pointerdown="onBoardPointerDown"
     @contextmenu.self="handleBoardContextMenu"
   >
     <!-- Multi-Column Layout (Matching Windows 10 Start Menu Columns with Dynamic Widths) -->
@@ -1043,16 +1215,114 @@ onUnmounted(() => {
       </div>
     </div>
 
+    <!-- Windows 风格框选半透明矩形框（Teleport 挂载至 body，杜绝祖先层叠上下文引起坐标偏移） -->
+    <Teleport to="body">
+      <div
+        v-if="marqueeRectStyle"
+        class="pointer-events-none fixed z-[9999] rounded-[2px] border border-sky-400/90 bg-sky-500/20 shadow-[0_0_16px_rgba(56,189,248,0.28)]"
+        :style="marqueeRectStyle"
+      />
+    </Teleport>
+
+    <!-- 封面刷新/重新载入反馈横幅 -->
+    <div
+      v-if="tileStore.coverRefreshBannerText && !tileStore.activeFolder"
+      class="pointer-events-none fixed left-1/2 top-16 z-[9300] flex -translate-x-1/2 items-center gap-2 rounded-[2px] border border-emerald-400/50 bg-[#0f172a]/92 px-3.5 py-1.5 text-xs text-emerald-200 shadow-2xl backdrop-blur-xl"
+    >
+      <RefreshCw
+        class="size-3.5 shrink-0 text-emerald-400"
+        :class="tileStore.isRefreshingTileCovers ? 'animate-spin' : ''"
+      />
+      <span>{{ tileStore.coverRefreshBannerText }}</span>
+    </div>
+
+    <!-- 底部悬浮批量操作栏（当已框选或多选磁贴时浮现） -->
+    <div
+      v-if="tileStore.selectedTileIds.length > 0 && !tileStore.dragState.isDragging"
+      data-batch-action-bar="true"
+      class="fixed bottom-5 left-1/2 z-[9100] flex -translate-x-1/2 items-center gap-2.5 rounded-[2px] border border-sky-400/45 bg-[#0f172a]/90 px-4 py-2 text-xs text-white shadow-[0_16px_40px_rgba(0,0,0,0.65)] backdrop-blur-2xl"
+    >
+      <span class="flex items-center gap-1.5 font-medium text-sky-200">
+        <span class="inline-flex size-5 items-center justify-center rounded-[2px] bg-sky-500 font-mono text-[11px] font-bold text-white">
+          {{ tileStore.selectedTileIds.length }}
+        </span>
+        <span>已选磁贴 · 可直接拖拽至文件夹/分组</span>
+      </span>
+
+      <div class="h-3.5 w-px bg-white/15" />
+
+      <button
+        type="button"
+        class="flex items-center gap-1 rounded-[2px] border border-emerald-400/40 bg-emerald-500/20 px-2.5 py-1 text-[11px] font-medium text-emerald-200 transition-colors hover:bg-emerald-500/35 hover:text-white"
+        @click="tileStore.refreshTileCoversByIds()"
+      >
+        <RefreshCw class="size-3.5" :class="tileStore.isRefreshingTileCovers ? 'animate-spin' : ''" />
+        <span>刷新封面</span>
+      </button>
+
+      <button
+        type="button"
+        class="flex items-center gap-1 rounded-[2px] border border-sky-400/40 bg-sky-500/20 px-2.5 py-1 text-[11px] font-medium text-sky-200 transition-colors hover:bg-sky-500/35 hover:text-white"
+        @click="tileStore.openExplorerPickerForTiles()"
+      >
+        <FolderInput class="size-3.5" />
+        <span>批量移入文件夹…</span>
+      </button>
+
+      <button
+        type="button"
+        class="flex items-center gap-1 rounded-[2px] border border-rose-400/40 bg-rose-500/20 px-2.5 py-1 text-[11px] font-medium text-rose-200 transition-colors hover:bg-rose-500/35 hover:text-white"
+        @click="handleBatchDeleteSelected"
+      >
+        <Trash2 class="size-3.5" />
+        <span>批量删除</span>
+      </button>
+
+      <button
+        type="button"
+        class="flex items-center gap-1 rounded-[2px] border border-white/15 bg-white/5 px-2 py-1 text-[11px] text-white/65 transition-colors hover:bg-white/15 hover:text-white"
+        @click="tileStore.clearSelectedTiles()"
+      >
+        <X class="size-3" />
+        <span>取消</span>
+      </button>
+    </div>
+
     <!-- Floating Drag Preview Attached Precisely to Cursor (is-preview disables inner transforms) -->
     <div
       v-if="dragPreviewStyle && tileStore.dragState.tile"
       class="pointer-events-none fixed z-[9999] opacity-95 shadow-2xl"
       :style="dragPreviewStyle"
     >
+      <!-- 多选批量拖拽叠放残影与数量角标 -->
+      <div
+        v-if="
+          tileStore.selectedTileIds.length > 1 &&
+          tileStore.selectedTileIds.includes(tileStore.dragState.tile.id)
+        "
+        class="pointer-events-none absolute -right-2 -top-2 z-50 flex items-center gap-1 rounded-[2px] border border-sky-200/60 bg-sky-500 px-2 py-0.5 font-mono text-[11px] font-bold text-white shadow-lg"
+      >
+        <span>×{{ tileStore.selectedTileIds.length }}</span>
+      </div>
+      <div
+        v-if="
+          tileStore.selectedTileIds.length > 1 &&
+          tileStore.selectedTileIds.includes(tileStore.dragState.tile.id)
+        "
+        class="pointer-events-none absolute inset-0 translate-x-2 translate-y-2 rounded-[2px] border border-sky-400/40 bg-[#0f172a]/70 -z-10"
+      />
       <SearchAppTile
         v-if="
           tileStore.dragState.tile.type === 'file' &&
           tileStore.dragState.tile.systemApp === 'aggregate-search'
+        "
+        :tile="tileStore.dragState.tile"
+        :is-preview="true"
+      />
+      <SessionManagerAppTile
+        v-else-if="
+          tileStore.dragState.tile.type === 'file' &&
+          tileStore.dragState.tile.systemApp === 'session-manager'
         "
         :tile="tileStore.dragState.tile"
         :is-preview="true"

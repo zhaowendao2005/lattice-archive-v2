@@ -29,7 +29,7 @@ export function createWindow(messages: TgMessageDto[] = [], hasOlder = true, con
   return { messages, hasOlder, continuous, fresh: false, isLoadingLatest: false, isLoadingOlder: false, error: null, epoch: 0 };
 }
 
-/** 用服务器最新页校准窗口：有重叠则以服务器为准覆盖重叠区（顺带清除已删除消息），无重叠说明有缺口，整体替换。 */
+/** 用服务器最新页校准窗口：有重叠则以服务器为准覆盖重叠区，无重叠说明有缺口，整体替换。 */
 export function mergeLatestPage(window: MessageWindow, page: TgHistoryPage) {
   const incoming = page.messages;
   if (incoming.length === 0) {
@@ -519,6 +519,14 @@ const clamp = (value: number, min: number, max: number) => Math.min(max, Math.ma
 
 export function photoKey(photo: TgPhotoInfo, size: TgPhotoSize) { return `photo:${photo.id}:${size.type}`; }
 export function previewSizeOf(photo: TgPhotoInfo): TgPhotoSize { return photo.preview ?? photo.full; }
+
+/** 磁贴与卡片专用清晰度档位：优先寻找 ~320px 的 'm' 档（清晰锐利、体积小约 20KB，大幅加快并行加载） */
+export function coverSizeOf(photo: TgPhotoInfo): TgPhotoSize {
+  const candidate = photo.preview;
+  if (candidate && candidate.type === 'm') return candidate;
+  return photo.preview ?? photo.full;
+}
+
 export function docThumbKey(video: TgVideoInfo, size: TgPhotoSize) { return `doc:${video.id}:${size.type}`; }
 /** 完整视频文件的媒体键：按画质文档 ID 区分。 */
 export function videoFileKey(quality: { id: string }) { return `video:${quality.id}`; }

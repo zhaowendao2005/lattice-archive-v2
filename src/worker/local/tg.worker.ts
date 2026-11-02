@@ -24,6 +24,7 @@ import { LogLevel } from 'telegram/extensions/Logger';
 import type { TgCommand, TgEvent, TgInitialUser, TgRestoreFailure } from './protocol';
 import { renderQrDataUrl } from './qr';
 import { isChatEngineHealthy, runChatRequest, setChatDebug, startChatEngine, stopChatEngine } from './chat/chatService';
+import { emitLocalSpan } from './chat/mtprotoGateway';
 import { downloadAvatar, downloadDocument, downloadDocumentPart, downloadDocumentThumb, downloadPhoto, resetMediaState, type CancelToken } from './chat/mediaService';
 
 const CANCELED = 'AUTH_USER_CANCEL';
@@ -57,11 +58,65 @@ let loginTarget: string | undefined;
 let restoreInFlight: { accountId: string; promise: Promise<void | undefined> } | undefined;
 let lastQr: TgEvent | undefined;
 
+/**
+ * Phase 2: 多实例客户端温池 (AccountClientPool)
+ * 支持 1 个 P0 前台焦点账号 + 最多 2 个 P1 后台温驻留账号同时保持 WebSocket 在线，
+ * 实现 <16ms 零握手秒级切号与多账号并发聚合搜索/机器人收割。
+ */
+const MAX_WARM_POOL_SIZE = 3;
+interface WarmPoolEntry {
+  client: TelegramClient;
+  user: TgInitialUser;
+  lastUsedAt: number;
+}
+const warmClientPool = new Map<string, WarmPoolEntry>();
+
+function emitWarmPoolState() {
+  const accounts = Array.from(warmClientPool.entries()).map(([accountId, entry]) => ({
+    accountId,
+    tier: (accountId === authorizedAccountId ? 'P0' : 'P1') as 'P0' | 'P1' | 'P2',
+    connected: Boolean(entry.client.connected),
+  }));
+  emit({
+    t: 'warmPoolState',
+    foregroundAccountId: authorizedAccountId ?? null,
+    accounts,
+  });
+}
+
+async function evictColdestWarmClientIfNeeded(excludeAccountId?: string) {
+  if (warmClientPool.size <= MAX_WARM_POOL_SIZE) return;
+  let oldestKey: string | null = null;
+  let oldestTime = Number.POSITIVE_INFINITY;
+  for (const [accId, entry] of warmClientPool.entries()) {
+    if (accId === authorizedAccountId || accId === excludeAccountId) continue;
+    if (entry.lastUsedAt < oldestTime) {
+      oldestTime = entry.lastUsedAt;
+      oldestKey = accId;
+    }
+  }
+  if (oldestKey) {
+    const victim = warmClientPool.get(oldestKey);
+    warmClientPool.delete(oldestKey);
+    if (victim) {
+      try {
+        await withTimeout(victim.client.disconnect(), DISCONNECT_TIMEOUT_MS, 'DISCONNECT_TIMEOUT');
+      } catch {
+        // ignore
+      }
+    }
+  }
+}
+
 /** 向主线程发消息；transfer 用于零拷贝移交 ArrayBuffer（大文件必须走它） */
 function emit(event: TgEvent, transfer: Transferable[] = []) { self.postMessage(event, { transfer }); }
 function errorCode(error: unknown) { return String((error as { errorMessage?: string; code?: string })?.errorMessage ?? (error as { code?: string })?.code ?? (error instanceof Error ? error.message : '')).toUpperCase(); }
 function isAuthFatal(error: unknown) { const code = errorCode(error); return [...AUTH_FATAL_CODES].some((item) => code.includes(item)); }
-function isTransient(error: unknown) { const code = errorCode(error); return [...TRANSIENT_CONNECTION_CODES].some((item) => code.includes(item)) || code.includes('DISCONNECTED'); }
+function isTransient(error: unknown) {
+  const code = errorCode(error);
+  if (code.includes('BOT_RESPONSE_TIMEOUT')) return false;
+  return [...TRANSIENT_CONNECTION_CODES].some((item) => code.includes(item)) || code.includes('DISCONNECTED');
+}
 function wait(ms: number) { return new Promise<void>((resolve) => setTimeout(resolve, ms)); }
 /** 统一超时包装：超时后抛一个带 code 的错误，方便上层归因 */
 function withTimeout<T>(promise: Promise<T>, ms: number, code: string): Promise<T> {
@@ -69,12 +124,28 @@ function withTimeout<T>(promise: Promise<T>, ms: number, code: string): Promise<
   const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error(code), { code })), ms); });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
-function isTimeout(error: unknown) { return errorCode(error).includes('TIMEOUT'); }
+function isTimeout(error: unknown) {
+  const code = errorCode(error);
+  if (code.includes('BOT_RESPONSE_TIMEOUT')) return false;
+  return code.includes('TIMEOUT');
+}
 
-/** 调试开关由主线程在 init 时下发；只打印阶段与 DC 信息，绝不输出 session / auth_key。 */
+/** 调试开关由主线程在 init 或 setDebug 时下发；只回传结构化阶段与 DC 信息，绝不输出 session / auth_key。 */
 let debugEnabled = false;
+function syncDebugState(enabled: boolean) {
+  debugEnabled = enabled;
+  setChatDebug(enabled, (entry) => emit({ t: 'debugLog', entry }));
+  if (client) applyLogLevel(client);
+  for (const [, warm] of warmClientPool) applyLogLevel(warm.client);
+}
 function debugLog(stage: string, detail?: Record<string, unknown>) {
-  if (debugEnabled) console.info(`[lattice-tg] ${stage}`, detail ?? '');
+  if (!debugEnabled) return;
+  emitLocalSpan({
+    domain: 'tg.worker',
+    action: stage,
+    level: stage.includes('failed') || stage.includes('error') ? 'ERROR' : 'INFO',
+    tags: detail as Record<string, string | number | boolean | undefined>,
+  });
 }
 function applyLogLevel(telegram: TelegramClient) {
   telegram.setLogLevel(debugEnabled ? LogLevel.DEBUG : LogLevel.INFO);
@@ -115,23 +186,42 @@ async function cancelLogin() {
   try { if (pending) await withTimeout(pending.disconnect(), DISCONNECT_TIMEOUT_MS, 'DISCONNECT_TIMEOUT'); } catch { /* 忽略取消登录时的断开异常 */ }
 }
 
-/** 断开并清空当前在线会话（切号、解绑、销毁时使用） */
-async function teardownActiveSession() {
+/** 断开并清空当前在线会话（解绑、销毁全部时使用） */
+async function teardownActiveSession(preserveInWarmPool = false) {
   stopChatEngine();
   const stoppedAccountId = authorizedAccountId;
+  const current = client;
+  if (preserveInWarmPool && stoppedAccountId && current && currentUser) {
+    warmClientPool.set(stoppedAccountId, {
+      client: current,
+      user: currentUser,
+      lastUsedAt: Date.now(),
+    });
+    authorizedAccountId = undefined;
+    currentUser = undefined;
+    client = null;
+    await evictColdestWarmClientIfNeeded();
+    return stoppedAccountId;
+  }
+  if (stoppedAccountId) {
+    warmClientPool.delete(stoppedAccountId);
+  }
   authorizedAccountId = undefined;
   currentUser = undefined;
-  const current = client;
   client = null;
-  // 卡死的客户端 disconnect 也可能挂起，限时后直接放弃，避免阻塞后续恢复/登录。
   try { if (current) await withTimeout(current.disconnect(), DISCONNECT_TIMEOUT_MS, 'DISCONNECT_TIMEOUT'); } catch { /* 断开失败不影响本地状态清理 */ }
+  emitWarmPoolState();
   return stoppedAccountId;
 }
 
-/** 完整拆除：先取消登录，再断开在线会话 */
+/** 完整拆除：先取消登录，再断开所有温池与在线会话 */
 async function teardown() {
   await cancelLogin();
-  return teardownActiveSession();
+  for (const [, entry] of warmClientPool) {
+    try { await withTimeout(entry.client.disconnect(), DISCONNECT_TIMEOUT_MS, 'DISCONNECT_TIMEOUT'); } catch { /* ignore */ }
+  }
+  warmClientPool.clear();
+  return teardownActiveSession(false);
 }
 
 /** 停止当前会话并通知主线程（sessionStopped 携带被停掉的 accountId） */
@@ -140,10 +230,9 @@ async function stopCurrentSession() {
   emit({ t: 'sessionStopped', accountId });
 }
 
-/** 用新客户端替换当前在线会话（切换账户时调用） */
+/** 用新客户端替换当前前台会话（旧会话保留在温池以支持秒级切回） */
 async function replaceActiveSessionWith(nextClient: TelegramClient) {
-  const previousAccountId = await teardownActiveSession();
-  if (previousAccountId) emit({ t: 'accountDisconnected', accountId: previousAccountId });
+  await teardownActiveSession(true);
   client = nextClient;
 }
 
@@ -224,19 +313,30 @@ function attachChatEngine(telegram: TelegramClient, accountId: string) {
   );
 }
 
-/** 聊天请求统一入口：媒体走下载分支，其余走普通 RPC */
+/** 聊天请求统一入口：支持路由到 P0 前台账号或任意 P1 温池账号，实现多账号并发检索与跨账号图片加载 */
 async function handleChatRequest(command: Extract<TgCommand, { t: 'chatRequest' }>) {
   try {
-    if (!client || authorizedAccountId !== command.accountId) throw Object.assign(new Error('Telegram 账户尚未连接'), { code: 'TG_NOT_CONNECTED' });
-    const telegram = client;
+    let telegram: TelegramClient | null = null;
+    if (client && authorizedAccountId === command.accountId) {
+      telegram = client;
+    } else {
+      const warmEntry = warmClientPool.get(command.accountId);
+      if (warmEntry) {
+        warmEntry.lastUsedAt = Date.now();
+        telegram = warmEntry.client;
+      }
+    }
+    if (!telegram) {
+      throw Object.assign(new Error('Telegram 账户尚未连接'), { code: 'TG_NOT_CONNECTED' });
+    }
+    const targetClient = telegram;
     const request = command.request;
     if (request.method === 'getAvatar' || request.method === 'getPhoto' || request.method === 'getDocumentThumb') {
-      // 媒体下载走独立 DC 连接，失败不能触发主连接重连或把账户标为离线；重试交给主线程退避。
       const file = request.method === 'getAvatar'
-        ? await downloadAvatar(telegram, request.peer, request.photoId, request.dcId, request.containerPeer, request.messageId)
+        ? await downloadAvatar(targetClient, request.peer, request.photoId, request.dcId, request.containerPeer, request.messageId)
         : request.method === 'getPhoto'
-          ? await downloadPhoto(telegram, request.peer, request.messageId, request.photo, request.size)
-          : await downloadDocumentThumb(telegram, request.peer, request.messageId, request.document, request.size);
+          ? await downloadPhoto(targetClient, request.peer, request.messageId, request.photo, request.size)
+          : await downloadDocumentThumb(targetClient, request.peer, request.messageId, request.document, request.size);
       emit({ t: 'chatResponse', requestId: command.requestId, ok: true, data: file }, [file.bytes]);
       return;
     }
@@ -244,7 +344,7 @@ async function handleChatRequest(command: Extract<TgCommand, { t: 'chatRequest' 
       const token: CancelToken = { canceled: false };
       cancelTokens.set(command.requestId, token);
       try {
-        const part = await downloadDocumentPart(telegram, request.peer, request.messageId, request.document, request.offset, request.limit, request.size, request.mimeType, token);
+        const part = await downloadDocumentPart(targetClient, request.peer, request.messageId, request.document, request.offset, request.limit, request.size, request.mimeType, token);
         emit({ t: 'chatResponse', requestId: command.requestId, ok: true, data: part }, [part.bytes]);
       } finally {
         cancelTokens.delete(command.requestId);
@@ -257,8 +357,7 @@ async function handleChatRequest(command: Extract<TgCommand, { t: 'chatRequest' 
       let lastEmit = 0;
       let lastLoaded = 0;
       try {
-        const file = await downloadDocument(telegram, request.peer, request.messageId, request.document, request.size, request.mimeType, token, (loaded, total) => {
-          // 节流：至少间隔 250 ms 或增长 2%，避免高频事件挤占主线程。
+        const file = await downloadDocument(targetClient, request.peer, request.messageId, request.document, request.size, request.mimeType, token, (loaded, total) => {
           const now = Date.now();
           if (loaded < total && now - lastEmit < PROGRESS_INTERVAL_MS && loaded - lastLoaded < total * 0.02) return;
           lastEmit = now;
@@ -271,7 +370,7 @@ async function handleChatRequest(command: Extract<TgCommand, { t: 'chatRequest' 
       }
       return;
     }
-    const data = await withTelegramConnection(() => runChatRequest(telegram, request), false);
+    const data = await withTelegramConnection(() => runChatRequest(targetClient, request), false);
     emit({ t: 'chatResponse', requestId: command.requestId, ok: true, data });
   } catch (error) {
     emit({ t: 'chatResponse', requestId: command.requestId, ok: false, code: errorCode(error) || 'TG_REQUEST_FAILED', message: error instanceof Error ? error.message : 'Telegram 请求失败' });
@@ -308,7 +407,8 @@ self.addEventListener('message', (event: MessageEvent<TgCommand>) => { void hand
 /** 命令分发器（switch 的替身：用提前 return 保持每个分支扁平） */
 async function handle(command: TgCommand) {
   try {
-    if (command.t === 'init') { debugEnabled = command.debug === true; setChatDebug(debugEnabled); emit({ t: 'ready' }); return; }
+    if (command.t === 'init') { syncDebugState(command.debug === true); emit({ t: 'ready' }); return; }
+    if (command.t === 'setDebug') { syncDebugState(command.enabled); debugLog('debug:toggled', { enabled: command.enabled }); return; }
     if (command.t === 'cancel') {
       await cancelLogin();
       return;
@@ -369,13 +469,27 @@ async function handle(command: TgCommand) {
     if (command.t === 'restoreSession') {
       if (client && authorizedAccountId === command.accountId && currentUser) {
         emit({ t: 'restored', user: currentUser });
+        emitWarmPoolState();
         return;
       }
-      // 同一账户的恢复正在进行时直接复用，绝不能 teardown 正在握手的客户端再重建：
-      // 同一 auth_key 并发建连会被 Telegram 判为 AUTH_KEY_DUPLICATED，且 getMe 会卡死在被断开的连接上。
+      // 若目标账号已在温池 (warmClientPool) 中在线，直接 <16ms 零握手提升为 P0 前台焦点账号！
+      const warmHit = warmClientPool.get(command.accountId);
+      if (warmHit && warmHit.client.connected) {
+        await teardownActiveSession(true);
+        client = warmHit.client;
+        authorizedAccountId = warmHit.user.id;
+        currentUser = warmHit.user;
+        warmHit.lastUsedAt = Date.now();
+        attachChatEngine(warmHit.client, warmHit.user.id);
+        emit({ t: 'restored', user: warmHit.user });
+        emitConnection('online');
+        emitWarmPoolState();
+        return;
+      }
+
       if (restoreInFlight && restoreInFlight.accountId === command.accountId) { await restoreInFlight.promise; return; }
       const run = (async () => {
-        await teardownActiveSession();
+        await teardownActiveSession(true);
         const saved = new StringSession(command.session);
         debugLog('restore:start', { dc: saved.dcId, server: saved.serverAddress, port: saved.port });
         const restored = createClient(command.apiId, command.apiHash, saved);
@@ -393,12 +507,14 @@ async function handle(command: TgCommand) {
           }
           authorizedAccountId = user.id;
           currentUser = user;
+          warmClientPool.set(user.id, { client: restored, user, lastUsedAt: Date.now() });
+          await evictColdestWarmClientIfNeeded(user.id);
           attachChatEngine(restored, user.id);
           emit({ t: 'restored', user });
+          emitWarmPoolState();
         } catch (error) {
           debugLog('restore:failed', { code: errorCode(error) });
-          // 只清理本次创建的客户端；期间若已被新的登录替换则不误伤。
-          if (client === restored) await teardownActiveSession();
+          if (client === restored) await teardownActiveSession(false);
           else try { await withTimeout(restored.disconnect(), DISCONNECT_TIMEOUT_MS, 'DISCONNECT_TIMEOUT'); } catch { /* 已断开 */ }
           const reason = classifyRestoreFailure(error);
           emit({ t: 'restoreFailed', accountId: command.accountId, reason, message: RESTORE_FAILURE_MESSAGES[reason] });
@@ -406,6 +522,66 @@ async function handle(command: TgCommand) {
       })();
       restoreInFlight = { accountId: command.accountId, promise: run.catch(() => undefined) };
       try { await run; } finally { restoreInFlight = undefined; }
+      return;
+    }
+
+    if (command.t === 'restoreWarmAccount') {
+      if (warmClientPool.has(command.accountId)) {
+        emitWarmPoolState();
+        return;
+      }
+      try {
+        const saved = new StringSession(command.session);
+        const warmClient = createClient(command.apiId, command.apiHash, saved);
+        await withTimeout(warmClient.connect(), RESTORE_TIMEOUT_MS, 'RESTORE_CONNECT_TIMEOUT');
+        const me = await withTimeout(warmClient.getMe(), RESTORE_TIMEOUT_MS, 'RESTORE_GETME_TIMEOUT');
+        const user = toUser(me, warmClient.session.dcId);
+        if (user.id === command.accountId) {
+          warmClientPool.set(user.id, { client: warmClient, user, lastUsedAt: Date.now() });
+          await evictColdestWarmClientIfNeeded(user.id);
+          emitWarmPoolState();
+        } else {
+          await warmClient.disconnect();
+        }
+      } catch {
+        // 后台温池恢复失败静默忽略，不打断前台 P0 会话
+      }
+      return;
+    }
+
+    if (command.t === 'setForegroundAccount') {
+      if (authorizedAccountId === command.accountId && client && currentUser) {
+        emit({ t: 'restored', user: currentUser });
+        emitWarmPoolState();
+        return;
+      }
+      const warmHit = warmClientPool.get(command.accountId);
+      if (warmHit && warmHit.client.connected) {
+        await teardownActiveSession(true);
+        client = warmHit.client;
+        authorizedAccountId = warmHit.user.id;
+        currentUser = warmHit.user;
+        warmHit.lastUsedAt = Date.now();
+        attachChatEngine(warmHit.client, warmHit.user.id);
+        emit({ t: 'restored', user: warmHit.user });
+        emitConnection('online');
+        emitWarmPoolState();
+      }
+      return;
+    }
+
+    if (command.t === 'disconnectAccount') {
+      if (authorizedAccountId === command.accountId) {
+        await teardownActiveSession(false);
+        emit({ t: 'accountDisconnected', accountId: command.accountId });
+      } else {
+        const warm = warmClientPool.get(command.accountId);
+        warmClientPool.delete(command.accountId);
+        if (warm) {
+          try { await withTimeout(warm.client.disconnect(), DISCONNECT_TIMEOUT_MS, 'DISCONNECT_TIMEOUT'); } catch { /* ignore */ }
+        }
+        emitWarmPoolState();
+      }
       return;
     }
 

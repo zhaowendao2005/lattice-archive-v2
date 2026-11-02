@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia';
-import { tgRemoteDataSource, type TelegramAccount, type TelegramCredentials, type TelegramAuthorization } from '../data-sources/tgRemoteDataSource';
+import { tgRemoteDataSource, registerCloudActivityListener, type TelegramAccount, type TelegramCredentials, type TelegramAuthorization } from '../data-sources/tgRemoteDataSource';
 import { MtprotoBridge, mtprotoHub, type LoginEvent, type RestoreFailure, type ValidationReport } from '../data-sources/mtprotoBridge';
 import { tgSessionVault } from '../data-sources/tgSessionVault';
 
@@ -7,7 +7,8 @@ export type LoginStage = 'idle' | 'qr' | 'phone' | 'code' | 'password' | 'ready'
 
 const APP_VERSION = '2.0.0';
 const PLATFORM = 'web' as const;
-const DEVICE_HEARTBEAT_INTERVAL_MS = 30_000;
+const PIGGYBACK_MIN_INTERVAL_MS = 60_000;
+let lastPiggybackHeartbeatTimeMs = 0;
 const ONLINE_WINDOW_MS = 90_000;
 const PRESENCE_CLOCK_INTERVAL_MS = 15_000;
 const ACTIVE_ACCOUNT_KEY = 'lattice.telegram.active-account';
@@ -61,6 +62,7 @@ export const useTelegramStore = defineStore('telegram', {
     presenceNow: Date.now(),
     isLoading: false,
     isValidating: false,
+    isManualSyncing: false,
     error: null as string | null,
     loginStage: 'idle' as LoginStage,
     qrToken: '',
@@ -69,6 +71,8 @@ export const useTelegramStore = defineStore('telegram', {
     phoneInput: '',
     codeInput: '',
     passwordInput: '',
+    /** P0 / P1 热连接池状态（最多 3 个并发保活客户端） */
+    warmPoolAccounts: [] as { accountId: string; tier: 'P0' | 'P1' | 'P2'; connected: boolean }[],
   }),
   getters: {
     hasCredentials: (state): boolean => state.credentials !== null,
@@ -103,6 +107,9 @@ export const useTelegramStore = defineStore('telegram', {
     setPasswordInput(value: string) { this.passwordInput = value; },
 
     async load() {
+      registerCloudActivityListener(() => {
+        void this.triggerPiggybackHeartbeat();
+      });
       if (!presenceClockTimer) {
         presenceClockTimer = window.setInterval(() => { this.presenceNow = Date.now(); }, PRESENCE_CLOCK_INTERVAL_MS);
       }
@@ -314,9 +321,55 @@ export const useTelegramStore = defineStore('telegram', {
         this.currentAccountId = null;
       }
       for (const account of candidates) {
-        if (this.connectionStates[account.tg_user_id] === 'online') return;
-        if (await this.restoreAccount(account.tg_user_id)) return;
+        if (this.connectionStates[account.tg_user_id] === 'online') {
+          void this.warmAllLocalAccounts(account.tg_user_id);
+          return;
+        }
+        if (await this.restoreAccount(account.tg_user_id)) {
+          void this.warmAllLocalAccounts(account.tg_user_id);
+          return;
+        }
       }
+    },
+
+    /** 错峰预热其余最多 2 个本机已授权账户进入 P1 热连接池（避开 P0 首屏同步高峰，保障主连接稳定） */
+    async warmAllLocalAccounts(foregroundId?: string) {
+      if (!this.credentials) return;
+      await new Promise<void>((resolve) => { window.setTimeout(resolve, 3500); });
+      if (!this.credentials) return;
+      const storedIds = await tgSessionVault.listAccountIds();
+      let warmed = 0;
+      for (const id of storedIds) {
+        if (id === foregroundId || id === this.currentAccountId) continue;
+        if (warmed >= 2) break;
+        const session = await tgSessionVault.read(id);
+        if (!session) continue;
+        if (session.ownerId && ownerId && session.ownerId !== ownerId) continue;
+        warmed += 1;
+        this.connectionStates[id] = 'connecting';
+        await this.ensureBridge().restoreWarmAccount(
+          session.apiId ?? this.credentials.apiId,
+          session.apiHash ?? this.credentials.apiHash,
+          id,
+          session.stringSession,
+        );
+        await new Promise<void>((resolve) => { window.setTimeout(resolve, 1500); });
+      }
+    },
+
+    /** P0/P1 热切换活跃前台账户（<16ms 切换焦点，若已在热池中无需断连重连） */
+    async switchActiveAccount(tgUserId: string) {
+      if (this.currentAccountId === tgUserId && this.connectionStates[tgUserId] === 'online') return;
+      writeActiveAccountId(tgUserId);
+      this.currentAccountId = tgUserId;
+      const inPool = this.warmPoolAccounts.find((a) => a.accountId === tgUserId && a.connected);
+      if (inPool || this.connectionStates[tgUserId] === 'online') {
+        await this.ensureBridge().setForegroundAccount(tgUserId);
+        this.connectionStates[tgUserId] = 'online';
+        this.startDeviceHeartbeat(tgUserId);
+        return;
+      }
+      await this.restoreAccount(tgUserId);
     },
 
     /** 恢复单个账户；返回是否真正发起了恢复（本地无会话时返回 false）。 */
@@ -395,10 +448,47 @@ export const useTelegramStore = defineStore('telegram', {
 
     startDeviceHeartbeat(tgUserId: string) {
       if (deviceHeartbeatTimer) window.clearInterval(deviceHeartbeatTimer);
+      deviceHeartbeatTimer = undefined;
       heartbeatAccountId = tgUserId;
-      const generation = ++heartbeatGeneration;
-      void this.sendDeviceHeartbeat(tgUserId, generation);
-      deviceHeartbeatTimer = window.setInterval(() => { void this.sendDeviceHeartbeat(tgUserId, generation); }, DEVICE_HEARTBEAT_INTERVAL_MS);
+      ++heartbeatGeneration;
+      // 严禁定时轮询，采用「顺风车」模式：仅在其他业务请求 Cloudflare 时顺带触发保活
+    },
+
+    /**
+     * 顺风车（Piggyback）保活更新：
+     * 仅当其他业务与 Cloudflare 交互时调用：
+     * (a) 1 分钟内若有多次活动，严格只请求 1 次；
+     * (b) 超过 1 分钟未有其他活动，不发起请求（绝对不做兜底轮询机制）。
+     */
+    async triggerPiggybackHeartbeat(): Promise<void> {
+      const tgUserId = this.currentAccountId;
+      if (!tgUserId || this.connectionStates[tgUserId] !== 'online') return;
+      const now = Date.now();
+      if (now - lastPiggybackHeartbeatTimeMs < PIGGYBACK_MIN_INTERVAL_MS) {
+        return; // 1 分钟内已搭过顺风车，直接跳过
+      }
+      lastPiggybackHeartbeatTimeMs = now;
+      await this.sendDeviceHeartbeat(tgUserId, heartbeatGeneration);
+    },
+
+    /**
+     * 新增唯一的主动请求（非顺风车）：用户在账户配置页面手动点击触发同步
+     */
+    async manualSyncAccounts(): Promise<{ ok: boolean; message: string }> {
+      if (this.isManualSyncing) return { ok: true, message: '正在同步中…' };
+      this.isManualSyncing = true;
+      try {
+        await this.refreshAccounts();
+        if (this.currentAccountId) {
+          lastPiggybackHeartbeatTimeMs = Date.now();
+          await this.sendDeviceHeartbeat(this.currentAccountId, heartbeatGeneration);
+        }
+        return { ok: true, message: '账户与设备状态已同步至最新' };
+      } catch (err) {
+        return { ok: false, message: this.readError(err) };
+      } finally {
+        this.isManualSyncing = false;
+      }
     },
 
     async sendDeviceHeartbeat(tgUserId: string, generation = heartbeatGeneration) {
@@ -561,12 +651,25 @@ export const useTelegramStore = defineStore('telegram', {
         else delete this.connectionNotices[event.accountId];
         return;
       }
+      if (event.type === 'warmPoolState') {
+        this.warmPoolAccounts = event.accounts;
+        for (const item of event.accounts) {
+          if (item.connected) {
+            this.connectionStates[item.accountId] = 'online';
+            delete this.connectionNotices[item.accountId];
+          }
+        }
+        if (event.foregroundAccountId) {
+          this.currentAccountId = event.foregroundAccountId;
+        }
+        return;
+      }
       if (event.type === 'restored') {
         clearRestoreRetry();
         restoreAttempts = 0;
         this.connectionStates[event.user.id] = 'online';
         delete this.connectionNotices[event.user.id];
-        this.currentAccountId = event.user.id;
+        if (!this.currentAccountId) this.currentAccountId = event.user.id;
         this.startDeviceHeartbeat(event.user.id);
         return;
       }
@@ -586,17 +689,20 @@ export const useTelegramStore = defineStore('telegram', {
         }
         return;
       }
+      if (event.type === 'debugLog') {
+        return;
+      }
       if (event.type === 'error') {
         const transient = event.code === 'CONNECTION_NOT_INITED' || event.code === 'CONNECTION_TIMEOUT' || event.code === 'TIMEOUT' || event.message.toUpperCase().includes('DISCONNECTED');
         if (transient) {
           if (this.loginTargetUserId) this.connectionNotices[this.loginTargetUserId] = 'Telegram 连接短暂中断，正在重连…';
           return;
         }
-      }
-      this.error = event.code ? `${event.message}（${event.code}）` : event.message;
-      if (event.code?.startsWith('DEVICE_') || event.code === 'TG_ACCOUNT_MISMATCH') {
-        if (this.loginTargetUserId) this.connectionStates[this.loginTargetUserId] = 'offline';
-        this.finishLoginUi();
+        this.error = event.code ? `${event.message}（${event.code}）` : event.message;
+        if (event.code?.startsWith('DEVICE_') || event.code === 'TG_ACCOUNT_MISMATCH') {
+          if (this.loginTargetUserId) this.connectionStates[this.loginTargetUserId] = 'offline';
+          this.finishLoginUi();
+        }
       }
     },
 

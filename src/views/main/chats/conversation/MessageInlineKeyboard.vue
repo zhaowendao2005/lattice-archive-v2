@@ -7,6 +7,7 @@
 import { ArrowUpRight, Copy, Loader2 } from '@lucide/vue';
 import { useChatStore } from '@/stores/chat/stores/chatStore';
 import type { TgInlineButton } from '@/stores/chat/types';
+import BotHarvesterBanner from './BotHarvesterBanner.vue';
 
 const props = defineProps<{
   messageId: number;
@@ -25,14 +26,14 @@ const chatStore = useChatStore();
     >
       <button
         v-for="(btn, colIdx) in row"
-        :key="colIdx"
+        :key="`${rowIdx}-${colIdx}-${btn.text}`"
         type="button"
         class="relative flex min-h-8 min-w-0 flex-1 items-center justify-center gap-1 rounded-lg border border-border/75 bg-muted/90 px-2 py-1.5 text-center text-xs font-medium text-foreground transition-colors hover:bg-accent"
         :title="btn.url || btn.text"
         @click="chatStore.pressInlineButton(props.messageId, rowIdx, colIdx, btn)"
       >
         <Loader2
-          v-if="chatStore.isCallbackPending(props.messageId, rowIdx, colIdx)"
+          v-if="chatStore.isCallbackPending(props.messageId, rowIdx, colIdx, btn.text)"
           class="size-3.5 shrink-0 animate-spin text-brand"
           :stroke-width="2"
         />
@@ -49,5 +50,8 @@ const chatStore = useChatStore();
         />
       </button>
     </div>
+
+    <!-- 搜索机器人 [startPage, endPage] 自动翻页收割控制条 -->
+    <BotHarvesterBanner :message-id="props.messageId" :rows="props.rows" />
   </div>
 </template>

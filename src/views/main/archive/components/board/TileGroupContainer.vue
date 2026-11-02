@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, type ComponentPublicInstance } from 'vue';
 import { GripVertical, Pencil, Plus } from '@lucide/vue';
 import { useAggregateSearchStore } from '@/stores/archive/stores/aggregateSearchStore';
+import { useSessionManagerStore } from '@/stores/archive/stores/sessionManagerStore';
 import type { TileData, TileGroupData } from '../../types/tile';
 import {
   getTilePixelDimensions,
@@ -11,9 +12,11 @@ import {
   UNIT_SIZE,
   useTileStore,
 } from '../../store/tileStore';
+import { archiveDomRegistry } from '../../store/archiveDomRegistry';
 import FileTile from '../tiles/FileTile.vue';
 import FolderTile from '../tiles/FolderTile.vue';
 import SearchAppTile from '../tiles/SearchAppTile.vue';
+import SessionManagerAppTile from '../tiles/SessionManagerAppTile.vue';
 
 const props = defineProps<{
   group: TileGroupData;
@@ -27,22 +30,32 @@ const emit = defineEmits<{
 
 const tileStore = useTileStore();
 const aggregateSearchStore = useAggregateSearchStore();
-const groupGridRef = ref<HTMLElement | null>(null);
-const isEditingTitle = ref(false);
-const titleVal = ref(props.group.title);
+const sessionManagerStore = useSessionManagerStore();
 
-// Width resizing state
-const isResizingWidth = ref(false);
-const liveWidthCols = ref<number | null>(null);
+const isEditingTitle = computed(() => tileStore.editingGroupId === props.group.id);
+const isResizingWidth = computed(() => tileStore.resizingGroupWidthId === props.group.id);
 
 const groupColumns = computed(() => props.group.widthColumns || GROUP_COLUMNS);
-const currentCols = computed(() => (isResizingWidth.value && liveWidthCols.value) ? liveWidthCols.value : groupColumns.value);
+const currentCols = computed(() =>
+  isResizingWidth.value && tileStore.resizingGroupLiveCols
+    ? tileStore.resizingGroupLiveCols
+    : groupColumns.value,
+);
+
+function startEditingTitle() {
+  tileStore.editingGroupId = props.group.id;
+  tileStore.editingGroupTitleDraft = props.group.title;
+}
 
 function saveTitle() {
-  if (titleVal.value.trim()) {
-    tileStore.renameGroup(props.group.id, titleVal.value.trim());
+  if (tileStore.editingGroupTitleDraft.trim()) {
+    tileStore.renameGroup(props.group.id, tileStore.editingGroupTitleDraft.trim());
   }
-  isEditingTitle.value = false;
+  tileStore.editingGroupId = null;
+}
+
+function bindGroupGridRef(el: Element | ComponentPublicInstance | null) {
+  archiveDomRegistry.setGroupGridEl(props.group.id, el instanceof HTMLElement ? el : null);
 }
 
 // Compute total height needed by tiles in this group
@@ -115,6 +128,10 @@ function handleTileClick(tile: TileData) {
     aggregateSearchStore.openModal();
     return;
   }
+  if (tile.systemApp === 'session-manager') {
+    sessionManagerStore.openModal();
+    return;
+  }
   if (tile.type === 'file') {
     tileStore.openFile(tile);
   } else if (tile.type === 'folder') {
@@ -147,6 +164,7 @@ function onHeaderPointerDown(event: PointerEvent) {
   const target = event.target as HTMLElement;
   if (target.closest('button') || target.closest('input') || target.closest('.group-width-resizer')) return;
 
+  event.stopPropagation();
   headerPointerDownPos = { x: event.clientX, y: event.clientY };
 
   const onMove = (moveEvent: PointerEvent) => {
@@ -176,8 +194,8 @@ function onWidthResizePointerDown(event: PointerEvent) {
 
   const startX = event.clientX;
   const initialCols = groupColumns.value;
-  isResizingWidth.value = true;
-  liveWidthCols.value = initialCols;
+  tileStore.resizingGroupWidthId = props.group.id;
+  tileStore.resizingGroupLiveCols = initialCols;
 
   const onPointerMove = (e: PointerEvent) => {
     const dx = e.clientX - startX;
@@ -192,7 +210,7 @@ function onWidthResizePointerDown(event: PointerEvent) {
 
     const minCols = Math.max(2, maxTileRight);
     const newCols = Math.max(minCols, Math.min(12, initialCols + delta));
-    liveWidthCols.value = newCols;
+    tileStore.resizingGroupLiveCols = newCols;
   };
 
   const onPointerUp = () => {
@@ -200,11 +218,11 @@ function onWidthResizePointerDown(event: PointerEvent) {
     window.removeEventListener('pointerup', onPointerUp);
     window.removeEventListener('pointercancel', onPointerUp);
 
-    if (liveWidthCols.value && liveWidthCols.value !== initialCols) {
-      tileStore.setGroupWidth(props.group.id, liveWidthCols.value);
+    if (tileStore.resizingGroupLiveCols && tileStore.resizingGroupLiveCols !== initialCols) {
+      tileStore.setGroupWidth(props.group.id, tileStore.resizingGroupLiveCols);
     }
-    isResizingWidth.value = false;
-    liveWidthCols.value = null;
+    tileStore.resizingGroupWidthId = null;
+    tileStore.resizingGroupLiveCols = groupColumns.value;
   };
 
   window.addEventListener('pointermove', onPointerMove);
@@ -213,7 +231,7 @@ function onWidthResizePointerDown(event: PointerEvent) {
 }
 
 defineExpose({
-  getGridElement: () => groupGridRef.value,
+  getGridElement: () => archiveDomRegistry.getGroupGridEl(props.group.id),
 });
 </script>
 
@@ -239,6 +257,7 @@ defineExpose({
 
     <!-- Group Title Header (Acts as Whole-Group Drag Handle & Width Resize Handle) -->
     <div
+      data-group-header="true"
       class="group/hdr relative flex items-center justify-between px-1.5 py-1 mb-2.5 cursor-grab active:cursor-grabbing hover:bg-white/5 rounded transition-colors"
       :style="{ width: `${canvasWidth}px` }"
       @pointerdown="onHeaderPointerDown"
@@ -250,19 +269,19 @@ defineExpose({
         <h3
           class="text-sm font-medium tracking-wide text-white/80 hover:text-white truncate transition-colors cursor-pointer"
           title="点击重命名分组，拖动整组重排"
-          @click.stop="isEditingTitle = true"
+          @click.stop="startEditingTitle"
         >
           {{ group.title }}
         </h3>
         <Pencil
           class="size-3 text-white/30 opacity-0 group-hover/hdr:opacity-100 transition-opacity shrink-0 cursor-pointer"
-          @click.stop="isEditingTitle = true"
+          @click.stop="startEditingTitle"
         />
       </div>
 
       <div v-else class="flex items-center" @click.stop>
         <input
-          v-model="titleVal"
+          v-model="tileStore.editingGroupTitleDraft"
           type="text"
           class="h-7 rounded border border-white/30 bg-black/50 px-2 text-xs text-white outline-none focus:border-sky-400"
           @keydown.enter="saveTitle"
@@ -303,7 +322,7 @@ defineExpose({
 
     <!-- Group Tiles Matrix Canvas -->
     <div
-      ref="groupGridRef"
+      :ref="bindGroupGridRef"
       class="relative transition-[height,width] duration-200 ease-out"
       :style="{ width: `${canvasWidth}px`, height: `${canvasHeight}px` }"
       :data-group-id="group.id"
@@ -343,6 +362,15 @@ defineExpose({
       <template v-for="tile in tiles" :key="tile.id">
         <SearchAppTile
           v-if="tile.type === 'file' && tile.systemApp === 'aggregate-search'"
+          :tile="tile"
+          :is-dragging="tileStore.dragState.isDragging && tileStore.dragState.tile?.id === tile.id"
+          :is-drop-target="tileStore.dragState.hoverTargetTileId === tile.id"
+          @click="handleTileClick(tile)"
+          @contextmenu="handleTileContextMenu($event, tile)"
+          @dragstart="(event, _t, grabOffset) => emit('dragstart', event, tile, grabOffset)"
+        />
+        <SessionManagerAppTile
+          v-else-if="tile.type === 'file' && tile.systemApp === 'session-manager'"
           :tile="tile"
           :is-dragging="tileStore.dragState.isDragging && tileStore.dragState.tile?.id === tile.id"
           :is-drop-target="tileStore.dragState.hoverTargetTileId === tile.id"

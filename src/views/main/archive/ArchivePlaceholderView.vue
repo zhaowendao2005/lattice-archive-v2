@@ -1,24 +1,34 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import {
+  AlertTriangle,
+  Check,
+  Cloud,
   FolderPlus,
   Image,
+  Layers,
   LayoutGrid,
+  Loader2,
   Plus,
   RotateCcw,
   Search,
   X,
 } from '@lucide/vue';
 import { useAggregateSearchStore } from '@/stores/archive/stores/aggregateSearchStore';
+import { useSessionManagerStore } from '@/stores/archive/stores/sessionManagerStore';
 import { useTileStore } from './store/tileStore';
 import TileBoard from './components/board/TileBoard.vue';
 import TileFolderModal from './components/folder-modal/TileFolderModal.vue';
 import FileDetailModal from './components/file-modal/FileDetailModal.vue';
 import TileContextMenu from './components/context-menu/TileContextMenu.vue';
 import AggregateSearchModal from './components/search-modal/AggregateSearchModal.vue';
+import SessionManagerModal from './components/session-manager/SessionManagerModal.vue';
+import TaskQuotaHud from './components/session-manager/TaskQuotaHud.vue';
+import ExplorerPathPickerModal from './components/common/ExplorerPathPickerModal.vue';
 
 const tileStore = useTileStore();
 const aggregateSearchStore = useAggregateSearchStore();
+const sessionManagerStore = useSessionManagerStore();
 
 const totalTilesCount = computed(() => tileStore.tiles.length);
 
@@ -111,6 +121,54 @@ function handleChangeWallpaper() {
       <div class="flex items-center gap-2">
         <button
           type="button"
+          class="flex items-center gap-1.5 rounded-[2px] border border-sky-400/35 bg-sky-500/20 px-2.5 py-1 text-xs font-medium text-sky-200 hover:bg-sky-500/30 hover:text-white transition-colors"
+          title="打开会话与配额治理中心"
+          @click="sessionManagerStore.openModal()"
+        >
+          <Layers class="size-3.5" />
+          <span>会话与配额</span>
+        </button>
+
+        <button
+          type="button"
+          class="flex items-center gap-1.5 rounded-[2px] border px-2.5 py-1 text-xs transition-colors"
+          :class="
+            sessionManagerStore.cloudSync.status === 'synced'
+              ? 'border-emerald-400/50 bg-emerald-500/20 text-emerald-200 hover:bg-emerald-500/30'
+              : sessionManagerStore.cloudSync.status === 'error'
+                ? 'border-rose-400/50 bg-rose-500/20 text-rose-200 hover:bg-rose-500/30'
+                : sessionManagerStore.cloudSync.status === 'syncing'
+                  ? 'border-sky-400/45 bg-sky-500/20 text-sky-200'
+                  : 'border-white/15 bg-white/10 text-white/80 hover:bg-white/20 hover:text-white'
+          "
+          :title="
+            sessionManagerStore.cloudSync.errorMessage
+              ? `同步失败：${sessionManagerStore.cloudSync.errorMessage}`
+              : sessionManagerStore.cloudSync.lastSyncedAtMs
+                ? `上次云同步：${new Date(sessionManagerStore.cloudSync.lastSyncedAtMs).toLocaleTimeString('zh-CN')} (Rev #${sessionManagerStore.cloudSync.lastSyncedRevision})`
+                : '立即执行单行 Gzip + CRDT 三路合并云同步'
+          "
+          @click="sessionManagerStore.syncExploreToCloudNow()"
+        >
+          <Loader2 v-if="sessionManagerStore.cloudSync.status === 'syncing'" class="size-3.5 animate-spin text-sky-300" />
+          <Check v-else-if="sessionManagerStore.cloudSync.status === 'synced'" class="size-3.5 text-emerald-300" />
+          <AlertTriangle v-else-if="sessionManagerStore.cloudSync.status === 'error'" class="size-3.5 text-rose-300" />
+          <Cloud v-else class="size-3.5 text-sky-300" />
+          <span>
+            {{
+              sessionManagerStore.cloudSync.status === 'syncing'
+                ? '同步中…'
+                : sessionManagerStore.cloudSync.status === 'synced'
+                  ? '同步完成'
+                  : sessionManagerStore.cloudSync.status === 'error'
+                    ? '同步失败'
+                    : '同步'
+            }}
+          </span>
+        </button>
+
+        <button
+          type="button"
           class="flex items-center gap-1.5 rounded-[2px] border border-white/15 bg-white/10 px-2.5 py-1 text-xs text-white/80 hover:bg-white/20 hover:text-white transition-colors"
           title="新建文件磁贴"
           @click="handleCreateFile"
@@ -176,6 +234,15 @@ function handleChangeWallpaper() {
     <Transition name="archive-pop">
       <AggregateSearchModal v-if="aggregateSearchStore.isModalOpen" />
     </Transition>
+
+    <!-- Session & Quota Manager Modal -->
+    <SessionManagerModal />
+
+    <!-- Universal Explorer / Finder Path Picker Modal -->
+    <ExplorerPathPickerModal />
+
+    <!-- Global Task & Quota Floating HUD -->
+    <TaskQuotaHud />
 
     <!-- Windows 10 Context Menu -->
     <TileContextMenu />

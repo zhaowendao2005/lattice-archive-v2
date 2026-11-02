@@ -66,18 +66,17 @@ src/stores/
 
 ## 三、 三类状态分层定义与职责
 
-### 1. Data Source 类 (数据源接线器)
-* **定位**：业务域内唯一的**全局单例连接器**。
-* **职责**：
-  * 对接底层真实的 SQLite 数据库、Capacitor 原生插件、WebSocket/网络服务或 IPC 进程；
-  * 封装原始数据的读写、同步与异常捕获；
-  * 驱动 Stores 层的响应式刷新，解耦底层协议与上层渲染。
+### 1. Data Source 类 (薄桥接层 / Thin Bridge)
+* **定位**：业务域内连接 Store (View 状态) 与具体实现域 (`src/worker/local/` & `src/worker/remote/`) 的**薄桥接器**，以及零 `ref` 视图所需的 DOM / 浏览器句柄托管器。
+* **核心红线（禁止新增 `src/services/` 层，禁止承载重业务逻辑）**：
+  * **严禁新建顶层 `src/services/` 目录**：所有具体业务实现、协议解析、加密加压、分页拆包、SQLite/GramJS 调度一律下沉到 `src/worker/local/`（本地 Worker 实现域）或 `src/worker/remote/`（远端 Cloudflare Worker 实现域）；
+  * **Data Source 只做「薄桥（Thin Bridge）」**：仅负责把 Store 的意图转发给 `local` Worker（经 `mtprotoHub` / Worker 通信）或 `remote` Worker（经 `fetch('/api/...')`），以及托管浏览器端原生句柄（如 `HTMLVideoElement`、`IntersectionObserver`、Turnstile `widgetId`、终端滚动与时间轴滑轨 DOM 句柄）；
+  * 任何超过简单参数组装的业务逻辑（如二进制/JSON 批解析、MTProto 差量状态机、Bot 按钮页码启发式解析）必须下沉至 `src/worker/local/` 或 `src/worker/remote/`。
 
-### 2. Stores 类 (页面状态存储器)
+### 2. Stores 类 (View 状态与唯一真相来源 SSOT)
 * **定位**：纯粹负责该业务域内页面的响应式状态存储、计算属性（Getters）与交互动作（Actions）。
-* **职责**：
-  * 暴露给 `views/` 组件订阅；
-  * 聚合管理选中态、搜索关键词、分页游标、界面激活状态等；
+* **SSOT（Single Source of Truth，唯一真相来源）铁律**：
+  * **严禁跨 Store 复制状态**：如果某个状态已归属某 Store（例如当前激活账号 `telegramStore.currentAccountId`、连接状态 `telegramStore.connectionStates`、会话列表 `chatStore.dialogs`），其他 Store 只能通过 Getter 或直接读取源 Store 引用，**严禁在另一处复制一份状态再靠 watch / 回调同步**；
   * 网络请求的加载态（如 `isSubmitting`）、错误文案（如 `authError`）与一次性校验令牌（如 `turnstileToken`）属于页面状态，必须落在 Store，视图层只读。
 
 ### 2.1 鉴权域的数据流（强制）
@@ -124,7 +123,11 @@ Chats View（零 ref，路由参数 /workspace/chats/:chatKey 决定选中会话
 * **代次丢弃**：所有异步响应按账户代次与窗口 `epoch` 校验，过期结果直接丢弃，不得串到其他会话；
 * **消息只读与显式会话管理**：不发送消息、不调用已读 RPC，后台预载不得改变 Telegram 服务端状态；仅用户主动触发的归档/取消归档（`folders.EditPeerFolders`）、公开 `@username` 查找（`contacts.ResolveUsername`）、加入公开频道/群组（`channels.JoinChannel`，`INVITE_REQUEST_SENT` 必须标记为 `pending` 而非已加入）与二次确认退出（`channels.LeaveChannel` / `messages.DeleteChatUser`，创建者受角色保护拒绝直接退出，且仅在 RPC 成功后清理本地状态）允许变更会话列表状态；
 * **媒体与头像分级加载**：消息与会话 DTO 携带照片/视频定位信息、头像信息（`TgAvatarInfo`）与内联模糊缩略图；头像由 `v-avatar-visible` 指令按视口可见性请求（低优先级 `PRIORITY_AVATAR = 3` + Worker 独立 `avatarPool` 并发 2）；预览图与视频封面由 `v-media-visible` 指令按自动下载策略请求；查看器视频优先走 `progressiveStream`（Service Worker `/sw.js` 拦截 Range 请求 → 512 KiB 对齐分片 `getDocumentPart` → `206 Partial Content`），不支持或解码报错时自动降级为完整 Blob 下载，关闭查看器、翻页或切换会话时立即通过 `AbortSignal` → `chatCancel` 中止在途分片；GIF 与圆形视频由 `v-media-playing` 指令在 ≥ 50% 可见且允许自动播放（≤ 10 MB）时静音循环，点击圆形视频切换单实例有声播放；占位尺寸在下载前锁定，媒体加载不得改变气泡高度；
-* **媒体句柄与缓存**：Object URL 只由 `chatMediaLoader` 创建与回收（图片 400 条 LRU，视频 256 MB 字节预算 LRU 且活跃播放槽位 `pin` 保护，切换账户时全部 revoke），`HTMLVideoElement` 与全屏容器句柄只由 `videoPlayback` 单例持有，Store 中只存 URL 字符串与可序列化播放状态；持久缓存（含渐进式视频前 2 MiB 分片）只走 `chatMediaCache`（设备密钥加密的 Cache Storage，按 Lattice 用户 / Telegram 账户隔离，单条 ≤ 20 MiB，授权失效时整体清除），禁止写入未加密的媒体字节。
+* **媒体句柄与缓存**：Object URL 只由 `chatMediaLoader` 创建与回收（图片 400 条 LRU，视频 256 MB 字节预算 LRU 且活跃播放槽位 `pin` 保护，切换账户时全部 revoke），`HTMLVideoElement` 与全屏容器句柄只由 `videoPlayback` 单例持有，Store 中只存 URL 字符串与可序列化播放状态；持久缓存（含渐进式视频前 2 MiB 分片）只走 `chatMediaCache`（设备密钥加密的 Cache Storage，按 Lattice 用户 / Telegram 账户隔离，单条 ≤ 20 MiB，授权失效时整体清除），禁止写入未加密的媒体字节；
+* **MTProto Gateway 与 PTS / Bot 回调收口铁律**：
+  - 凡会推进账号 `pts` 的 MTProto RPC（如 `SendMessage` 返回的 `UpdateShortSentMessage`、`Updates`、`AffectedHistory`、`AffectedMessages`），必须统一通过 `src/worker/local/chat/mtprotoGateway.ts` 的 `advancePtsFromRpcResult` 推进 `engine.state.pts`，严禁漏更导致后续 `UpdateNewMessage` 误判 `pts gap` 进而触发全量覆盖冲掉刚发出的消息；
+  - `BOT_RESPONSE_TIMEOUT` 是应用层业务状态（机器人在静默改写消息后未显式调用 `answerCallbackQuery`），**严禁将其归入 `tg.worker.ts` 的 `isTransient` / `isTimeout` 连接重连条件**，且在收到 `UpdateEditMessage` 时必须立即清理该消息名下的全部 `pendingCallbacks` 加载圈；
+  - 多账号后台预热（`warmAllLocalAccounts`）必须在当前主账号完成首屏同步后延迟串行启动，禁止与前台首屏同步并发争抢 WebSocket 与 IndexedDB 锁。
 
 ### 3. Mock 类 (模拟数据规范)
 * **定位**：服务于页面前端独立开发与渲染的原型数据。
@@ -155,3 +158,21 @@ Chats View（零 ref，路由参数 /workspace/chats/:chatKey 决定选中会话
 * **有效性以远端为准**：应用冷启动 / 进入受保护路由前，由路由守卫调用
   `initializeSessionConnection()` 向 `/api/auth/session/connect` 校验 Token；失败时清理本地会话并打回登录页；
 * 读取失败（隐私模式 / 存储被禁用 / 内容损坏）一律**静默降级为未登录**，不得阻断应用启动。
+
+---
+
+## 六、 结构化分级树状时间轴日志与调试终端规范 (Structured Tree-Timeline Logging)
+
+1. **三端日志采集开关**：
+   * 开发者设置页提供三个**无圆角标签按钮（`rounded-none`）**：`LOCAL`、`REMOTE`、`FRONTEND`；点击即高亮并开启对应端的采集，支持多选。
+2. **统一 Grep 友好树状时间轴格式**：
+   * 所有进入 `debugLoggerStore` 的日志条目（`LatticeLogEntry`）导出或展示时，必须遵循统一行格式：
+     `[LATTICE][T:<traceId>][S:<spanId>][<ISO8601>][+<relMs>ms][dur:<durMs>ms][<LEVEL>][<SOURCE>:<domain>] <action> | key=val ...`
+   * 新增敏感业务（MTProto RPC、PTS 差量、机器人翻页、云端同步、鉴权）必须通过 `mtprotoGateway` 或 `debugLoggerDataSource` 记录结构化 Span，禁止裸写散乱的 `console.log`。
+3. **终端性能与零 `ref` 约束**：
+   * 调试终端采用环形缓冲区（Ring Buffer，上限 5,000 条）+ `requestAnimationFrame`（16ms 批合并）写入 Pinia Store，防止高频消息阻塞渲染；
+   * 终端视口使用固定行高（`ROW_HEIGHT = 24px`）虚拟列表，DOM 句柄与时间轴拖拽滑轨事件统一托管在 `debugLoggerDataSource`，视图组件严格保持零 `ref` / `reactive`。
+4. **云端日志快照状态归 Store**：
+   * 云端记录开关按当前 `user.id` 隔离持久化；快照元数据列表、加载态、错误态、删除目标与删除请求态全部归 `debugLoggerStore`，视图只读；
+   * `debugLoggerDataSource` 只做 `/api/debug/snapshots` 的薄桥接（压缩、分片、HTTP），不得复制 Store 状态或编排 UI；
+   * 快照元数据接口不得返回压缩正文；删除必须以当前会话账号与 `snapshotId` 双重限定。

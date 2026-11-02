@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed } from 'vue';
+import { Check } from '@lucide/vue';
 import type { TileData } from '../../types/tile';
 import {
   getTilePixelDimensions,
@@ -26,9 +27,8 @@ const emit = defineEmits<{
 
 const tileStore = useTileStore();
 
-// Live resizing state
-const isResizing = ref(false);
-const resizingSpan = ref<{ w: number; h: number } | null>(null);
+const isResizing = computed(() => tileStore.resizingTileId === props.tile.id);
+const resizingSpan = computed(() => (isResizing.value ? tileStore.resizingTileSpan : null));
 
 const currentSpan = computed(() => {
   if (isResizing.value && resizingSpan.value) {
@@ -74,6 +74,20 @@ const positionStyle = computed(() => {
     transform: `translate3d(${left}px, ${top}px, 0)`,
   };
 });
+
+const isSelected = computed(
+  () => !props.isPreview && tileStore.selectedTileIds.includes(props.tile.id),
+);
+
+const isBatchDraggedMember = computed(
+  () =>
+    !props.isPreview &&
+    tileStore.dragState.isDragging &&
+    tileStore.selectedTileIds.length > 1 &&
+    tileStore.selectedTileIds.includes(props.tile.id) &&
+    tileStore.dragState.tile &&
+    tileStore.selectedTileIds.includes(tileStore.dragState.tile.id),
+);
 
 const isMergeTarget = computed(() => {
   return (
@@ -160,10 +174,10 @@ function onResizerPointerDown(event: PointerEvent) {
   const startX = event.clientX;
   const startY = event.clientY;
   const initialSpan = getTileSpan(props.tile.size, props.tile.customSpan);
-  isResizing.value = true;
-  resizingSpan.value = { ...initialSpan };
+  tileStore.resizingTileId = props.tile.id;
+  tileStore.resizingTileSpan = { ...initialSpan };
 
-  const group = tileStore.groups.find(g => g.id === props.tile.groupId);
+  const group = tileStore.groups.find((g) => g.id === props.tile.groupId);
   const maxCols = group?.widthColumns || GROUP_COLUMNS;
 
   const onPointerMove = (moveEvent: PointerEvent) => {
@@ -174,7 +188,7 @@ function onResizerPointerDown(event: PointerEvent) {
 
     const newW = Math.max(1, Math.min(maxCols - props.tile.x, initialSpan.w + deltaW));
     const newH = Math.max(1, Math.min(6, initialSpan.h + deltaH));
-    resizingSpan.value = { w: newW, h: newH };
+    tileStore.resizingTileSpan = { w: newW, h: newH };
   };
 
   const onPointerUp = () => {
@@ -182,8 +196,8 @@ function onResizerPointerDown(event: PointerEvent) {
     window.removeEventListener('pointerup', onPointerUp);
     window.removeEventListener('pointercancel', onPointerUp);
 
-    if (resizingSpan.value) {
-      const { w, h } = resizingSpan.value;
+    if (tileStore.resizingTileSpan) {
+      const { w, h } = tileStore.resizingTileSpan;
       if (w !== initialSpan.w || h !== initialSpan.h) {
         tileStore.resizeTileSpan(props.tile.id, w, h);
         const groupTiles = tileStore.tilesByGroup.get(props.tile.groupId) || [];
@@ -191,8 +205,8 @@ function onResizerPointerDown(event: PointerEvent) {
         tileStore.applyDisplacedPositions(props.tile.groupId, displaced);
       }
     }
-    isResizing.value = false;
-    resizingSpan.value = null;
+    tileStore.resizingTileId = null;
+    tileStore.resizingTileSpan = null;
   };
 
   window.addEventListener('pointermove', onPointerMove);
@@ -200,10 +214,16 @@ function onResizerPointerDown(event: PointerEvent) {
   window.addEventListener('pointercancel', onPointerUp);
 }
 
-function handleClick() {
-  if (!props.isPreview && !hasMoved && !isResizing.value) {
-    emit('click', props.tile);
+function handleClick(event: MouseEvent) {
+  if (props.isPreview || hasMoved || isResizing.value) return;
+  if (event.ctrlKey || event.metaKey || event.shiftKey) {
+    tileStore.toggleSelectTile(props.tile.id, true);
+    return;
   }
+  if (tileStore.selectedTileIds.length > 0) {
+    tileStore.clearSelectedTiles();
+  }
+  emit('click', props.tile);
 }
 
 function onContextMenu(event: MouseEvent) {
@@ -216,10 +236,12 @@ function onContextMenu(event: MouseEvent) {
 
 <template>
   <div
+    :data-board-tile-id="!isPreview ? tile.id : undefined"
     class="archive-base-tile absolute top-0 left-0 select-none rounded-[2px]"
     :class="[
       isPreview ? 'pointer-events-none' : 'cursor-pointer transition-transform duration-220 ease-out',
       isDragging ? 'opacity-0 pointer-events-none' : '',
+      isBatchDraggedMember && !isDragging ? 'opacity-30 scale-95 pointer-events-none' : '',
       isMergeReady || isFolderLocked ? 'z-30 scale-105' : isFolderCandidate ? 'z-20 scale-[1.01]' : isMergeTarget ? 'z-20' : '',
       isResizing ? 'z-30 transition-none' : '',
     ]"
@@ -235,6 +257,7 @@ function onContextMenu(event: MouseEvent) {
         'backdrop-blur-xl bg-[#0f172a]/70 border-white/20 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.2),0_4px_14px_rgba(0,0,0,0.3)]',
         'hover:border-white/40 hover:bg-[#1e293b]/80 hover:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.35),0_6px_20px_rgba(0,0,0,0.4)]',
         'active:scale-[0.98] active:bg-[#0f172a]/85',
+        isSelected ? 'ring-2 ring-sky-400 border-sky-400 bg-sky-900/55 shadow-[0_0_16px_rgba(56,189,248,0.45)]' : '',
         isMergeReady || isFolderLocked ? 'ring-2 ring-sky-400 border-sky-400 bg-sky-950/85 shadow-[0_0_18px_rgba(56,189,248,0.6)]' : '',
         isFolderCandidate ? 'ring-1 ring-sky-400/50 bg-sky-950/35' : '',
         isMergeTarget && !isMergeReady && !isFolderDropTarget ? 'ring-1 ring-sky-400/40' : '',
@@ -242,6 +265,23 @@ function onContextMenu(event: MouseEvent) {
       ]"
     >
       <slot />
+
+      <!-- 框选/多选右上角勾选角标 -->
+      <button
+        v-if="!isPreview && !tile.undeletable && !tile.systemApp"
+        type="button"
+        class="absolute right-1 top-1 z-30 flex size-4 items-center justify-center rounded-[2px] border transition-all"
+        :class="
+          isSelected
+            ? 'border-sky-300 bg-sky-500 text-white opacity-100 shadow-sm'
+            : 'border-white/30 bg-black/45 text-transparent opacity-0 group-hover:opacity-100 hover:border-sky-300'
+        "
+        title="点击切换多选 (Ctrl / Shift + 点击)"
+        @pointerdown.stop
+        @click.stop="tileStore.toggleSelectTile(tile.id, true)"
+      >
+        <Check class="size-2.5" :stroke-width="2.6" />
+      </button>
 
       <!-- Drop hint: 锁定文件夹 / 合成文件夹 -->
       <div

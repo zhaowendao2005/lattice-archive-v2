@@ -9,6 +9,21 @@ interface Envelope { credentials?: TelegramCredentials | null; accounts?: Telegr
 const baseUrl = ((import.meta.env.VITE_REMOTE_WORKER_URL as string | undefined) ?? '').replace(/\/$/, '');
 const REQUEST_TIMEOUT_MS = 12_000;
 
+type CloudActivityListener = () => void;
+let cloudActivityListener: CloudActivityListener | null = null;
+
+export function registerCloudActivityListener(listener: CloudActivityListener) {
+  cloudActivityListener = listener;
+}
+
+export function notifyCloudActivity() {
+  try {
+    cloudActivityListener?.();
+  } catch {
+    // ignore
+  }
+}
+
 async function request<T>(path: string, method = 'GET', payload?: unknown): Promise<T> {
   const token = authSessionStorage.read()?.token;
   let response: Response;
@@ -27,6 +42,9 @@ async function request<T>(path: string, method = 'GET', payload?: unknown): Prom
   }
   const data = await response.json().catch(() => ({})) as { message?: string } & T;
   if (!response.ok) throw new Error(data.message ?? 'Telegram 请求失败');
+  if (!path.includes('/api/tg/authorizations/')) {
+    notifyCloudActivity();
+  }
   return data;
 }
 export const tgRemoteDataSource = {

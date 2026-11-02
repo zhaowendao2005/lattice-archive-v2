@@ -73,9 +73,15 @@ onUnmounted(() => {
       <template v-else-if="searchStore.treeContextMenu.targetType === 'folder'">
         <div
           class="flex cursor-pointer items-center justify-between rounded-[4px] px-2.5 py-1.5 transition-colors duration-100 hover:bg-sky-500 hover:text-white"
+          @click="searchStore.execTreeNewSubFolder(searchStore.treeContextMenu.folderId)"
+        >
+          <span>新建子文件夹</span>
+        </div>
+        <div
+          class="flex cursor-pointer items-center justify-between rounded-[4px] px-2.5 py-1.5 transition-colors duration-100 hover:bg-sky-500 hover:text-white"
           @click="searchStore.execTreeNewFolder(searchStore.treeContextMenu.groupId)"
         >
-          <span>新建文件夹</span>
+          <span>新建同级文件夹</span>
         </div>
         <div
           class="flex cursor-pointer items-center justify-between rounded-[4px] px-2.5 py-1.5 transition-colors duration-100 hover:bg-sky-500 hover:text-white"

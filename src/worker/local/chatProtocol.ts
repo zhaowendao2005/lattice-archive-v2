@@ -120,6 +120,10 @@ export interface TgFileInfo extends TgDocumentLocation {
   /** 字节数（Telegram long，4 GB 以内可安全转 number）。 */
   size: number;
   fileName?: string;
+  /** 由 stripped thumb 还原的模糊 JPEG data URL（若文档附带缩略图）。 */
+  thumb?: string;
+  /** 文档缩略图档位（经 InputDocumentFileLocation.thumbSize 下载）。 */
+  preview?: TgPhotoSize;
 }
 
 export interface TgMessageMedia { kind: TgMediaKind; label: string; photo?: TgPhotoInfo; video?: TgVideoInfo; file?: TgFileInfo }
@@ -206,6 +210,10 @@ export interface TgInvitePreview {
   participantsCount?: number;
   isChannel?: boolean;
   joinRequest?: boolean;
+  /** ChatInvitePeek 临时访问窗口的过期毫秒时间戳 (result.expires * 1000)。 */
+  peekExpiresAt?: number;
+  /** 若返回 ChatInviteAlready 或 ChatInvitePeek，携带解析出的 Peer 引用与 accessHash。 */
+  peer?: TgPeerRef;
   dialog?: TgDialogDto;
 }
 
@@ -237,6 +245,10 @@ export interface TgMessageDto {
   groupedId?: string;
   forwardedFrom?: string;
   views?: number;
+  /** 消息或所属频道是否开启限制转发（noforwards）。 */
+  noforwards?: boolean;
+  /** 消息自毁倒计时秒数（ttl_period）。 */
+  ttlPeriod?: number;
 }
 
 export interface TgDialogDto {
@@ -257,6 +269,8 @@ export interface TgDialogDto {
   joinRequest?: boolean;
   /** 本次会话中已提交加入申请，正在等待管理员审核。 */
   joinPending?: boolean;
+  /** 群组或频道是否开启限制转发（noforwards）。 */
+  noforwards?: boolean;
   pinned: boolean;
   folderId: number;
   muted: boolean;
@@ -359,7 +373,120 @@ export type TgChatRequest =
   /** 检查私有邀请链接（messages.CheckChatInvite）。 */
   | { method: 'checkChatInvite'; hash: string }
   /** 通过私有邀请链接加入群组或频道（messages.ImportChatInvite）。 */
-  | { method: 'importChatInvite'; hash: string };
+  | { method: 'importChatInvite'; hash: string }
+  /** 批量归档 / 取消归档会话（folders.EditPeerFolders，单次最多 100 个 InputFolderPeer）。 */
+  | { method: 'batchSetDialogsArchived'; peers: TgPeerRef[]; archived: boolean }
+  /** 批量查询频道/超级群组状态与最新 access_hash（channels.GetChannels，单次最多 100 个）。 */
+  | { method: 'batchCheckChannels'; channels: TgPeerRef[] }
+  /** 服务端消息搜索（支持单会话 messages.Search 与全局 messages.SearchGlobal，下推 6 大过滤算子）。 */
+  | {
+      method: 'searchMessages';
+      peer?: TgPeerRef;
+      query: string;
+      filter?: 'all' | 'video' | 'photo' | 'document' | 'music' | 'url';
+      minDate?: number;
+      maxDate?: number;
+      fromPeer?: TgPeerRef;
+      topMsgId?: number;
+      offsetId?: number;
+      offsetRate?: number;
+      offsetPeer?: TgPeerRef;
+      limit: number;
+    }
+  /** 0 流量秒级换壳转存至共享私密保险库群（messages.ForwardMessages，支持 dropAuthor 与 topMsgId）。 */
+  | {
+      method: 'forwardToVault';
+      fromPeer: TgPeerRef;
+      toPeer: TgPeerRef;
+      messageIds: number[];
+      dropAuthor?: boolean;
+      topMsgId?: number;
+    }
+  /** 针对 noforwards 媒体的 Worker 内 2MB 环形缓冲区接力重传至共享保险库群。 */
+  | {
+      method: 'cloneNoForwardsToVault';
+      fromPeer: TgPeerRef;
+      toPeer: TgPeerRef;
+      messageId: number;
+      topMsgId?: number;
+      caption?: string;
+    }
+  /** 创建或校验共享私密保险库超级群及其 5 个标准 Forum Topics。 */
+  | {
+      method: 'ensureVaultForumTopics';
+      vaultPeer?: TgPeerRef;
+      title?: string;
+    }
+  /** 扫描共享私密保险库群的「📡 跨设备凭据信标卷」，提取当前账号可用的新鲜 access_hash。 */
+  | {
+      method: 'syncBeaconCredentials';
+      vaultPeer: TgPeerRef;
+      beaconTopicId: number;
+      limit?: number;
+    }
+  /** 账号健康探针与自动续期（GetAuthorizations + GetState + SetAccountTTL + SetAuthorizationTTL）。 */
+  | {
+      method: 'probeAccountHealth';
+      ensureTtlDays?: number;
+    }
+  /** Worker 内环回接力派生预备槽位（ExportLoginToken <-> AcceptLoginToken + ChangeAuthorizationSettings）。 */
+  | {
+      method: 'spawnPendingSlot';
+      apiId: number;
+      apiHash: string;
+      twoFaPassword?: string;
+      deviceFingerprint: {
+        deviceModel: string;
+        systemVersion: string;
+        appVersion: string;
+        langCode: string;
+        systemLangCode: string;
+      };
+    };
+
+export interface TgSearchMessagesPage {
+  messages: TgMessageDto[];
+  dialogs: Record<TgPeerKey, TgDialogDto>;
+  totalCount: number;
+  nextRate?: number;
+  nextOffsetId?: number;
+  nextOffsetPeer?: TgPeerRef;
+  hasMore: boolean;
+}
+
+export interface TgVaultTopicsInfo {
+  vaultPeer: TgPeerRef;
+  vaultPeerKey: TgPeerKey;
+  vaultTitle: string;
+  topics: {
+    video: number;
+    photo: number;
+    document: number;
+    beacon: number;
+    manifest: number;
+  };
+}
+
+export interface TgAccountHealthReport {
+  ok: boolean;
+  accountId: string;
+  dcId: number;
+  activeSessionsCount: number;
+  currentSessionCreatedAt?: number;
+  currentSessionOfficial?: boolean;
+  accountTtlDays: number;
+  authorizationTtlDays: number;
+  pts: number;
+  date: number;
+}
+
+export interface TgSpawnedSlotResult {
+  ok: boolean;
+  session: string;
+  confirmedOfficial: boolean;
+  dcId: number;
+  createdAtMs: number;
+}
 
 export interface TgChatResponseMap {
   getDialogs: TgDialogPage;
@@ -381,6 +508,15 @@ export interface TgChatResponseMap {
   pressBotCallback: TgCallbackAnswer;
   checkChatInvite: TgInvitePreview;
   importChatInvite: TgJoinChatResult;
+  batchSetDialogsArchived: { folderId: 0 | 1; count: number };
+  batchCheckChannels: { dialogs: TgDialogDto[]; invalidKeys: TgPeerKey[] };
+  searchMessages: TgSearchMessagesPage;
+  forwardToVault: { ok: true; forwardedMsgIds: number[] };
+  cloneNoForwardsToVault: { ok: true; message: TgMessageDto | null };
+  ensureVaultForumTopics: TgVaultTopicsInfo;
+  syncBeaconCredentials: { syncedDialogs: TgDialogDto[] };
+  probeAccountHealth: TgAccountHealthReport;
+  spawnPendingSlot: TgSpawnedSlotResult;
 }
 
 export type TgChatMethod = TgChatRequest['method'];

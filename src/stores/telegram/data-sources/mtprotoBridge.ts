@@ -1,10 +1,11 @@
-import type { TgCommand, TgEvent, TgInitialUser, TgPlatform, TgRestoreFailure, TgValidationReport } from '@/worker/local/protocol';
+import type { TgCommand, TgDebugSpanEntry, TgEvent, TgInitialUser, TgPlatform, TgRestoreFailure, TgValidationReport } from '@/worker/local/protocol';
 import type { TgChatMethod, TgChatRequest, TgChatResponseMap, TgChatUpdate, TgUpdatesState } from '@/worker/local/chatProtocol';
 import { tgSessionVault } from './tgSessionVault';
 
 export type TelegramUser = TgInitialUser;
 export type ValidationReport = TgValidationReport;
 export type RestoreFailure = TgRestoreFailure;
+export type { TgDebugSpanEntry };
 export type LoginEvent =
   | { type: 'qr'; token: string; image: string; expires: number }
   | { type: 'stage'; stage: 'qr' | 'phone' | 'code' | 'password' | 'ready' }
@@ -16,6 +17,12 @@ export type LoginEvent =
   | { type: 'accountDisconnected'; accountId: string }
   | { type: 'sessionStopped'; accountId?: string }
   | { type: 'chatUpdates'; accountId: string; updates: TgChatUpdate[]; state?: TgUpdatesState }
+  | {
+      type: 'warmPoolState';
+      foregroundAccountId: string | null;
+      accounts: { accountId: string; tier: 'P0' | 'P1' | 'P2'; connected: boolean }[];
+    }
+  | { type: 'debugLog'; entry: TgDebugSpanEntry }
   | { type: 'error'; message: string; code?: string };
 
 /** 聊天 RPC 失败时携带 Telegram 错误码，便于业务层区分 FLOOD_WAIT / 权限 / 未连接。 */
@@ -116,6 +123,18 @@ export class MtprotoBridge {
     await this.sendCommand({ t: 'restoreSession', apiId, apiHash, accountId, session });
   }
 
+  async restoreWarmAccount(apiId: number, apiHash: string, accountId: string, session: string) {
+    await this.sendCommand({ t: 'restoreWarmAccount', apiId, apiHash, accountId, session });
+  }
+
+  async setForegroundAccount(accountId: string) {
+    await this.sendCommand({ t: 'setForegroundAccount', accountId });
+  }
+
+  async disconnectAccount(accountId: string) {
+    await this.sendCommand({ t: 'disconnectAccount', accountId });
+  }
+
   provide(stage: 'phone' | 'code' | 'password', value: string) {
     void this.sendCommand({ t: 'submit', stage, value });
   }
@@ -135,6 +154,11 @@ export class MtprotoBridge {
   cancel() { void this.sendCommand({ t: 'cancel' }); }
 
   disconnectSession() { void this.sendCommand({ t: 'disconnectSession' }); }
+
+  setDebug(enabled: boolean) {
+    try { window.localStorage.setItem(DEBUG_KEY, enabled ? '1' : '0'); } catch { /* ignore */ }
+    void this.sendCommand({ t: 'setDebug', enabled }).catch(() => undefined);
+  }
 
   /**
    * 聊天只读 RPC：主标签页直连 Worker，从标签页经 BroadcastChannel 代理；响应按 requestId 只回给发起方。
@@ -371,6 +395,14 @@ export class MtprotoBridge {
     } else if (event.t === 'accountDisconnected') {
       if (this.activeAccountId === event.accountId) this.activeAccountId = undefined;
       this.onEvent({ type: 'accountDisconnected', accountId: event.accountId });
+    } else if (event.t === 'warmPoolState') {
+      this.onEvent({
+        type: 'warmPoolState',
+        foregroundAccountId: event.foregroundAccountId,
+        accounts: event.accounts,
+      });
+    } else if (event.t === 'debugLog') {
+      this.onEvent({ type: 'debugLog', entry: event.entry });
     } else if (event.t === 'error') this.onEvent({ type: 'error', message: event.message, code: event.code });
   }
 

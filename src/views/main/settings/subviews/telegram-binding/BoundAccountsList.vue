@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { RefreshCw } from '@lucide/vue';
 import { useTelegramStore } from '@/stores/telegram/stores/telegramStore';
 import type { TelegramAccount, TelegramAuthorization } from '@/stores/telegram/data-sources/tgRemoteDataSource';
 
@@ -47,9 +48,20 @@ function lastSeen(timestamp: number) {
           {{ store.accounts.length }} / 5 个账户 · {{ store.onlineAuthorizations.length }} 台设备在线
         </p>
       </div>
-      <button type="button" class="token-control-height rounded-lg border border-border px-3 text-sm hover:bg-muted" @click="store.openLogin()">
-        添加账户
-      </button>
+      <div class="flex items-center gap-2">
+        <button
+          type="button"
+          class="token-control-height inline-flex items-center gap-1.5 rounded-lg border border-border px-3 text-sm hover:bg-muted"
+          title="手动同步当前设备在线状态与云端授权记录"
+          @click="store.manualSyncAccounts()"
+        >
+          <RefreshCw class="size-3.5" :class="store.isManualSyncing ? 'animate-spin' : ''" />
+          <span>{{ store.isManualSyncing ? '同步中…' : '立即同步状态' }}</span>
+        </button>
+        <button type="button" class="token-control-height rounded-lg border border-border px-3 text-sm hover:bg-muted" @click="store.openLogin()">
+          添加账户
+        </button>
+      </div>
     </header>
 
     <div v-if="!store.accounts.length" class="rounded-xl border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">

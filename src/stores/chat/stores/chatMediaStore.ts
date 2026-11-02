@@ -307,6 +307,22 @@ export const useChatMediaStore = defineStore('chatMedia', {
       return (key ? this.entries[key]?.url : undefined) ?? thumb;
     },
 
+    /** 根据会话 peerKey 获取会话头像 URL（若尚未加载 160×160 清晰头像则自动触发加载，并回退到 strippedThumb） */
+    dialogAvatarUrl(peerKey?: string): string | undefined {
+      if (!peerKey) return undefined;
+      const chat = useChatStore();
+      const dialog =
+        chat.dialogs[peerKey] ??
+        (chat.resolvedDialog?.key === peerKey ? chat.resolvedDialog : undefined);
+      if (!dialog?.avatar) return undefined;
+      const key = avatarKey(dialog.key, dialog.avatar);
+      const url = this.entries[key]?.url;
+      if (!url) {
+        this.handleAvatarVisibility(dialog.key, true);
+      }
+      return url ?? dialog.avatar.thumb;
+    },
+
     isAvatarLoaded(key?: string): boolean {
       return Boolean(key && this.entries[key]?.url);
     },

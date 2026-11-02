@@ -11,6 +11,7 @@
 import { Archive, ArrowLeft, ArrowLeftToLine, Globe, Loader2 } from '@lucide/vue';
 import { Button } from '@/components/ui/button';
 import { useChatStore } from '@/stores/chat/stores/chatStore';
+import AccountQuickSwitcher from './AccountQuickSwitcher.vue';
 import SessionSearch from './SessionSearch.vue';
 import SessionItem from './SessionItem.vue';
 import SessionListState from './SessionListState.vue';
@@ -76,6 +77,9 @@ function handleScroll(event: Event) {
           <span :class="['truncate', chatStore.syncStatus.tone === 'error' ? 'text-destructive' : '']">{{ chatStore.syncStatus.label }}</span>
           <span class="ml-auto max-w-28 shrink-0 truncate">{{ chatStore.accountLabel }}</span>
         </p>
+
+        <!-- 多账号 <16ms 零闪烁快切器 -->
+        <AccountQuickSwitcher />
 
         <SessionSearch />
       </div>

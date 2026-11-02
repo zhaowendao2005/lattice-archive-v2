@@ -266,6 +266,58 @@ const CATEGORY_ICON_MAP: Record<SearchPreFilterCategory, Component> = {
             class="h-7 min-w-[220px] flex-1 rounded-[2px] border border-white/15 bg-black/35 px-2.5 text-white placeholder-white/35 outline-none focus:border-sky-400/70"
           />
         </div>
+
+        <!-- 维度 2~5：画质分辨率、时长、体积、防转发与 document.id 跨群去重 -->
+        <div class="mt-2.5 flex flex-wrap items-center gap-3 border-t border-white/10 pt-2.5 text-[11px] text-white/75">
+          <label class="flex items-center gap-1">
+            <span class="text-white/45">画质：</span>
+            <select
+              v-model="searchStore.postResolutionFilter"
+              class="h-6 rounded border border-white/15 bg-black/50 px-1.5 text-[11px] text-white"
+            >
+              <option value="all">全部画质</option>
+              <option value="720p">≥ 720p HD</option>
+              <option value="1080p">≥ 1080p FHD</option>
+              <option value="4k">4K UHD</option>
+            </select>
+          </label>
+
+          <label class="flex items-center gap-1">
+            <span class="text-white/45">时长：</span>
+            <select
+              v-model="searchStore.postDurationFilter"
+              class="h-6 rounded border border-white/15 bg-black/50 px-1.5 text-[11px] text-white"
+            >
+              <option value="all">全部时长</option>
+              <option value="short">短视频 (&lt;1m)</option>
+              <option value="medium">中等 (1~15m)</option>
+              <option value="long">长视频 (&gt;15m)</option>
+            </select>
+          </label>
+
+          <label class="flex items-center gap-1">
+            <span class="text-white/45">体积：</span>
+            <select
+              v-model="searchStore.postSizeFilter"
+              class="h-6 rounded border border-white/15 bg-black/50 px-1.5 text-[11px] text-white"
+            >
+              <option value="all">全部体积</option>
+              <option value="small">&lt; 50 MB</option>
+              <option value="medium">50 ~ 500 MB</option>
+              <option value="large">&gt; 500 MB</option>
+            </select>
+          </label>
+
+          <label class="flex cursor-pointer items-center gap-1">
+            <input v-model="searchStore.postExcludeNoForwards" type="checkbox" class="rounded border-white/20" />
+            <span>排除防转发受限 (noforwards)</span>
+          </label>
+
+          <label class="flex cursor-pointer items-center gap-1">
+            <input v-model="searchStore.postDeduplicateByDocId" type="checkbox" class="rounded border-white/20" />
+            <span>按 document.id 跨群去重</span>
+          </label>
+        </div>
       </div>
     </div>
   </div>

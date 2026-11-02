@@ -16,12 +16,38 @@ export interface TgInitialUser {
 export interface TgValidationReport { dcId?: number; country?: string; latencyMs: number; layer?: number }
 export type TgRestoreFailure = 'auth-invalid' | 'network' | 'error';
 
+export type TgLogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
+export type TgLogSource = 'local' | 'remote' | 'frontend';
+
+export interface TgDebugSpanEntry {
+  id: string;
+  traceId: string;
+  spanId: string;
+  parentSpanId?: string;
+  source: TgLogSource;
+  domain: string;
+  action: string;
+  level: TgLogLevel;
+  timestamp: number;
+  relMs: number;
+  durMs?: number;
+  message?: string;
+  tags?: Record<string, string | number | boolean>;
+}
+
 export type TgCommand =
   | { t: 'init'; deviceId: string; platform: TgPlatform; appVersion: string; debug?: boolean }
+  | { t: 'setDebug'; enabled: boolean }
   | { t: 'validateApp'; requestId: string; apiId: number; apiHash: string }
   | { t: 'beginQrLogin'; apiId: number; apiHash: string; exceptIds: string[]; expectedUserId?: string }
   | { t: 'beginPhoneLogin'; apiId: number; apiHash: string; expectedUserId?: string }
   | { t: 'restoreSession'; apiId: number; apiHash: string; accountId: string; session: string }
+  /** 恢复并驻留后台温池账号（P1 Warm Active，不挤占 P0 前台主账号）。 */
+  | { t: 'restoreWarmAccount'; apiId: number; apiHash: string; accountId: string; session: string }
+  /** 零闪烁瞬切 P0 前台焦点账号（将指定温池账号提升为 P0，原 P0 降级为 P1）。 */
+  | { t: 'setForegroundAccount'; accountId: string }
+  /** 断开并移除指定账号客户端实例。 */
+  | { t: 'disconnectAccount'; accountId: string }
   | { t: 'submit'; stage: 'phone' | 'code' | 'password'; value: string }
   | { t: 'checkConnection'; requestId: string; accountId: string }
   /** 聊天内容只读请求；只能作用于 Worker 当前已授权的账户。 */
@@ -59,4 +85,11 @@ export type TgEvent =
   | { t: 'chatProgress'; requestId: string; loaded: number; total: number }
   /** 实时更新批次，向所有标签页广播；state 为 Worker 跟踪到的最新公共更新状态。 */
   | { t: 'chatUpdates'; accountId: string; updates: TgChatUpdate[]; state?: TgUpdatesState }
+  /** 广播 Worker 内部多实例温池状态变化。 */
+  | {
+      t: 'warmPoolState';
+      foregroundAccountId: string | null;
+      accounts: { accountId: string; tier: 'P0' | 'P1' | 'P2'; connected: boolean }[];
+    }
+  | { t: 'debugLog'; entry: TgDebugSpanEntry }
   | { t: 'error'; code?: string; message: string };

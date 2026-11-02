@@ -36,13 +36,15 @@ Lattice Archive v2：Vue 3 + TypeScript + Vite + Pinia + Tailwind CSS v4 的归�
 
 ```text
 src/views/          # 纯表现层：零本地 ref/reactive
-src/stores/         # Pinia 业务域，三层结构：
-  <domain>/data-sources/   # 单例接线器：远端 API、存储、第三方 SDK 句柄
-  <domain>/stores/         # 响应式页面状态、getters、异步 actions
+src/stores/         # Pinia 业务域，三层结构（严禁新建顶层 src/services/）：
+  <domain>/data-sources/   # 薄桥接层（Thin Bridge）：仅转发调用至 local/remote Worker 或托管 DOM 句柄
+  <domain>/stores/         # 唯一真相来源（SSOT）：响应式页面状态、getters、异步 actions，严禁跨 Store 复制状态
   <domain>/mocks/          # 仅未接线业务使用；接通真实服务后立即物理删除
-src/worker/remote/  # Cloudflare Worker：静态资源 + 认证/管理 API
+src/worker/local/   # 本地 Web Worker 具体实现域（GramJS MTProto Gateway、PTS 状态机、Bot 按钮页码解析、批文件解析）
+src/worker/remote/  # Cloudflare Worker 远端具体实现域：静态资源 + 认证/管理/同步/调试 API
   auth/             # routes → service → repository（crypto / turnstile 为基础设施）
   admin/            # 管理员鉴权与用户增删查（routes → service → repository）
+  debug/            # 分片日志快照记录、Agent 密钥管理与四级渐进式查询 API（/api/debug/*）
   shared/           # JSON 响应、CORS、结构化日志
   migrations/       # D1 schema 迁移
 scripts/deploy.mjs  # 部署编排（构建 + D1 模式 + 管理员播种 + wrangler deploy）
@@ -54,8 +56,10 @@ deploy.config.json  # 当前 D1 部署模式与库名
 
 ## 4. 硬性约束
 
-1. **视图零本地 `ref` / `reactive`**：所有表单、加载态、错误态、一次性令牌都进 Store；DOM 句柄（如 Turnstile widgetId）进 Data Source。
-2. **三层解耦 / 接线即删**：视图不得直接 `fetch`；接通远端后必须删除 `DEFAULT_USER` 等 Mock 兜底。
+1. **视图零本地 `ref` / `reactive`**：所有表单、加载态、错误态、一次性令牌都进 Store；DOM 句柄（如 Turnstile widgetId、终端滚动与时间轴滑轨容器）进 Data Source。
+2. **三层解耦 / 薄桥接 / 唯一真相来源（SSOT）**：
+   - 严禁新建 `src/services/` 层；具体业务实现统一放在 `src/worker/local/` 或 `src/worker/remote/`，Data Source 只做薄桥（Thin Bridge）；
+   - 严禁跨 Store 复制状态再手动同步；视图不得直接 `fetch`；接通远端后必须删除 `DEFAULT_USER` 等 Mock 兜底。
 3. **视觉令牌**：只用 `bg-card`、`text-foreground`、`border-border`、`text-destructive` 等语义类，禁止调色板色值与十六进制。
 4. **主按钮不置灰**：不使用 `disabled` 表达可提交性；提交时校验、聚焦缺失项、展示中文错误。
 5. **远端安全**：

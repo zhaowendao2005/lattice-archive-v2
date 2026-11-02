@@ -15,6 +15,8 @@ import { returnBigInt } from 'telegram/Helpers';
 import type { TgDocumentLocation, TgDocumentPart, TgMediaFile, TgPeerRef, TgPhotoLocation, TgPhotoSize } from '../chatProtocol';
 import { peerInfo } from './converters';
 import { resolveInputPeer } from './chatService';
+import { emitLocalSpan } from './mtprotoGateway';
+import { classifyTelegramError } from './telegramErrors';
 
 const MAX_CONCURRENT_AVATARS = 2;      // 头像：优先级最高且量小，单独给 2 个名额
 const MAX_CONCURRENT_DOWNLOADS = 4;    // 照片 / 缩略图：4 个并发够快又不至于打爆连接
@@ -161,6 +163,20 @@ async function downloadSmall(
       return await download(reference);
     } catch (error) {
       if (!isReferenceError(error)) throw error;
+      const info = classifyTelegramError(error);
+      emitLocalSpan({
+        domain: 'chat.media',
+        action: 'reference_expired_retry',
+        level: 'WARN',
+        message: info.description,
+        tags: {
+          ownerKind: owner.kind,
+          ownerId: owner.id,
+          messageId,
+          bucket: info.bucket,
+          code: info.code,
+        },
+      });
       return await download(await refreshReference(client, peer, messageId, owner));
     }
   } finally {
@@ -170,24 +186,96 @@ async function downloadSmall(
 
 /** 下载单张照片的指定档位（预览或原图） */
 export async function downloadPhoto(client: TelegramClient, peer: TgPeerRef, messageId: number, photo: TgPhotoLocation, size: TgPhotoSize): Promise<TgMediaFile> {
-  const bytes = await downloadSmall(client, peer, messageId, { kind: 'photo', id: photo.id }, photo.fileReference, photo.dcId, size.bytes, (reference) => new Api.InputPhotoFileLocation({
-    id: returnBigInt(photo.id),
-    accessHash: returnBigInt(photo.accessHash),
-    fileReference: reference,
-    thumbSize: size.type,
-  }));
-  return { bytes: toArrayBuffer(bytes), mimeType: 'image/jpeg' };
+  const startedAt = Date.now();
+  try {
+    const bytes = await downloadSmall(client, peer, messageId, { kind: 'photo', id: photo.id }, photo.fileReference, photo.dcId, size.bytes, (reference) => new Api.InputPhotoFileLocation({
+      id: returnBigInt(photo.id),
+      accessHash: returnBigInt(photo.accessHash),
+      fileReference: reference,
+      thumbSize: size.type,
+    }));
+    emitLocalSpan({
+      domain: 'chat.media',
+      action: 'photo_thumb_ok',
+      level: 'DEBUG',
+      durMs: Date.now() - startedAt,
+      tags: {
+        peerKey: `${peer.type}-${peer.id}`,
+        messageId,
+        photoId: photo.id,
+        sizeType: size.type,
+        expectedBytes: size.bytes,
+        bytes: bytes.byteLength,
+      },
+    });
+    return { bytes: toArrayBuffer(bytes), mimeType: 'image/jpeg' };
+  } catch (error) {
+    const info = classifyTelegramError(error);
+    emitLocalSpan({
+      domain: 'chat.media',
+      action: 'photo_thumb_error',
+      level: 'ERROR',
+      durMs: Date.now() - startedAt,
+      message: info.description,
+      tags: {
+        peerKey: `${peer.type}-${peer.id}`,
+        messageId,
+        photoId: photo.id,
+        sizeType: size.type,
+        bucket: info.bucket,
+        code: info.code,
+        retryable: info.retryable,
+      },
+    });
+    throw error;
+  }
 }
 
 /** 下载文档缩略图（视频封面预览） */
 export async function downloadDocumentThumb(client: TelegramClient, peer: TgPeerRef, messageId: number, document: TgDocumentLocation, size: TgPhotoSize): Promise<TgMediaFile> {
-  const bytes = await downloadSmall(client, peer, messageId, { kind: 'document', id: document.id }, document.fileReference, document.dcId, size.bytes, (reference) => new Api.InputDocumentFileLocation({
-    id: returnBigInt(document.id),
-    accessHash: returnBigInt(document.accessHash),
-    fileReference: reference,
-    thumbSize: size.type,
-  }));
-  return { bytes: toArrayBuffer(bytes), mimeType: 'image/jpeg' };
+  const startedAt = Date.now();
+  try {
+    const bytes = await downloadSmall(client, peer, messageId, { kind: 'document', id: document.id }, document.fileReference, document.dcId, size.bytes, (reference) => new Api.InputDocumentFileLocation({
+      id: returnBigInt(document.id),
+      accessHash: returnBigInt(document.accessHash),
+      fileReference: reference,
+      thumbSize: size.type,
+    }));
+    emitLocalSpan({
+      domain: 'chat.media',
+      action: 'document_thumb_ok',
+      level: 'DEBUG',
+      durMs: Date.now() - startedAt,
+      tags: {
+        peerKey: `${peer.type}-${peer.id}`,
+        messageId,
+        documentId: document.id,
+        sizeType: size.type,
+        expectedBytes: size.bytes,
+        bytes: bytes.byteLength,
+      },
+    });
+    return { bytes: toArrayBuffer(bytes), mimeType: 'image/jpeg' };
+  } catch (error) {
+    const info = classifyTelegramError(error);
+    emitLocalSpan({
+      domain: 'chat.media',
+      action: 'document_thumb_error',
+      level: 'ERROR',
+      durMs: Date.now() - startedAt,
+      message: info.description,
+      tags: {
+        peerKey: `${peer.type}-${peer.id}`,
+        messageId,
+        documentId: document.id,
+        sizeType: size.type,
+        bucket: info.bucket,
+        code: info.code,
+        retryable: info.retryable,
+      },
+    });
+    throw error;
+  }
 }
 
 /**
@@ -203,6 +291,7 @@ export async function downloadAvatar(
   containerPeer?: TgPeerRef,
   messageId?: number,
 ): Promise<TgMediaFile> {
+  const startedAt = Date.now();
   await avatarPool.acquire();
   try {
     let inputPeer: Api.TypeInputPeer;
@@ -221,9 +310,41 @@ export async function downloadAvatar(
       photoId: returnBigInt(photoId),
       big: false,
     });
-    const result = await client.downloadFile(location, { dcId });
-    if (!result || typeof result === 'string' || result.byteLength === 0) throw unavailable();
-    return { bytes: toArrayBuffer(result), mimeType: 'image/jpeg' };
+    try {
+      const result = await client.downloadFile(location, { dcId });
+      if (!result || typeof result === 'string' || result.byteLength === 0) throw unavailable();
+      emitLocalSpan({
+        domain: 'chat.media',
+        action: 'avatar_ok',
+        level: 'DEBUG',
+        durMs: Date.now() - startedAt,
+        tags: {
+          peerKey: `${peer.type}-${peer.id}`,
+          photoId,
+          dcId,
+          bytes: result.byteLength,
+        },
+      });
+      return { bytes: toArrayBuffer(result), mimeType: 'image/jpeg' };
+    } catch (error) {
+      const info = classifyTelegramError(error);
+      emitLocalSpan({
+        domain: 'chat.media',
+        action: 'avatar_error',
+        level: 'WARN',
+        durMs: Date.now() - startedAt,
+        message: info.description,
+        tags: {
+          peerKey: `${peer.type}-${peer.id}`,
+          photoId,
+          dcId,
+          bucket: info.bucket,
+          code: info.code,
+          retryable: info.retryable,
+        },
+      });
+      throw error;
+    }
   } finally {
     avatarPool.release();
   }

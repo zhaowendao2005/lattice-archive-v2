@@ -7,11 +7,24 @@
  *   即使刷新丢失也不影响业务正确性（属于纯体验层状态）。
  */
 import { defineStore } from 'pinia';
+import { mtprotoHub } from '@/stores/telegram/data-sources/mtprotoBridge';
+import { notifyCloudActivity } from '@/stores/telegram/data-sources/tgRemoteDataSource';
+import { useDebugLoggerStore } from './debugLoggerStore';
 
 /** 四套平台尺度：iOS 44pt / iPadOS 44pt / Windows 40epx / Windows 紧凑 32epx */
 export type PlatformMode = 'ios' | 'ipados' | 'windows-standard' | 'windows-compact';
 /** 主题：跟随系统 / 强制亮 / 强制暗 */
 export type ThemeMode = 'system' | 'light' | 'dark';
+
+const STORAGE_DEV_MODE_KEY = 'lattice.app.developer-mode.v1';
+
+function readSavedDeveloperMode(): boolean {
+  try {
+    return window.localStorage.getItem(STORAGE_DEV_MODE_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
 
 /**
  * 应用全局环境域。
@@ -27,8 +40,8 @@ export const useAppStore = defineStore('app', {
     isSidebarCollapsed: false,
     /** 主题外观模式 */
     themeMode: 'system' as ThemeMode,
-    /** 开发者模式开关 */
-    developerMode: false,
+    /** 开发者模式开关（已持久化并在启动时自动向本地 Worker 下发实际控制） */
+    developerMode: typeof window !== 'undefined' ? readSavedDeveloperMode() : false,
     /**
      * 工作区分区（会话 / 归档 / 设置）切换进行中：覆盖「拉取路由分包 + 首次挂载重组件」整段耗时，
      * 由 src/router/workspaceTransition.ts 驱动，AppLayout 据此渲染缓冲遮罩与进度条。
@@ -60,13 +73,43 @@ export const useAppStore = defineStore('app', {
       this.isSidebarCollapsed = collapsed;
     },
 
-    /** 开发者模式：开启后设置页才会出现调试类子页 */
+    /** 开发者模式：开启后实际控制底层网关追踪与日志采集并持久化 */
     setDeveloperMode(enabled: boolean) {
       this.developerMode = enabled;
+      try {
+        window.localStorage.setItem(STORAGE_DEV_MODE_KEY, String(enabled));
+      } catch {
+        // ignore
+      }
+      this.applyDeveloperMode(enabled);
     },
 
     toggleDeveloperMode() {
-      this.developerMode = !this.developerMode;
+      this.setDeveloperMode(!this.developerMode);
+    },
+
+    applyDeveloperMode(enabled: boolean) {
+      // 1. 实际控制本地 Worker：下发 setDebug 指令，启用/禁用底层 MTProto 网关追踪
+      try {
+        mtprotoHub.bridge().setDebug(enabled);
+      } catch {
+        // ignore
+      }
+      // 2. 实际控制日志采集 Store：关闭时停止深层详细事件收集
+      try {
+        const debugLogger = useDebugLoggerStore();
+        if (enabled) {
+          debugLogger.initialize();
+        }
+      } catch {
+        // ignore
+      }
+      // 3. 调度顺风车同步将开发偏好持久化至云端
+      try {
+        notifyCloudActivity();
+      } catch {
+        // ignore
+      }
     },
 
     /**

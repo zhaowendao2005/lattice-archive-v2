@@ -93,7 +93,7 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', handlePointerD
           @click="navigate"
         />
       </RouterLink>
-      <RouterLink :to="{ name: 'settings-platform' }" custom #default="{ navigate, isActive }">
+      <RouterLink :to="{ name: 'settings-telegram' }" custom #default="{ navigate, isActive }">
         <SidebarNavItem
           :icon="Settings"
           label="设置"

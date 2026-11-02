@@ -12,6 +12,8 @@ import { computed, ref } from 'vue';
 import type { FileTileData, FolderTileData } from '@/views/main/archive/types/tile';
 import { useTileStore } from '@/views/main/archive/store/tileStore';
 import { aggregateSearchDataSource } from '../data-sources/aggregateSearchDataSource';
+import { debugLoggerDataSource } from '@/stores/app/data-sources/debugLoggerDataSource';
+import { classifyTelegramError } from '@/worker/local/chat/telegramErrors';
 import type {
   AggregateSearchResultItem,
   SearchFilterStage,
@@ -66,6 +68,11 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
   /** 搜索后筛选：对已流式返回的结果集进行客户端二次筛选 */
   const selectedPostCategories = ref<SearchPreFilterCategory[]>([]);
   const postKeyword = ref('');
+  const postResolutionFilter = ref<'all' | '720p' | '1080p' | '4k'>('all');
+  const postDurationFilter = ref<'all' | 'short' | 'medium' | 'long'>('all');
+  const postSizeFilter = ref<'all' | 'small' | 'medium' | 'large'>('all');
+  const postExcludeNoForwards = ref(false);
+  const postDeduplicateByDocId = ref(true);
 
   // ── 4. 右栏：搜索范围控制（按会话维度：已加入会话 / 只有凭据会话） ──
   const activeScopeTab = ref<SearchScopeSessionKind>('joined');
@@ -84,8 +91,15 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
   // ── 6. 搜索结果卡片选择与 Shift 连续多选状态 ───────────────────────
   const selectedResultIds = ref<string[]>([]);
   const lastClickedIndex = ref<number | null>(null);
+  /** 正在按需拉取高清缩略图的搜索结果卡片 ID 映射 */
+  const loadingHighResIds = ref<Record<string, boolean>>({});
+  /** 已完成高清缩略图加载的搜索结果卡片 ID 映射 */
+  const highResLoadedIds = ref<Record<string, boolean>>({});
+  /** 缩略图 Data URL 解码失败（坏图）的卡片 ID 映射 */
+  const brokenThumbIds = ref<Record<string, boolean>>({});
 
-  // ── 7. 向左栏文件树拖拽归档状态 ────────────────────────────────────
+  // ── 7. 向左栏文件树拖拽归档与树内节点拖拽状态 ──────────────────────
+  const internalTreeDragTileId = ref<string | null>(null);
   const dragToTree = ref<SearchToTreeDragState>({
     isDragging: false,
     items: [],
@@ -125,17 +139,26 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
   /** Explore 系统中归类的包含会话的文件夹列表 */
   const exploreSessionFolders = computed(() => {
     return tileStore.tiles
-      .filter(t => t.type === 'folder' && (t as FolderTileData).children.some(c => c.sessionId || c.isSessionLink))
+      .filter(
+        t =>
+          t.type === 'folder' &&
+          (t as FolderTileData).children.some(
+            c => c.type === 'file' && (c.sessionId || c.isSessionLink || c.peerKey),
+          ),
+      )
       .map(t => {
         const folder = t as FolderTileData;
-        const sessions = folder.children.filter(c => c.sessionId || c.isSessionLink);
+        const sessions = folder.children.filter(
+          (c): c is FileTileData =>
+            c.type === 'file' && Boolean(c.sessionId || c.isSessionLink || c.peerKey),
+        );
         return {
           id: folder.id,
           title: folder.title,
           groupId: folder.groupId,
           groupTitle: tileStore.groups.find(g => g.id === folder.groupId)?.title ?? '默认分组',
           sessions: sessions.map(s => ({
-            id: s.sessionId || s.id,
+            id: s.sessionId || s.peerKey || s.id,
             title: s.title,
             sessionTitle: s.sessionTitle || s.title,
             fileType: s.fileType,
@@ -189,6 +212,47 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
           item.snippet.toLowerCase().includes(pkw) ||
           item.sessionTitle.toLowerCase().includes(pkw),
       );
+    }
+    if (postExcludeNoForwards.value) {
+      list = list.filter(item => !item.noforwards);
+    }
+    if (postResolutionFilter.value !== 'all') {
+      list = list.filter(item => {
+        const h = item.height ?? 0;
+        if (postResolutionFilter.value === '4k') return h >= 2160;
+        if (postResolutionFilter.value === '1080p') return h >= 1080;
+        if (postResolutionFilter.value === '720p') return h >= 720;
+        return true;
+      });
+    }
+    if (postDurationFilter.value !== 'all') {
+      list = list.filter(item => {
+        const d = item.durationSeconds ?? 0;
+        if (postDurationFilter.value === 'short') return d > 0 && d < 60;
+        if (postDurationFilter.value === 'medium') return d >= 60 && d <= 900;
+        if (postDurationFilter.value === 'long') return d > 900;
+        return true;
+      });
+    }
+    if (postSizeFilter.value !== 'all') {
+      list = list.filter(item => {
+        const b = item.sizeBytes ?? 0;
+        const mb = b / (1024 * 1024);
+        if (postSizeFilter.value === 'small') return mb < 50;
+        if (postSizeFilter.value === 'medium') return mb >= 50 && mb <= 500;
+        if (postSizeFilter.value === 'large') return mb > 500;
+        return true;
+      });
+    }
+    if (postDeduplicateByDocId.value) {
+      const seenDocIds = new Set<string>();
+      list = list.filter(item => {
+        const docId = item.videoInfo?.id ?? item.fileInfo?.id ?? item.photoInfo?.id;
+        if (!docId) return true;
+        if (seenDocIds.has(docId)) return false;
+        seenDocIds.add(docId);
+        return true;
+      });
     }
     return list;
   });
@@ -338,6 +402,10 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
     selectedPreCategories.value = [];
     selectedPostCategories.value = [];
     postKeyword.value = '';
+    postResolutionFilter.value = 'all';
+    postDurationFilter.value = 'all';
+    postSizeFilter.value = 'all';
+    postExcludeNoForwards.value = false;
   }
 
   // ── 右栏：按会话控制搜索范围交互 ──────────────────────────────────
@@ -416,17 +484,40 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
 
   function execTreeNewFolder(targetGroupId?: string) {
     closeTreeContextMenu();
-    const name = window.prompt('新建文件夹：', '新建文件夹');
-    if (!name || !name.trim()) return;
-
     const gId = targetGroupId || tileStore.groups[0]?.id || 'group-common';
-    const folder = tileStore.addNewFolder(name.trim(), gId);
+    const folder = tileStore.addNewFolder('新建文件夹', gId);
     if (!expandedGroupIds.value.includes(gId)) {
       expandedGroupIds.value.push(gId);
     }
     if (!expandedFolderIds.value.includes(folder.id)) {
       expandedFolderIds.value.push(folder.id);
     }
+    startTreeInlineRename({
+      targetType: 'folder',
+      id: folder.id,
+      title: folder.title,
+    });
+    return folder;
+  }
+
+  function execTreeNewSubFolder(parentFolderId?: string) {
+    closeTreeContextMenu();
+    if (!parentFolderId) return null;
+    const sub = tileStore.addSubFolder(parentFolderId, '新建子文件夹');
+    if (sub) {
+      if (!expandedFolderIds.value.includes(parentFolderId)) {
+        expandedFolderIds.value.push(parentFolderId);
+      }
+      if (!expandedFolderIds.value.includes(sub.id)) {
+        expandedFolderIds.value.push(sub.id);
+      }
+      startTreeInlineRename({
+        targetType: 'folder',
+        id: sub.id,
+        title: sub.title,
+      });
+    }
+    return sub;
   }
 
   function startTreeInlineRename(options: {
@@ -531,9 +622,77 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
   }
 
   // ── 流式搜索与触底懒加载执行引擎 ──────────────────────────────────
+  function logSearch(
+    action: string,
+    level: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR',
+    tags: Record<string, string | number | boolean | undefined>,
+    message?: string,
+    durMs?: number,
+  ) {
+    debugLoggerDataSource.emitFrontendLog({
+      domain: 'archive.search',
+      action,
+      level,
+      message,
+      durMs,
+      tags,
+    });
+  }
+
+  /** 只有真正带可下载媒体/头像的结果才自动升级高清封面，纯文本消息直接跳过。 */
+  function canAutoLoadCover(item: AggregateSearchResultItem): boolean {
+    if (item.hdThumbLoaded || item.hdThumbAttempted) return false;
+    if (loadingHighResIds.value[item.id]) return false;
+    if (item.category === 'session') return true;
+    return Boolean(item.photoInfo || item.videoInfo || item.fileInfo?.preview);
+  }
+
+  /** 新卡片落位后自动补全高清封面（经 coverImageBus 的 search 通道限流）。 */
+  function autoLoadCoversForChunk(items: AggregateSearchResultItem[]) {
+    let queued = 0;
+    for (const item of items) {
+      if (!canAutoLoadCover(item)) continue;
+      queued += 1;
+      void loadHighResThumbnailForItem(item);
+    }
+    if (queued > 0) {
+      logSearch(
+        'store_auto_cover_queued',
+        'DEBUG',
+        { queued, chunkSize: items.length },
+        '自动为新结果卡片补全高清缩略图',
+      );
+    }
+  }
+
+  /** 把新分片并入 rawResults，并用数组里的响应式代理触发自动补图。 */
+  function appendChunkItems(
+    chunkItems: AggregateSearchResultItem[],
+    chunkTotalMatched: number,
+    chunkHasMore: boolean,
+  ) {
+    const existing = new Set(rawResults.value.map((item) => item.id));
+    const fresh = chunkItems.filter((item) => !existing.has(item.id));
+    rawResults.value.push(...fresh);
+    totalMatched.value = chunkTotalMatched;
+    hasMore.value = chunkHasMore;
+    if (fresh.length > 0) {
+      const proxies = rawResults.value.slice(rawResults.value.length - fresh.length);
+      autoLoadCoversForChunk(proxies);
+    }
+  }
+
   async function executeStreamingSearch() {
     const epoch = ++searchEpoch.value;
     const signal = aggregateSearchDataSource.createStreamSignal();
+    const startedAt = Date.now();
+    const queryMeta = {
+      keywordLength: keyword.value.trim().length,
+      categories: selectedPreCategories.value.join(',') || 'all',
+      scopeCount: selectedScopeSessionIds.value.length,
+      pageSize: PAGE_SIZE,
+    };
+    logSearch('store_search_start', 'INFO', queryMeta, '开始新的聚合搜索');
 
     hasSearched.value = true;
     isStreaming.value = true;
@@ -544,6 +703,9 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
     hasMore.value = false;
     selectedResultIds.value = [];
     lastClickedIndex.value = null;
+    loadingHighResIds.value = {};
+    highResLoadedIds.value = {};
+    brokenThumbIds.value = {};
 
     const query = {
       keyword: keyword.value,
@@ -556,9 +718,37 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
     try {
       for await (const chunk of aggregateSearchDataSource.streamSearchPage(query, signal)) {
         if (epoch !== searchEpoch.value || signal.aborted) return;
-        rawResults.value.push(...chunk.items);
-        totalMatched.value = chunk.totalMatched;
-        hasMore.value = chunk.hasMore;
+        appendChunkItems(chunk.items, chunk.totalMatched, chunk.hasMore);
+      }
+      logSearch(
+        'store_search_done',
+        'INFO',
+        {
+          ...queryMeta,
+          loaded: rawResults.value.length,
+          totalMatched: totalMatched.value,
+          hasMore: hasMore.value,
+        },
+        '搜索流式推送完成',
+        Date.now() - startedAt,
+      );
+    } catch (error) {
+      const info = classifyTelegramError(error);
+      if (epoch === searchEpoch.value) {
+        hasMore.value = false;
+        logSearch(
+          'store_search_error',
+          'ERROR',
+          {
+            ...queryMeta,
+            bucket: info.bucket,
+            code: info.code,
+            retryable: info.retryable,
+            loaded: rawResults.value.length,
+          },
+          info.description,
+          Date.now() - startedAt,
+        );
       }
     } finally {
       if (epoch === searchEpoch.value) {
@@ -568,14 +758,37 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
   }
 
   async function loadNextPageLazy() {
-    if (isStreaming.value || isLoadingMore.value || !hasMore.value) return;
+    if (isStreaming.value || isLoadingMore.value || !hasMore.value) {
+      logSearch(
+        'store_load_more_skipped',
+        'DEBUG',
+        {
+          reason: isStreaming.value
+            ? 'still_streaming'
+            : isLoadingMore.value
+              ? 'already_loading'
+              : 'no_more',
+          currentPage: currentPage.value,
+          totalMatched: totalMatched.value,
+        },
+        '本次触底懒加载被跳过',
+      );
+      return;
+    }
 
     const epoch = searchEpoch.value;
     const nextPage = currentPage.value + 1;
     const signal = aggregateSearchDataSource.createStreamSignal();
+    const startedAt = Date.now();
+    const queryMeta = {
+      nextPage,
+      keywordLength: keyword.value.trim().length,
+      categories: selectedPreCategories.value.join(',') || 'all',
+      scopeCount: selectedScopeSessionIds.value.length,
+    };
+    logSearch('store_load_more_start', 'INFO', queryMeta, '触底加载下一页');
 
     isLoadingMore.value = true;
-    currentPage.value = nextPage;
 
     const query = {
       keyword: keyword.value,
@@ -588,15 +801,62 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
     try {
       for await (const chunk of aggregateSearchDataSource.streamSearchPage(query, signal)) {
         if (epoch !== searchEpoch.value || signal.aborted) return;
-        rawResults.value.push(...chunk.items);
-        totalMatched.value = chunk.totalMatched;
-        hasMore.value = chunk.hasMore;
+        appendChunkItems(chunk.items, chunk.totalMatched, chunk.hasMore);
+      }
+      // 只有成功完成一页才推进页码，失败时保持在原页以便重试
+      currentPage.value = nextPage;
+      logSearch(
+        'store_load_more_done',
+        'INFO',
+        {
+          ...queryMeta,
+          loaded: rawResults.value.length,
+          totalMatched: totalMatched.value,
+          hasMore: hasMore.value,
+        },
+        '下一页加载完成',
+        Date.now() - startedAt,
+      );
+    } catch (error) {
+      const info = classifyTelegramError(error);
+      if (epoch === searchEpoch.value) {
+        logSearch(
+          'store_load_more_error',
+          'ERROR',
+          {
+            ...queryMeta,
+            bucket: info.bucket,
+            code: info.code,
+            retryable: info.retryable,
+            loaded: rawResults.value.length,
+          },
+          info.description,
+          Date.now() - startedAt,
+        );
       }
     } finally {
       if (epoch === searchEpoch.value) {
         isLoadingMore.value = false;
       }
     }
+  }
+
+  /** 浏览器无法解码缩略图（坏 Data URL / MIME 不匹配）时记录并隐藏图片。 */
+  function markThumbBroken(item: AggregateSearchResultItem, srcPrefix: string) {
+    if (brokenThumbIds.value[item.id]) return;
+    brokenThumbIds.value[item.id] = true;
+    logSearch(
+      'store_thumb_decode_error',
+      'WARN',
+      {
+        itemId: item.id,
+        category: item.category,
+        srcPrefix: srcPrefix.slice(0, 24),
+        srcLength: srcPrefix.length,
+        bucket: 'BROKEN_IMAGE',
+      },
+      '浏览器无法解码该缩略图，已回退到占位图',
+    );
   }
 
   // ── 卡片点击选择与按住 Shift 连续区间多选 ─────────────────────────
@@ -626,6 +886,60 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
   function clearResultSelection() {
     selectedResultIds.value = [];
     lastClickedIndex.value = null;
+  }
+
+  /**
+   * 单独点击搜索结果卡片左端缩略图时，按需从 Telegram 拉取较高清晰度的预览缩略图并同步更新已落位磁贴
+   */
+  async function loadHighResThumbnailForItem(item: AggregateSearchResultItem) {
+    if (!item || loadingHighResIds.value[item.id]) return;
+    item.hdThumbAttempted = true;
+    loadingHighResIds.value[item.id] = true;
+    try {
+      const hdDataUrl = await aggregateSearchDataSource.fetchHighResThumbnailDataUrl(item);
+      if (hdDataUrl) {
+        item.thumbnailUrl = hdDataUrl;
+        item.hdThumbLoaded = true;
+        item.hdThumbError = undefined;
+        delete brokenThumbIds.value[item.id];
+        highResLoadedIds.value[item.id] = true;
+        tileStore.applyUpdatedSearchResultThumb(item.id, hdDataUrl);
+        logSearch(
+          'store_hd_applied',
+          'INFO',
+          { itemId: item.id, category: item.category, dataUrlLength: hdDataUrl.length },
+          '搜索结果卡片已升级为高清缩略图',
+        );
+      } else {
+        logSearch(
+          'store_hd_unavailable',
+          'WARN',
+          {
+            itemId: item.id,
+            category: item.category,
+            bucket: item.hdThumbError || 'NO_MEDIA',
+          },
+          '该结果没有可用的高清缩略图',
+        );
+      }
+    } catch (error) {
+      const info = classifyTelegramError(error);
+      item.hdThumbError = info.code;
+      logSearch(
+        'store_hd_error',
+        'ERROR',
+        {
+          itemId: item.id,
+          category: item.category,
+          bucket: info.bucket,
+          code: info.code,
+          retryable: info.retryable,
+        },
+        info.description,
+      );
+    } finally {
+      delete loadingHighResIds.value[item.id];
+    }
   }
 
   // ── 跨栏拖拽：从搜索结果向左拖拽到文件树（磁贴拓扑） ─────────────
@@ -700,11 +1014,68 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
     }
   }
 
+  function startInternalTreeNodeDrag(tileId: string, title: string, clientX: number, clientY: number) {
+    const tile = tileStore.getTileById(tileId);
+    if (!tile || tile.undeletable || tile.systemApp) return;
+    internalTreeDragTileId.value = tileId;
+    dragToTree.value = {
+      isDragging: true,
+      items: [
+        {
+          id: tileId,
+          title,
+          snippet: '',
+          category: 'other',
+          categoryLabel: tile.type === 'folder' ? '文件夹' : '文件',
+          fileType: tile.type === 'file' ? tile.fileType : 'generic',
+          extension: tile.type === 'file' ? tile.extension || '' : 'DIR',
+          fileSize: '',
+          sessionId: '',
+          sessionTitle: '',
+          sessionKind: 'joined',
+          updatedAt: tile.updatedAt,
+          badgeMeta: tile.type === 'folder' ? 'DIR' : 'FILE',
+          thumbnailUrl: '',
+        },
+      ],
+      pointerX: clientX,
+      pointerY: clientY,
+      hoverTargetType: null,
+      hoverTargetId: null,
+      hoverTargetTitle: null,
+    };
+  }
+
   function finishDragToTree() {
     aggregateSearchDataSource.clearTreeHoverExpand();
     if (!dragToTree.value.isDragging) return;
 
     const { items, hoverTargetType, hoverTargetId, hoverTargetTitle } = dragToTree.value;
+    const movingTileId = internalTreeDragTileId.value;
+
+    if (movingTileId && hoverTargetType && hoverTargetId && hoverTargetId !== movingTileId) {
+      if (hoverTargetType === 'folder') {
+        tileStore.addFileToFolder(hoverTargetId, movingTileId);
+        if (!expandedFolderIds.value.includes(hoverTargetId)) {
+          expandedFolderIds.value.push(hoverTargetId);
+        }
+      } else if (hoverTargetType === 'group') {
+        tileStore.batchMoveTilesToGroup(hoverTargetId, undefined, undefined, [movingTileId]);
+        if (!expandedGroupIds.value.includes(hoverTargetId)) {
+          expandedGroupIds.value.push(hoverTargetId);
+        }
+      }
+      recentlyImportedTargetId.value = hoverTargetId;
+      lastImportBannerText.value = `已移入「${hoverTargetTitle || '目标目录'}」`;
+      window.setTimeout(() => {
+        if (recentlyImportedTargetId.value === hoverTargetId) {
+          recentlyImportedTargetId.value = null;
+        }
+      }, 1600);
+      cancelDragToTree();
+      return;
+    }
+
     if (hoverTargetType && hoverTargetId && items.length > 0) {
       const importedCount = tileStore.importSearchResultsToTopology(
         items,
@@ -743,6 +1114,7 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
 
   function cancelDragToTree() {
     aggregateSearchDataSource.clearTreeHoverExpand();
+    internalTreeDragTileId.value = null;
     dragToTree.value = {
       isDragging: false,
       items: [],
@@ -782,6 +1154,7 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
     openTreeContextMenu,
     closeTreeContextMenu,
     execTreeNewFolder,
+    execTreeNewSubFolder,
     execTreeRename,
     execTreeDelete,
     editingTreeNode,
@@ -798,6 +1171,11 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
     selectedPreCategories,
     selectedPostCategories,
     postKeyword,
+    postResolutionFilter,
+    postDurationFilter,
+    postSizeFilter,
+    postExcludeNoForwards,
+    postDeduplicateByDocId,
     categoryOptions,
     activeFilterCount,
     toggleFilterMenu,
@@ -848,12 +1226,19 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
     selectedResultSet,
     selectedResultItems,
     lastClickedIndex,
+    loadingHighResIds,
+    highResLoadedIds,
+    brokenThumbIds,
     handleResultCardClick,
     selectAllDisplayedResults,
     clearResultSelection,
+    loadHighResThumbnailForItem,
+    markThumbBroken,
 
-    // 跨栏拖拽归档
+    // 跨栏拖拽归档与树内节点拖拽
+    internalTreeDragTileId,
     dragToTree,
+    startInternalTreeNodeDrag,
     startDragResultsToTree,
     updateDragToTreePointer,
     finishDragToTree,

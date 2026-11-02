@@ -5,7 +5,7 @@
  * 并把 Worker 广播的实时更新分发给 Store。聊天内容只在设备本地流转，绝不经过 Lattice 远端。
  */
 import { mtprotoHub, TgChatRequestError } from '@/stores/telegram/data-sources/mtprotoBridge';
-import type { TgChatUpdate, TgDialogCursor, TgDocumentLocation, TgPeerRef, TgPhotoLocation, TgPhotoSize, TgUpdatesState } from '../types';
+import type { TgChatUpdate, TgDialogCursor, TgDocumentLocation, TgMessageDto, TgPeerKey, TgPeerRef, TgPhotoLocation, TgPhotoSize, TgUpdatesState } from '../types';
 
 type UpdatesListener = (accountId: string, updates: TgChatUpdate[], state?: TgUpdatesState) => void;
 
@@ -220,9 +220,180 @@ export const chatDataSource = {
     });
   },
 
+  /** 批量归档 / 取消归档多个会话（folders.EditPeerFolders 单次最多 100 个）。 */
+  batchSetDialogsArchived(accountId: string, peers: TgPeerRef[], archived: boolean) {
+    return mtprotoHub.bridge().requestChat(accountId, {
+      method: 'batchSetDialogsArchived',
+      peers: peers.map(stripPeer),
+      archived,
+    });
+  },
+
+  /** 批量巡检频道访问哈希状态（channels.GetChannels）。 */
+  batchCheckChannels(accountId: string, peers: TgPeerRef[]) {
+    return mtprotoHub.bridge().requestChat(accountId, {
+      method: 'batchCheckChannels',
+      channels: peers.map(stripPeer),
+    });
+  },
+
+  /** 聚合搜索：单会话 messages.Search 或全局 messages.SearchGlobal。 */
+  searchMessages(
+    accountId: string,
+    options: {
+      peer?: TgPeerRef;
+      query: string;
+      filterType?: 'all' | 'photo_video' | 'video' | 'document' | 'Photo' | 'photo' | 'url' | 'voice' | 'music';
+      minDate?: number;
+      maxDate?: number;
+      offsetId?: number;
+      offsetRate?: number;
+      offsetPeer?: TgPeerRef;
+      limit: number;
+    },
+  ) {
+    const rawFilter = options.filterType;
+    const filter: 'all' | 'photo' | 'video' | 'document' | 'url' | 'music' | undefined =
+      rawFilter === 'Photo' || rawFilter === 'photo_video'
+        ? 'photo'
+        : rawFilter === 'voice'
+          ? 'music'
+          : rawFilter;
+    return mtprotoHub.bridge().requestChat(accountId, {
+      method: 'searchMessages',
+      peer: options.peer ? stripPeer(options.peer) : undefined,
+      query: options.query,
+      filter,
+      minDate: options.minDate,
+      maxDate: options.maxDate,
+      offsetId: options.offsetId,
+      offsetRate: options.offsetRate,
+      offsetPeer: options.offsetPeer ? stripPeer(options.offsetPeer) : undefined,
+      limit: options.limit,
+    });
+  },
+
+  /** 零带宽服务端转发消息到共享私有备份群（messages.ForwardMessages）。 */
+  forwardToVault(
+    accountId: string,
+    fromPeer: TgPeerRef,
+    vaultPeer: TgPeerRef,
+    messageIds: number[],
+    topMsgId?: number,
+    dropAuthor?: boolean,
+  ) {
+    return mtprotoHub.bridge().requestChat(accountId, {
+      method: 'forwardToVault',
+      fromPeer: stripPeer(fromPeer),
+      toPeer: stripPeer(vaultPeer),
+      messageIds,
+      topMsgId,
+      dropAuthor,
+    });
+  },
+
+  /** 克隆防转发受限消息到共享私有备份群。 */
+  cloneNoForwardsToVault(
+    accountId: string,
+    fromPeer: TgPeerRef,
+    vaultPeer: TgPeerRef,
+    messageId: number,
+    topMsgId?: number,
+  ) {
+    return mtprotoHub.bridge().requestChat(accountId, {
+      method: 'cloneNoForwardsToVault',
+      fromPeer: stripPeer(fromPeer),
+      toPeer: stripPeer(vaultPeer),
+      messageId,
+      topMsgId,
+    });
+  },
+
+  /** 初始化共享私有备份群的 6 大默认 Forum Topics。 */
+  ensureVaultForumTopics(accountId: string, vaultPeer: TgPeerRef) {
+    return mtprotoHub.bridge().requestChat(accountId, {
+      method: 'ensureVaultForumTopics',
+      vaultPeer: stripPeer(vaultPeer),
+    });
+  },
+
+  /** 将加密的临时会话池同步到备份群的 #02 会话凭据信标置顶消息。 */
+  syncBeaconCredentials(accountId: string, vaultPeer: TgPeerRef, topicMsgId: number | undefined, _encryptedPayloadJson?: string) {
+    return mtprotoHub.bridge().requestChat(accountId, {
+      method: 'syncBeaconCredentials',
+      vaultPeer: stripPeer(vaultPeer),
+      beaconTopicId: topicMsgId ?? 1,
+    });
+  },
+
+  /** 探测当前账号健康度与活跃授权设备列表（account.GetAuthorizations）。 */
+  probeAccountHealth(accountId: string) {
+    return mtprotoHub.bridge().requestChat(accountId, {
+      method: 'probeAccountHealth',
+    });
+  },
+
+  /** 6 步同机回环生成 PendingSlot 备用热槽位。 */
+  spawnPendingSlot(
+    accountId: string,
+    apiId: number,
+    apiHash: string,
+    password2FA?: string,
+    deviceFingerprint?: {
+      deviceModel: string;
+      systemVersion: string;
+      appVersion: string;
+      langCode: string;
+      systemLangCode: string;
+    },
+  ) {
+    return mtprotoHub.bridge().requestChat(accountId, {
+      method: 'spawnPendingSlot',
+      apiId,
+      apiHash,
+      twoFaPassword: password2FA,
+      deviceFingerprint: deviceFingerprint ?? {
+        deviceModel: 'Desktop',
+        systemVersion: 'Mac OS X 14.5',
+        appVersion: '5.12.3',
+        langCode: 'zh-hans',
+        systemLangCode: 'zh-CN',
+      },
+    });
+  },
+
   subscribeUpdates(listener: UpdatesListener): () => void {
     return mtprotoHub.subscribe((event) => {
       if (event.type === 'chatUpdates') listener(event.accountId, event.updates, event.state);
+    });
+  },
+
+  /**
+   * 监听指定会话中某条消息的下一次 UpdateEditMessage 实时更新（供搜索机器人翻页事件驱动等待使用）。
+   * 若在 timeoutMs 内收到该消息的编辑推送则立即返回新 TgMessageDto，超时则返回 null。
+   */
+  waitForMessageEdit(peerKey: TgPeerKey, messageId: number, timeoutMs = 4500): Promise<TgMessageDto | null> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const timer = window.setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        unsub();
+        resolve(null);
+      }, timeoutMs);
+
+      const unsub = mtprotoHub.subscribe((event) => {
+        if (settled || event.type !== 'chatUpdates') return;
+        for (const u of event.updates) {
+          if (u.type === 'editMessage' && u.message.peerKey === peerKey && u.message.id === messageId) {
+            settled = true;
+            window.clearTimeout(timer);
+            unsub();
+            resolve(u.message);
+            return;
+          }
+        }
+      });
     });
   },
 

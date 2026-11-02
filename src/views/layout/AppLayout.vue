@@ -14,18 +14,21 @@ import { watch } from 'vue';
 import { useMediaQuery } from '@vueuse/core';
 import { Loader2 } from '@lucide/vue';
 import { useAppStore } from '@/stores/app/stores/appStore';
+import { useDebugLoggerStore } from '@/stores/app/stores/debugLoggerStore';
 import { useAuthStore } from '@/stores/auth/stores/authStore';
 import { useChatStore } from '@/stores/chat/stores/chatStore';
 import AppSidebar from './AppSidebar.vue';
 
 const appStore = useAppStore();
+const debugLogger = useDebugLoggerStore();
 const authStore = useAuthStore();
 const chatStore = useChatStore();
 const isCompactWidth = useMediaQuery('(width < 1024px)'); // 平板竖屏/手机：侧栏变抽屉
 const isNarrowWidth = useMediaQuery('(width < 768px)');   // 手机：会话列表也收起
 
-// 工作区级引导（在子页面挂载前执行）：恢复本机 Telegram 连接并加载该用户的聊天缓存。
+// 工作区级引导（在子页面挂载前执行）：恢复本机 Telegram 连接、挂载调试采集桥并加载该用户的聊天缓存。
 // 放在 AppLayout 而不是 ChatsView，是为了让「设置页」等其它子页也能提前完成连接。
+debugLogger.initialize();
 if (authStore.user) chatStore.initialize(authStore.user.id);
 
 // 仅在跨越断点时自动折叠，窄屏内仍允许用户手动展开。
