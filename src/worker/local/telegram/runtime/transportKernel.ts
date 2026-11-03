@@ -1,27 +1,23 @@
 /**
  * ============================================================================
- * 本地 Worker MTProto 统一居中请求与 PTS 状态机网关 (mtprotoGateway.ts)
+ * TransportKernel：MTProto RPC 网关、公共 pts 推进与 InputPeer 解析
  * ============================================================================
- * 核心职责：
- * 1. 统一收口所有主动发起的 `client.invoke` 请求，集中采集耗时、参数摘要与结构化分级 Trace Span；
- * 2. 统一推进公共消息盒 `pts` 状态机（覆盖 UpdateShortSentMessage / Updates / AffectedHistory / AffectedMessages），
- *    彻底根治私聊/机器人发消息漏推进 pts 引发假性 Gap 重置窗口吞消息的问题；
- * 3. 统一归一化非致命异常（如搜索机器人只调 editMessageText 不调 answerCallbackQuery 引发的 BOT_RESPONSE_TIMEOUT）；
- * 4. 实时将结构化分级树状时间轴日志回传主线程（当 LOCAL 调试标签开启时）。
+ * 1. 统一收口业务总线主动发起的 `client.invoke`，采集耗时与结构化 Trace Span；
+ * 2. 统一推进公共消息盒 `pts`（UpdateShortSentMessage / Updates / AffectedHistory / AffectedMessages），
+ *    防止漏推进导致假性 gap 重置窗口；
+ * 3. `BOT_RESPONSE_TIMEOUT` 只记 WARN，属于业务超时，绝不触发连接重连；
+ * 4. 把 DTO 的 peer 引用解析为 GramJS InputPeer（实体缓存优先，缺失时回填会话首页）。
+ * 只有 runtime/ 与 buses/ 可以引用本模块。
  */
 import type { TelegramClient } from 'telegram';
 import { Api } from 'telegram/tl';
-import type { TgUpdatesState } from '../chatProtocol';
-import type { TgDebugSpanEntry, TgLogLevel } from '../protocol';
-
-export type LocalDebugEmitter = (entry: TgDebugSpanEntry) => void;
-
-let debugEnabled = false;
-let debugEmitter: LocalDebugEmitter | null = null;
-let traceSeq = 0;
+import { returnBigInt } from 'telegram/Helpers';
+import type { TgPeerKey, TgPeerRef, TgUpdatesState } from '../../chatProtocol';
+import { isSelfKey, peerInfo, rememberEntities } from '../converters/converters';
+import { startLocalTrace, type LocalTraceContext } from '../telemetry/localSpans';
 
 /** 参与公共消息盒 pts 连续性推进的 TL 更新构造器集合 */
-export const COMMON_PTS_UPDATE_TYPES = [
+const COMMON_PTS_UPDATE_TYPES = [
   Api.UpdateNewMessage,
   Api.UpdateEditMessage,
   Api.UpdateDeleteMessages,
@@ -34,147 +30,6 @@ export const COMMON_PTS_UPDATE_TYPES = [
   Api.UpdateShortMessage,
   Api.UpdateShortChatMessage,
 ];
-
-const SENSITIVE_TAG_KEYS = /session|hash|password|token|secret|authkey/i;
-
-function sanitizeTags(
-  tags?: Record<string, string | number | boolean | undefined>,
-): Record<string, string | number | boolean> | undefined {
-  if (!tags) return undefined;
-  const cleaned: Record<string, string | number | boolean> = {};
-  for (const [k, v] of Object.entries(tags)) {
-    if (v === undefined) continue;
-    if (SENSITIVE_TAG_KEYS.test(k)) {
-      cleaned[k] = '[REDACTED]';
-    } else if (typeof v === 'string' && v.length > 120) {
-      cleaned[k] = `${v.slice(0, 117)}...`;
-    } else {
-      cleaned[k] = v;
-    }
-  }
-  return Object.keys(cleaned).length > 0 ? cleaned : undefined;
-}
-
-export function nextShortTraceId(): string {
-  traceSeq = (traceSeq + 1) & 0xffff;
-  const timePart = (Date.now() & 0xfffff).toString(16).padStart(5, '0');
-  const seqPart = traceSeq.toString(16).padStart(3, '0');
-  return `${timePart}${seqPart}`.slice(0, 6);
-}
-
-export function configureMtprotoGateway(options: {
-  enabled?: boolean;
-  emitter?: LocalDebugEmitter;
-}): void {
-  if (options.enabled !== undefined) debugEnabled = options.enabled;
-  if (options.emitter !== undefined) debugEmitter = options.emitter;
-}
-
-export function isGatewayDebugEnabled(): boolean {
-  return debugEnabled;
-}
-
-export function emitLocalSpan(params: {
-  traceId?: string;
-  spanId?: string;
-  parentSpanId?: string;
-  domain: string;
-  action: string;
-  level?: TgLogLevel;
-  timestamp?: number;
-  relMs?: number;
-  durMs?: number;
-  message?: string;
-  tags?: Record<string, string | number | boolean | undefined>;
-}): void {
-  if (!debugEnabled || !debugEmitter) return;
-  const now = params.timestamp ?? Date.now();
-  const traceId = params.traceId ?? nextShortTraceId();
-  const spanId = params.spanId ?? '01';
-  debugEmitter({
-    id: `loc-${now}-${Math.random().toString(36).slice(2, 7)}`,
-    traceId,
-    spanId,
-    parentSpanId: params.parentSpanId,
-    source: 'local',
-    domain: params.domain,
-    action: params.action,
-    level: params.level ?? 'INFO',
-    timestamp: now,
-    relMs: Math.max(0, Math.round(params.relMs ?? 0)),
-    durMs: params.durMs !== undefined ? Math.max(0, Math.round(params.durMs)) : undefined,
-    message: params.message,
-    tags: sanitizeTags(params.tags),
-  });
-}
-
-export interface LocalTraceContext {
-  traceId: string;
-  rootStartMs: number;
-  childCount: number;
-  childSpan(
-    domain: string,
-    action: string,
-    tags?: Record<string, string | number | boolean | undefined>,
-    level?: TgLogLevel,
-    durMs?: number,
-    parentSpanId?: string,
-  ): string;
-  finishRoot(
-    tags?: Record<string, string | number | boolean | undefined>,
-    level?: TgLogLevel,
-  ): void;
-}
-
-export function startLocalTrace(
-  domain: string,
-  action: string,
-  rootTags?: Record<string, string | number | boolean | undefined>,
-): LocalTraceContext {
-  const traceId = nextShortTraceId();
-  const rootStartMs = Date.now();
-  let childCount = 0;
-
-  return {
-    traceId,
-    rootStartMs,
-    get childCount() {
-      return childCount;
-    },
-    childSpan(subDomain, subAction, tags, level = 'INFO', durMs, parentSpanId = '01') {
-      childCount += 1;
-      const spanId = `${parentSpanId}.${String(childCount).padStart(2, '0')}`;
-      const now = Date.now();
-      emitLocalSpan({
-        traceId,
-        spanId,
-        parentSpanId,
-        domain: subDomain,
-        action: subAction,
-        level,
-        timestamp: now,
-        relMs: now - rootStartMs,
-        durMs,
-        tags,
-      });
-      return spanId;
-    },
-    finishRoot(extraTags, level = 'INFO') {
-      const now = Date.now();
-      emitLocalSpan({
-        traceId,
-        spanId: '01',
-        domain,
-        action,
-        level,
-        timestamp: rootStartMs,
-        relMs: 0,
-        durMs: now - rootStartMs,
-        tags: { ...rootTags, ...extraTags },
-      });
-    },
-  };
-}
 
 /**
  * 统一推进公共消息盒的 pts 水位（适用于主动写 RPC 返回的 Updates / UpdateShortSentMessage / AffectedHistory 等）
@@ -331,5 +186,53 @@ export async function invokeWithGateway<R>(
       );
     }
     throw error;
+  }
+}
+
+/**
+ * 把 DTO 里的 peer 引用转成 GramJS 的 InputPeer。
+ * 优先用调用方给的 accessHash，其次用实体缓存，都没有则让 GramJS 自己去解析。
+ * 「自己」需要特殊处理成 InputPeerSelf。
+ */
+export async function resolveInputPeer(client: TelegramClient, ref: TgPeerRef): Promise<Api.TypeInputPeer> {
+  if (ref.type === 'user' && isSelfKey(`user-${ref.id}`)) return new Api.InputPeerSelf();
+  if (ref.type === 'chat') return new Api.InputPeerChat({ chatId: returnBigInt(ref.id) });
+  const key = `${ref.type}-${ref.id}` as TgPeerKey;
+  const accessHash = ref.accessHash ?? peerInfo(key)?.ref.accessHash;
+  if (accessHash !== undefined) {
+    return ref.type === 'user'
+      ? new Api.InputPeerUser({ userId: returnBigInt(ref.id), accessHash: returnBigInt(accessHash) })
+      : new Api.InputPeerChannel({ channelId: returnBigInt(ref.id), accessHash: returnBigInt(accessHash) });
+  }
+  const peer = ref.type === 'user' ? new Api.PeerUser({ userId: returnBigInt(ref.id) }) : new Api.PeerChannel({ channelId: returnBigInt(ref.id) });
+  try {
+    return await client.getInputEntity(peer);
+  } catch {
+    // 若该会话位于归档文件夹 (folderId=1) 或尚未拉取进缓存，尝试拉取归档与活动会话首页填充实体字典
+    for (const folderId of [1, 0] as const) {
+      try {
+        const res = await client.invoke(new Api.messages.GetDialogs({
+          offsetDate: 0,
+          offsetId: 0,
+          offsetPeer: new Api.InputPeerEmpty(),
+          limit: 100,
+          hash: returnBigInt(0),
+          excludePinned: false,
+          folderId,
+        }));
+        if (!(res instanceof Api.messages.DialogsNotModified)) {
+          rememberEntities(res.users, res.chats);
+        }
+        const hydrated = peerInfo(key)?.ref.accessHash;
+        if (hydrated !== undefined) {
+          return ref.type === 'user'
+            ? new Api.InputPeerUser({ userId: returnBigInt(ref.id), accessHash: returnBigInt(hydrated) })
+            : new Api.InputPeerChannel({ channelId: returnBigInt(ref.id), accessHash: returnBigInt(hydrated) });
+        }
+      } catch {
+        // 忽略拉取异常，继续尝试
+      }
+    }
+    return client.getInputEntity(peer);
   }
 }

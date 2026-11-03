@@ -2,7 +2,7 @@
 import { computed } from 'vue';
 import { Check, ChevronRight, Database, FolderPlus, LayoutGrid, MessageSquare, Search } from '@lucide/vue';
 import { useAggregateSearchStore } from '@/stores/archive/stores/aggregateSearchStore';
-import { useTileStore } from '../../../store/tileStore';
+import { useTileStore } from '@/stores/archive/stores/tileStore';
 import type { FileTileData, FolderTileData, TileGroupData } from '../../../types/tile';
 import { getFileVisual } from '../../tiles/fileVisuals';
 import TreeFolderItem from './TreeFolderItem.vue';

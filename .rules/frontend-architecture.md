@@ -38,7 +38,11 @@
      │   ├── PlatformSettingsView.vue
      │   ├── AppearanceSettingsView.vue
      │   ├── GeneralSettingsView.vue
-     │   ├── DeveloperSettingsView.vue
+     │   ├── DeveloperSettingsView.vue  # 开发者选项外壳：左侧二级列表 + 嵌套路由
+     │   ├── developer/
+     │   │   ├── nav/DeveloperSubNav.vue      # 二级列表（日志 / Telegram 连接监控…），开发者模式外的项用 CSS 隐藏
+     │   │   ├── logs/DeveloperLogsView.vue   # 日志：开发者模式、云端快照、日志终端、Agent 密钥
+     │   │   └── telegram-monitor/            # 运行监控：账号栏、总览、总线卡片、Canvas 曲线、虚拟任务表、事件流
      │   └── StorageSettingsView.vue
      └── SettingsView.vue           # 顶层分栏容器
 

@@ -40,7 +40,7 @@ import {
 } from '@/stores/archive/stores/sessionManagerStore';
 import { useAggregateSearchStore } from '@/stores/archive/stores/aggregateSearchStore';
 import type { QuotaRuleKey } from '@/stores/archive/types';
-import { useTileStore } from '../../store/tileStore';
+import { useTileStore } from '@/stores/archive/stores/tileStore';
 import { useTelegramStore } from '@/stores/telegram/stores/telegramStore';
 import { useChatMediaStore } from '@/stores/chat/stores/chatMediaStore';
 import type { TgDialogDto } from '@/stores/chat/types';

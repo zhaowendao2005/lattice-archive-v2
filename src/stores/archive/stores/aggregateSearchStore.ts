@@ -10,7 +10,7 @@
 import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
 import type { FileTileData, FolderTileData } from '@/views/main/archive/types/tile';
-import { useTileStore } from '@/views/main/archive/store/tileStore';
+import { useTileStore } from '@/stores/archive/stores/tileStore';
 import { aggregateSearchDataSource } from '../data-sources/aggregateSearchDataSource';
 import { debugLoggerDataSource } from '@/stores/app/data-sources/debugLoggerDataSource';
 import { classifyTelegramError } from '@/worker/local/chat/telegramErrors';

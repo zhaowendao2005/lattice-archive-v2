@@ -2,7 +2,7 @@
 import { computed } from 'vue';
 import { ChevronsDownUp, ChevronsUpDown, FolderPlus, FolderTree } from '@lucide/vue';
 import { useAggregateSearchStore } from '@/stores/archive/stores/aggregateSearchStore';
-import { useTileStore } from '../../../store/tileStore';
+import { useTileStore } from '@/stores/archive/stores/tileStore';
 import TreeBranchNode from './TreeBranchNode.vue';
 import TreeContextMenu from './TreeContextMenu.vue';
 

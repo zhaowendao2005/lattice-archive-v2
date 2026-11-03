@@ -7,11 +7,11 @@
  */
 import { Api } from 'telegram/tl';
 import { strippedPhotoToJpg } from 'telegram/Utils';
-import { emitLocalSpan } from './mtprotoGateway';
+import { emitLocalSpan } from '../telemetry/localSpans';
 import type {
   TgAvatarInfo, TgChatKind, TgDialogDto, TgFileInfo, TgInlineButton, TgMessageDto, TgMessageEntity, TgMessageMedia,
   TgPeerKey, TgPeerRef, TgPhotoInfo, TgPhotoSize, TgReplyInfo, TgVideoInfo, TgVideoQuality, TgWebPagePreview,
-} from '../chatProtocol';
+} from '../../chatProtocol';
 
 type ChatEntity = Api.Chat | Api.ChatForbidden | Api.ChatEmpty | Api.Channel | Api.ChannelForbidden;
 type AnyEntity = Api.TypeUser | Api.TypeChat;

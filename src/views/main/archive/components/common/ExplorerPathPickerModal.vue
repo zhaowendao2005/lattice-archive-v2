@@ -2,7 +2,7 @@
 import { computed } from 'vue';
 import { Check, FolderInput, FolderPlus, FolderTree, X } from '@lucide/vue';
 import { useAggregateSearchStore } from '@/stores/archive/stores/aggregateSearchStore';
-import { useTileStore } from '../../store/tileStore';
+import { useTileStore } from '@/stores/archive/stores/tileStore';
 import TileExplorerTree from '../search-modal/left-tree/TileExplorerTree.vue';
 
 const tileStore = useTileStore();

@@ -1,4 +1,9 @@
-import type { TgChatRequest, TgChatUpdate, TgUpdatesState } from './chatProtocol';
+import type { TgChatUpdate, TgUpdatesState } from './chatProtocol';
+import type { BusName } from './telegram/contracts/buses';
+import type { TelegramBusContext, TelegramBusError } from './telegram/contracts/busContext';
+import type { TelegramConcurrencyConfig } from './telegram/contracts/concurrency';
+import type { MonitorFrame } from './telegram/contracts/monitor';
+import type { ParsedImportedSessionItem, SessionBatchParseRequest } from '@/types/sessionBatch';
 
 export type TgPlatform = 'web' | 'electron' | 'ios';
 export type TgLoginStage = 'qr' | 'phone' | 'code' | 'password' | 'email' | 'ready' | 'done';
@@ -36,8 +41,15 @@ export interface TgDebugSpanEntry {
 }
 
 export type TgCommand =
-  | { t: 'init'; deviceId: string; platform: TgPlatform; appVersion: string; debug?: boolean }
+  | { t: 'init'; deviceId: string; platform: TgPlatform; appVersion: string; debug?: boolean; concurrency?: TelegramConcurrencyConfig }
   | { t: 'setDebug'; enabled: boolean }
+  /** 设置页修改并发配额：立即作用于全部账号调度器的后续任务。 */
+  | { t: 'setConcurrency'; config: TelegramConcurrencyConfig }
+  /** 运行监控订阅 / 续约（同一命令）：带租约，超时未续约 Worker 自动停止推送。 */
+  | { t: 'monitorSubscribe'; subscriberId: string; hz: number }
+  | { t: 'monitorUnsubscribe'; subscriberId: string }
+  /** 帧序号不连续时请求一帧全量数据。 */
+  | { t: 'monitorResync'; subscriberId: string }
   | { t: 'validateApp'; requestId: string; apiId: number; apiHash: string }
   | { t: 'beginQrLogin'; apiId: number; apiHash: string; exceptIds: string[]; expectedUserId?: string }
   | { t: 'beginPhoneLogin'; apiId: number; apiHash: string; expectedUserId?: string }
@@ -50,10 +62,12 @@ export type TgCommand =
   | { t: 'disconnectAccount'; accountId: string }
   | { t: 'submit'; stage: 'phone' | 'code' | 'password'; value: string }
   | { t: 'checkConnection'; requestId: string; accountId: string }
-  /** 聊天内容只读请求；只能作用于 Worker 当前已授权的账户。 */
-  | { t: 'chatRequest'; requestId: string; accountId: string; request: TgChatRequest }
-  /** 中断仍在进行的聊天请求（目前仅完整文件下载响应）。 */
-  | { t: 'chatCancel'; requestId: string }
+  /** 业务总线请求：context.requestId 唯一标识；只能作用于 Worker 已授权（前台或温池）的账户。 */
+  | { t: 'busRequest'; context: TelegramBusContext; bus: BusName; op: string; input: unknown }
+  /** 取消进行中的总线请求：排队中立即出队，执行中在分片边界停止。 */
+  | { t: 'busCancel'; requestId: string }
+  /** 在本地 Worker 解析批量导入文本 / 文件；文件原始字节只在本机线程间传递。 */
+  | { t: 'sessionBatchParse'; requestId: string; request: SessionBatchParseRequest }
   /** 仅取消进行中的扫码 / 手机号登录，不断开当前已在线的会话。 */
   | { t: 'cancel' }
   /** 主动断开当前已在线的会话（例如切换 Lattice 用户或解绑当前账户）。 */
@@ -79,10 +93,12 @@ export type TgEvent =
    * network：连接或握手超时 / 网络不可达，可自动退避重试；error：其他异常，可重试。
    */
   | { t: 'restoreFailed'; accountId: string; reason: TgRestoreFailure; message: string }
-  | { t: 'chatResponse'; requestId: string; ok: true; data: unknown }
-  | { t: 'chatResponse'; requestId: string; ok: false; code: string; message: string }
+  | { t: 'busResponse'; requestId: string; ok: true; data: unknown }
+  | { t: 'busResponse'; requestId: string; ok: false; error: TelegramBusError }
   /** 长请求进度（字节）；Worker 端已节流。 */
-  | { t: 'chatProgress'; requestId: string; loaded: number; total: number }
+  | { t: 'busProgress'; requestId: string; loaded: number; total: number }
+  | { t: 'sessionBatchParsed'; requestId: string; ok: true; items: ParsedImportedSessionItem[] }
+  | { t: 'sessionBatchParsed'; requestId: string; ok: false; message: string }
   /** 实时更新批次，向所有标签页广播；state 为 Worker 跟踪到的最新公共更新状态。 */
   | { t: 'chatUpdates'; accountId: string; updates: TgChatUpdate[]; state?: TgUpdatesState }
   /** 广播 Worker 内部多实例温池状态变化。 */
@@ -92,4 +108,6 @@ export type TgEvent =
       accounts: { accountId: string; tier: 'P0' | 'P1' | 'P2'; connected: boolean }[];
     }
   | { t: 'debugLog'; entry: TgDebugSpanEntry }
+  /** 运行监控帧：只发给对应订阅者（主标签页直达，从标签页经 BroadcastChannel 转发）。 */
+  | { t: 'monitorFrame'; subscriberId: string; frame: MonitorFrame }
   | { t: 'error'; code?: string; message: string };

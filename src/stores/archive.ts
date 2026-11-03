@@ -11,7 +11,7 @@
 import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
 import type { ArchiveItem, PlatformInfo } from '../types/database';
-import { dbService } from '../services/database';
+import { dbService } from './archive/data-sources/databaseDataSource';
 
 export const useArchiveStore = defineStore('archive', () => {
   // ── 数据 ────────────────────────────────────────────────

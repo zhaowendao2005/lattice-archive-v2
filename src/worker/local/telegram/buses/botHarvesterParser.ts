@@ -8,8 +8,8 @@
  * 3. 建立「我方发出的查询消息 (Outbox Query) ↔ 机器人回复的分页消息 (Inbox Bot Reply)」因果绑定；
  * 4. 从单页富文本 Entities、裸链接与按钮中提取 t.me 候选群组/频道/深链。
  */
-import type { BotHarvestCandidateItem } from '@/stores/archive/types';
-import type { TgInlineButton, TgMessageDto } from '../chatProtocol';
+import type { BotHarvestCandidateItem } from '../../../../stores/archive/types';
+import type { TgInlineButton, TgMessageDto } from '../../chatProtocol';
 
 const NEXT_BUTTON_REGEX = /(?:下[一]?页|next|▶|➡|➡️|👉|»|>|›)/i;
 const PREV_OR_BOUND_BUTTON_REGEX = /(?:上[一]?页|回?到?首页|第一页|回?到?末页|尾页|最后一页|prev|previous|first|last|⏮|⏭|⏪|⬅)/i;

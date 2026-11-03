@@ -8,17 +8,8 @@
  * 2. `.session` (SQLite3 二进制 / 文本) + `.json` (含黏性设备指纹与 2FA) 成对文件解析；
  * 3. 自动将提取出的 dcId + serverAddress + port + 256B authKey 编码为 GramJS 标准 StringSession。
  */
-import type { DeviceFingerprintProfile } from '@/stores/archive/types';
-
-export interface ParsedImportedSessionItem {
-  id: string;
-  label: string;
-  phone?: string;
-  sessionString: string;
-  twoFaPassword?: string;
-  dcId: number;
-  deviceFingerprint: DeviceFingerprintProfile;
-}
+import type { DeviceFingerprintProfile, ParsedImportedSessionItem } from '@/types/sessionBatch';
+export type { ParsedImportedSessionItem } from '@/types/sessionBatch';
 
 const DEFAULT_DC_IPV4: Record<number, { ip: string; port: number }> = {
   1: { ip: '149.154.175.53', port: 443 },

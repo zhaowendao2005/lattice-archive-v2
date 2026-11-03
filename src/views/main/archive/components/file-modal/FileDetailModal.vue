@@ -3,7 +3,7 @@ import { computed } from 'vue';
 import { FolderPlus, MessageSquare, Pencil, Pin, ShieldCheck, X } from '@lucide/vue';
 import { useRouter } from 'vue-router';
 import type { FileTileData } from '../../types/tile';
-import { getTileSpan, useTileStore } from '../../store/tileStore';
+import { getTileSpan, useTileStore } from '@/stores/archive/stores/tileStore';
 import { getFileVisual } from '../tiles/fileVisuals';
 import { useChatStore } from '@/stores/chat/stores/chatStore';
 import type { TgPeerKey } from '@/stores/chat/types';

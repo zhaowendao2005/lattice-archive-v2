@@ -1,13 +1,14 @@
 /**
  * chat 域页面状态：会话列表、消息窗口、同步阶段与冷启动缓存调度。
  *
- * 数据流：View（零 ref）→ chatStore action → chatDataSource → MTProto Bridge → 本地 Telegram Worker。
+ * 数据流：View（零 ref）→ chatStore action → telegramBusClient → MTProto Bridge → 本地 Worker BusRouter → 业务总线。
  * 账户与连接状态的唯一来源是 telegramStore；本 Store 只订阅，不复制连接逻辑。
  */
 import { defineStore } from 'pinia';
 import { effectScope, nextTick, watch } from 'vue';
 import { useTelegramStore, type TelegramConnectionState } from '@/stores/telegram/stores/telegramStore';
-import { chatDataSource } from '../data-sources/chatDataSource';
+import { telegramBusClient } from '@/stores/telegram/data-sources/telegramBusClient';
+import { pageLifecycle } from '../data-sources/pageLifecycle';
 import { chatCacheStore } from '../data-sources/chatCacheStore';
 import { chatMediaCache } from '../data-sources/chatMediaCache';
 import { messageViewport } from '../data-sources/messageViewport';
@@ -417,8 +418,8 @@ export const useChatStore = defineStore('chat', {
       useChatMediaStore().init();
       if (!initialized) {
         initialized = true;
-        chatDataSource.subscribeUpdates((accountId, updates, state) => this.handleLiveUpdates(accountId, updates, state));
-        chatDataSource.onPageHidden(() => { void this.persistNow(); });
+        telegramBusClient.subscribeUpdates((accountId, updates, state) => this.handleLiveUpdates(accountId, updates, state));
+        pageLifecycle.onPageHidden(() => { void this.persistNow(); });
         // 独立作用域：watcher 不能挂在首次调用 initialize 的组件上，否则组件卸载即失效。
         effectScope(true).run(() => {
           watch(() => telegram.currentAccountId, (accountId) => { void this.bindAccount(accountId); });
@@ -514,15 +515,15 @@ export const useChatStore = defineStore('chat', {
         try {
           let dialog: TgDialogDto | null = null;
           if (item.inviteHash) {
-            const res = await chatDataSource.importChatInvite(accountId, item.inviteHash);
+            const res = await telegramBusClient.chatCommand.importChatInvite(accountId, item.inviteHash);
             dialog = res.dialog ?? null;
           } else if (item.peer) {
-            const res = await chatDataSource.joinChat(accountId, item.peer);
+            const res = await telegramBusClient.chatCommand.joinChat(accountId, item.peer);
             dialog = res.dialog ?? null;
           } else if (item.username) {
-            const resolved = await chatDataSource.resolveUsername(accountId, item.username);
+            const resolved = await telegramBusClient.chatCommand.resolveUsername(accountId, item.username);
             if (resolved) {
-              const res = await chatDataSource.joinChat(accountId, resolved.peer);
+              const res = await telegramBusClient.chatCommand.joinChat(accountId, resolved.peer);
               dialog = res.dialog ?? null;
             }
           }
@@ -541,7 +542,7 @@ export const useChatStore = defineStore('chat', {
 
       if (archiveInTg && peersToArchive.length > 0) {
         try {
-          await chatDataSource.batchSetDialogsArchived(accountId, peersToArchive, true);
+          await telegramBusClient.chatCommand.batchSetDialogsArchived(accountId, peersToArchive, true);
           this.hasArchivedChats = true;
         } catch {
           // 忽略批量归档非致命异常
@@ -656,7 +657,7 @@ export const useChatStore = defineStore('chat', {
       this.syncPhase = 'syncing';
       this.syncError = null;
       try {
-        const result = await chatDataSource.syncFrom(accountId, this.updatesState);
+        const result = await telegramBusClient.chatRead.syncFrom(accountId, this.updatesState);
         if (generation !== accountGeneration) return;
         if (result.kind === 'difference') {
           this.applyUpdates(result.updates);
@@ -677,7 +678,7 @@ export const useChatStore = defineStore('chat', {
         if (this.hasArchivedChats || this.isArchiveView) void this.refreshArchiveDialogs(generation).catch(() => undefined);
       } catch (error) {
         if (generation !== accountGeneration) return;
-        this.syncError = chatDataSource.readError(error);
+        this.syncError = telegramBusClient.readError(error);
         this.syncPhase = 'offline';
         // 连接仍在线说明是临时失败，稍后自动重试一次；连接断开则等待恢复事件。
         if (this.isOnline) syncRetryTimer = window.setTimeout(() => { if (this.isOnline && this.syncPhase === 'offline') void this.syncNow(); }, SYNC_RETRY_MS);
@@ -713,7 +714,7 @@ export const useChatStore = defineStore('chat', {
       this.isLoadingDialogs = true;
       this.dialogsError = null;
       try {
-        const page = await chatDataSource.getDialogs(accountId, 0, undefined, DIALOG_PAGE_SIZE);
+        const page = await telegramBusClient.chatRead.getDialogs(accountId, 0, undefined, DIALOG_PAGE_SIZE);
         if (generation !== accountGeneration) return;
         const pageKeys = new Set(page.dialogs.map((dialog) => dialog.key));
         const activeKey = this.activeChatKey;
@@ -750,7 +751,7 @@ export const useChatStore = defineStore('chat', {
           if (pinnedChanged && page.hasMore && this.syncPhase === 'live') void this.loadRemainingDialogs();
         }
       } catch (error) {
-        if (generation === accountGeneration) this.dialogsError = chatDataSource.readError(error);
+        if (generation === accountGeneration) this.dialogsError = telegramBusClient.readError(error);
         throw error;
       } finally {
         if (generation === accountGeneration) this.isLoadingDialogs = false;
@@ -763,7 +764,7 @@ export const useChatStore = defineStore('chat', {
       if (!accountId || this.isLoadingArchive) return;
       this.isLoadingArchive = true;
       try {
-        const page = await chatDataSource.getDialogs(accountId, 1, undefined, DIALOG_PAGE_SIZE);
+        const page = await telegramBusClient.chatRead.getDialogs(accountId, 1, undefined, DIALOG_PAGE_SIZE);
         if (generation !== accountGeneration) return;
         const next: Record<TgPeerKey, TgDialogDto> = {};
         for (const [key, dialog] of Object.entries(this.dialogs)) {
@@ -810,7 +811,7 @@ export const useChatStore = defineStore('chat', {
       const generation = accountGeneration;
       this.isLoadingMoreArchive = true;
       try {
-        const page = await chatDataSource.getDialogs(accountId, 1, cursor, DIALOG_PAGE_SIZE);
+        const page = await telegramBusClient.chatRead.getDialogs(accountId, 1, cursor, DIALOG_PAGE_SIZE);
         if (generation !== accountGeneration) return;
         for (const dialog of page.dialogs) this.dialogs[dialog.key] = dialog;
         this.archiveTotal = Math.max(this.archiveTotal, page.totalCount);
@@ -852,7 +853,7 @@ export const useChatStore = defineStore('chat', {
       this.isLoadingMoreDialogs = true;
       this.dialogsError = null;
       try {
-        const page = await chatDataSource.getDialogs(accountId, 0, cursor, DIALOG_PAGE_SIZE);
+        const page = await telegramBusClient.chatRead.getDialogs(accountId, 0, cursor, DIALOG_PAGE_SIZE);
         if (generation !== accountGeneration) return;
         for (const dialog of page.dialogs) this.dialogs[dialog.key] = dialog;
         this.dialogTotal = Math.max(this.dialogTotal, page.totalCount);
@@ -861,7 +862,7 @@ export const useChatStore = defineStore('chat', {
         this.hasMoreDialogs = page.hasMore && !stalled && page.dialogs.length > 0;
         dialogPages += 1;
       } catch (error) {
-        if (generation === accountGeneration) this.dialogsError = chatDataSource.readError(error);
+        if (generation === accountGeneration) this.dialogsError = telegramBusClient.readError(error);
       } finally {
         if (generation === accountGeneration) this.isLoadingMoreDialogs = false;
       }
@@ -961,7 +962,7 @@ export const useChatStore = defineStore('chat', {
         if (accountId && this.isOnline) {
           if (!options.accessHash && options.username) {
             try {
-              const resolved = await chatDataSource.resolveUsername(accountId, options.username);
+              const resolved = await telegramBusClient.chatCommand.resolveUsername(accountId, options.username);
               if (resolved) {
                 this.resolvedDialog = resolved;
               }
@@ -970,7 +971,7 @@ export const useChatStore = defineStore('chat', {
             }
           } else if (!options.accessHash && options.inviteHash) {
             try {
-              const preview = await chatDataSource.checkChatInvite(accountId, options.inviteHash);
+              const preview = await telegramBusClient.chatCommand.checkChatInvite(accountId, options.inviteHash);
               if (preview.dialog) {
                 this.resolvedDialog = preview.dialog;
               }
@@ -1077,7 +1078,7 @@ export const useChatStore = defineStore('chat', {
       win.isLoadingLatest = true;
       win.error = null;
       try {
-        const page = await chatDataSource.getHistory(accountId, peer, 0, historyPageSize());
+        const page = await telegramBusClient.chatRead.getHistory(accountId, peer, 0, historyPageSize());
         const current = this.windows[key];
         if (generation !== accountGeneration || !current) return;
         mergeLatestPage(current, page);
@@ -1087,7 +1088,7 @@ export const useChatStore = defineStore('chat', {
         if (stick || current.epoch !== epoch) messageViewport.scrollToBottom();
         this.fillViewport();
       } catch (error) {
-        if (generation === accountGeneration && this.windows[key]) this.windows[key].error = chatDataSource.readError(error);
+        if (generation === accountGeneration && this.windows[key]) this.windows[key].error = telegramBusClient.readError(error);
       } finally {
         if (generation === accountGeneration && this.windows[key]) this.windows[key].isLoadingLatest = false;
       }
@@ -1105,7 +1106,7 @@ export const useChatStore = defineStore('chat', {
       const epoch = win.epoch;
       win.isLoadingOlder = true;
       try {
-        const page = await chatDataSource.getHistory(accountId, peer, win.messages[0].id, historyPageSize());
+        const page = await telegramBusClient.chatRead.getHistory(accountId, peer, win.messages[0].id, historyPageSize());
         const current = this.windows[key];
         // 窗口在请求期间被整体替换（缺口重建 / 裁剪）时，旧锚点的翻页结果不再适用。
         if (generation !== accountGeneration || !current || current.epoch !== epoch) return;
@@ -1116,7 +1117,7 @@ export const useChatStore = defineStore('chat', {
           messageViewport.restoreAfterPrepend(snapshot);
         }
       } catch (error) {
-        if (generation === accountGeneration && this.windows[key]) this.windows[key].error = chatDataSource.readError(error);
+        if (generation === accountGeneration && this.windows[key]) this.windows[key].error = telegramBusClient.readError(error);
       } finally {
         if (generation === accountGeneration && this.windows[key]) this.windows[key].isLoadingOlder = false;
       }
@@ -1282,7 +1283,7 @@ export const useChatStore = defineStore('chat', {
       this.archivingKeys[key] = true;
       this.actionError = null;
       try {
-        await chatDataSource.setDialogArchived(accountId, dialog.peer, nextArchived);
+        await telegramBusClient.chatCommand.setDialogArchived(accountId, dialog.peer, nextArchived);
         if (generation !== accountGeneration) return;
         const current = this.dialogs[key];
         if (current) {
@@ -1303,7 +1304,7 @@ export const useChatStore = defineStore('chat', {
         this.scheduleSave();
         this.scheduleDialogRefresh();
       } catch (error) {
-        if (generation === accountGeneration) this.actionError = chatDataSource.readError(error);
+        if (generation === accountGeneration) this.actionError = telegramBusClient.readError(error);
       } finally {
         delete this.archivingKeys[key];
       }
@@ -1321,7 +1322,7 @@ export const useChatStore = defineStore('chat', {
       this.isResolvingUsername = true;
       this.resolveError = null;
       try {
-        const dialog = await chatDataSource.resolveUsername(accountId, rawKeyword);
+        const dialog = await telegramBusClient.chatCommand.resolveUsername(accountId, rawKeyword);
         if (generation !== accountGeneration || seq !== resolveSequence) return;
         if (dialog) {
           this.resolvedDialog = dialog;
@@ -1341,7 +1342,7 @@ export const useChatStore = defineStore('chat', {
         }
       } catch (error) {
         if (generation === accountGeneration && seq === resolveSequence) {
-          this.resolveError = chatDataSource.readError(error);
+          this.resolveError = telegramBusClient.readError(error);
         }
       } finally {
         if (generation === accountGeneration && seq === resolveSequence) {
@@ -1370,7 +1371,7 @@ export const useChatStore = defineStore('chat', {
       this.actionError = null;
       this.joinNotice = null;
       try {
-        const result = await chatDataSource.joinChat(accountId, dialog.peer);
+        const result = await telegramBusClient.chatCommand.joinChat(accountId, dialog.peer);
         if (generation !== accountGeneration) return;
         if (result.status === 'joined') {
           const merged: TgDialogDto = result.dialog ?? { ...dialog, left: false, kicked: false, joinPending: false, folderId: 0 };
@@ -1391,7 +1392,7 @@ export const useChatStore = defineStore('chat', {
           this.joinNotice = '该会话需在 Telegram 官方客户端完成附加验证后加入';
         }
       } catch (error) {
-        if (generation === accountGeneration) this.actionError = chatDataSource.readError(error);
+        if (generation === accountGeneration) this.actionError = telegramBusClient.readError(error);
       } finally {
         if (generation === accountGeneration) this.isJoining = false;
       }
@@ -1436,14 +1437,14 @@ export const useChatStore = defineStore('chat', {
       this.isLeaving = true;
       this.leaveError = null;
       try {
-        await chatDataSource.leaveChat(accountId, dialog.peer);
+        await telegramBusClient.chatCommand.leaveChat(accountId, dialog.peer);
         if (generation !== accountGeneration) return;
         this.applyPeerLeft(key);
         this.leaveTargetKey = null;
         this.scheduleSave();
         this.scheduleDialogRefresh();
       } catch (error) {
-        if (generation === accountGeneration) this.leaveError = chatDataSource.readError(error);
+        if (generation === accountGeneration) this.leaveError = telegramBusClient.readError(error);
       } finally {
         if (generation === accountGeneration) this.isLeaving = false;
       }
@@ -1521,14 +1522,14 @@ export const useChatStore = defineStore('chat', {
       this.isDeletingChat = true;
       this.deleteChatError = null;
       try {
-        await chatDataSource.deleteChat(accountId, dialog.peer, this.deleteRevokeForBoth);
+        await telegramBusClient.chatCommand.deleteChat(accountId, dialog.peer, this.deleteRevokeForBoth);
         if (generation !== accountGeneration) return;
         this.applyPeerLeft(key);
         this.deleteTargetKey = null;
         this.scheduleSave();
         this.scheduleDialogRefresh();
       } catch (error) {
-        if (generation === accountGeneration) this.deleteChatError = chatDataSource.readError(error);
+        if (generation === accountGeneration) this.deleteChatError = telegramBusClient.readError(error);
       } finally {
         if (generation === accountGeneration) this.isDeletingChat = false;
       }
@@ -1649,7 +1650,7 @@ export const useChatStore = defineStore('chat', {
       this.actionError = null;
       this.lastSentQueryByPeer[key] = trimmed;
       try {
-        const sent = await chatDataSource.sendMessage(accountId, peer, trimmed, replyTarget?.id);
+        const sent = await telegramBusClient.chatCommand.sendMessage(accountId, peer, trimmed, replyTarget?.id);
         if (generation !== accountGeneration) return;
         if (!overrideText) {
           this.drafts[key] = '';
@@ -1663,7 +1664,7 @@ export const useChatStore = defineStore('chat', {
         messageViewport.scrollToBottom();
       } catch (error) {
         if (generation === accountGeneration) {
-          this.actionError = chatDataSource.readError(error);
+          this.actionError = telegramBusClient.readError(error);
         }
       } finally {
         if (generation === accountGeneration) {
@@ -1718,7 +1719,7 @@ export const useChatStore = defineStore('chat', {
       this.pendingCallbacks[cbKey] = true;
       this.actionError = null;
       try {
-        const answer = await chatDataSource.pressBotCallback(accountId, peer, messageId, button.data);
+        const answer = await telegramBusClient.bot.pressBotCallback(accountId, peer, messageId, button.data);
         if (generation !== accountGeneration) return;
         if (answer.message) {
           this.showCallbackNotice(answer.message);
@@ -1728,7 +1729,7 @@ export const useChatStore = defineStore('chat', {
         }
       } catch (error) {
         if (generation === accountGeneration) {
-          const msg = chatDataSource.readError(error);
+          const msg = telegramBusClient.readError(error);
           if (!msg.includes('机器人响应超时')) {
             this.actionError = msg;
           }
@@ -1759,13 +1760,13 @@ export const useChatStore = defineStore('chat', {
         const generation = accountGeneration;
         win.isLoadingOlder = true;
         try {
-          const page = await chatDataSource.getHistoryAround(accountId, peer, messageId, historyPageSize());
+          const page = await telegramBusClient.chatRead.getHistoryAround(accountId, peer, messageId, historyPageSize());
           if (generation !== accountGeneration) return;
           const current = this.windows[peerKey];
           if (current) mergeHistoryAround(current, page);
         } catch (error) {
           if (generation === accountGeneration) {
-            this.actionError = chatDataSource.readError(error);
+            this.actionError = telegramBusClient.readError(error);
           }
         } finally {
           if (generation === accountGeneration && this.windows[peerKey]) {
@@ -1862,7 +1863,7 @@ export const useChatStore = defineStore('chat', {
       if (!targetDialog) {
         const generation = accountGeneration;
         try {
-          const resolved = await chatDataSource.resolveUsername(accountId, parsed.username);
+          const resolved = await telegramBusClient.chatCommand.resolveUsername(accountId, parsed.username);
           if (generation !== accountGeneration) return;
           if (!resolved) {
             this.actionError = `未找到 @${parsed.username} 对应的会话`;
@@ -1875,7 +1876,7 @@ export const useChatStore = defineStore('chat', {
           targetDialog = resolved;
         } catch (error) {
           if (generation === accountGeneration) {
-            this.actionError = chatDataSource.readError(error);
+            this.actionError = telegramBusClient.readError(error);
           }
           return;
         }
@@ -1896,14 +1897,14 @@ export const useChatStore = defineStore('chat', {
         const generation = accountGeneration;
         this.isSendingMessage = true;
         try {
-          const sent = await chatDataSource.startBot(accountId, targetDialog.peer, parsed.startParam);
+          const sent = await telegramBusClient.bot.startBot(accountId, targetDialog.peer, parsed.startParam);
           if (generation !== accountGeneration) return;
           if (sent) this.applyNewMessage(sent);
           await nextTick();
           messageViewport.scrollToBottom();
         } catch (error) {
           if (generation === accountGeneration) {
-            this.actionError = chatDataSource.readError(error);
+            this.actionError = telegramBusClient.readError(error);
           }
         } finally {
           if (generation === accountGeneration) {
@@ -1922,7 +1923,7 @@ export const useChatStore = defineStore('chat', {
       this.inviteError = null;
       this.actionError = null;
       try {
-        const preview = await chatDataSource.checkChatInvite(accountId, hash);
+        const preview = await telegramBusClient.chatCommand.checkChatInvite(accountId, hash);
         if (generation !== accountGeneration) return;
         if ((preview.status === 'already' || preview.status === 'peek') && preview.dialog) {
           this.resolvedDialog = preview.dialog;
@@ -1935,7 +1936,7 @@ export const useChatStore = defineStore('chat', {
         this.invitePreview = preview;
       } catch (error) {
         if (generation === accountGeneration) {
-          this.actionError = chatDataSource.readError(error);
+          this.actionError = telegramBusClient.readError(error);
         }
       } finally {
         if (generation === accountGeneration) {
@@ -1960,7 +1961,7 @@ export const useChatStore = defineStore('chat', {
       this.isImportingInvite = true;
       this.inviteError = null;
       try {
-        const result = await chatDataSource.importChatInvite(accountId, preview.hash);
+        const result = await telegramBusClient.chatCommand.importChatInvite(accountId, preview.hash);
         if (generation !== accountGeneration) return;
         if (result.status === 'joined') {
           this.invitePreview = null;
@@ -1979,7 +1980,7 @@ export const useChatStore = defineStore('chat', {
         }
       } catch (error) {
         if (generation === accountGeneration) {
-          this.inviteError = chatDataSource.readError(error);
+          this.inviteError = telegramBusClient.readError(error);
         }
       } finally {
         if (generation === accountGeneration) {

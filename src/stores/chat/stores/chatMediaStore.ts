@@ -4,7 +4,7 @@
  * 完整视频文件、播放状态与 GIF / 圆形视频的播放由 chatVideoStore 负责。
  *
  * 数据流：View（零 ref，v-media-visible 登记元素）→ messageViewport 可见性回调 → chatMediaStore
- *   → chatMediaLoader（去重 / 优先级 / 并发 / 退避）→ chatMediaCache（加密 Cache Storage）或 chatDataSource → 本地 Worker。
+ *   → chatMediaLoader（去重 / 优先级 / 并发 / 退避）→ chatMediaCache（加密 Cache Storage）或 telegramBusClient（CoverBus）→ 本地 Worker。
  * 消息、会话与账户仍以 chatStore 为唯一来源，本 Store 只读取，不复制。
  */
 import { defineStore } from 'pinia';
@@ -12,12 +12,12 @@ import { effectScope, watch } from 'vue';
 import { useChatStore } from './chatStore';
 import { useChatVideoStore } from './chatVideoStore';
 import { useChatFileStore } from './chatFileStore';
-import { chatDataSource } from '../data-sources/chatDataSource';
+import { telegramBusClient } from '@/stores/telegram/data-sources/telegramBusClient';
 import { chatMediaCache } from '../data-sources/chatMediaCache';
 import { chatMediaLoader, MediaCanceledError } from '../data-sources/chatMediaLoader';
 import { chatPreferences } from '../data-sources/chatPreferences';
 import { messageViewport } from '../data-sources/messageViewport';
-import { TgChatRequestError } from '@/stores/telegram/data-sources/mtprotoBridge';
+import { TelegramBusRequestError } from '@/stores/telegram/data-sources/mtprotoBridge';
 import type { AutoDownloadPrefs, FeedPhoto, MediaEntry, TgMediaFile, TgMessageDto, TgPeerKey, TgPeerRef, TgPhotoInfo, TgPhotoSize } from '../types';
 import { avatarKey, formatDateTime, initialsOf, mediaTarget, parseMediaTarget, photoKey, previewSizeOf, videoPreviewOf } from './chatModel';
 
@@ -66,7 +66,7 @@ function resolveAvatarRequest(target: string): AvatarRequest | null {
     if (!senderPeer) return null;
     return {
       key: avatarKey(senderKey, avatar),
-      fetch: (accountId) => chatDataSource.getAvatar(accountId, senderPeer, avatar.photoId, avatar.dcId, containerPeer, message.id),
+      fetch: (accountId) => telegramBusClient.cover.getAvatar(accountId, senderPeer, avatar.photoId, avatar.dcId, containerPeer, message.id),
     };
   }
   const dialog = chat.dialogs[target] ?? (chat.resolvedDialog?.key === target ? chat.resolvedDialog : undefined);
@@ -74,17 +74,17 @@ function resolveAvatarRequest(target: string): AvatarRequest | null {
   const avatar = dialog.avatar;
   return {
     key: avatarKey(dialog.key, avatar),
-    fetch: (accountId) => chatDataSource.getAvatar(accountId, dialog.peer, avatar.photoId, avatar.dcId),
+    fetch: (accountId) => telegramBusClient.cover.getAvatar(accountId, dialog.peer, avatar.photoId, avatar.dcId),
   };
 }
 
 function isRetryable(error: unknown) {
-  const raw = `${error instanceof TgChatRequestError ? error.code : ''} ${error instanceof Error ? error.message : ''}`.toUpperCase();
+  const raw = `${error instanceof TelegramBusRequestError ? error.code : ''} ${error instanceof Error ? error.message : ''}`.toUpperCase();
   return RETRYABLE_PATTERNS.some((pattern) => raw.includes(pattern));
 }
 
 function photoRequest(photo: TgPhotoInfo, size: TgPhotoSize, spoiler = Boolean(photo.spoiler)): ImageRequest {
-  return { key: photoKey(photo, size), spoiler, fetch: (accountId, peer, messageId) => chatDataSource.getPhoto(accountId, peer, messageId, photo, size) };
+  return { key: photoKey(photo, size), spoiler, fetch: (accountId, peer, messageId) => telegramBusClient.cover.getPhoto(accountId, peer, messageId, photo, size) };
 }
 
 /** 气泡 / 胶片条使用的预览图：照片取预览档，视频取封面或文档缩略图。 */
@@ -95,7 +95,7 @@ function previewRequestOf(message: TgMessageDto): ImageRequest | null {
   const source = video ? videoPreviewOf(video) : null;
   if (!video || !source) return null;
   if (source.kind === 'photo') return photoRequest(source.photo, source.size, Boolean(video.spoiler));
-  return { key: source.key, spoiler: Boolean(video.spoiler), fetch: (accountId, peer, messageId) => chatDataSource.getDocumentThumb(accountId, peer, messageId, video, source.size) };
+  return { key: source.key, spoiler: Boolean(video.spoiler), fetch: (accountId, peer, messageId) => telegramBusClient.cover.getDocumentThumb(accountId, peer, messageId, video, source.size) };
 }
 
 /** 查看器可翻页的媒体：照片与消息视频 / GIF（圆形视频与文件方式发送的视频除外）。 */
@@ -366,7 +366,7 @@ export const useChatMediaStore = defineStore('chatMedia', {
         (error: unknown) => {
           if (generation !== mediaGeneration) return;
           if (error instanceof MediaCanceledError) { if (this.entries[key]?.status !== 'ready') delete this.entries[key]; return; }
-          this.entries[key] = { status: 'error', error: chatDataSource.readError(error) };
+          this.entries[key] = { status: 'error', error: telegramBusClient.readError(error) };
         },
       );
     },
@@ -429,7 +429,7 @@ export const useChatMediaStore = defineStore('chatMedia', {
         (error: unknown) => {
           if (generation !== mediaGeneration) return;
           if (error instanceof MediaCanceledError) { if (this.entries[key]?.status !== 'ready') delete this.entries[key]; return; }
-          this.entries[key] = { status: 'error', error: chatDataSource.readError(error) };
+          this.entries[key] = { status: 'error', error: telegramBusClient.readError(error) };
         },
       );
     },

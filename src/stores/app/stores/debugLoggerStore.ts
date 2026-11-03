@@ -650,6 +650,39 @@ export const useDebugLoggerStore = defineStore('debugLogger', {
       }
     },
 
+    /**
+     * 从运行监控跳转：按 traceId 过滤终端并重置时间轴视口。
+     * LOCAL 采集关闭时 Worker 的任务 Span 不会进入终端，给出提示而不是静默空列表。
+     */
+    focusTrace(traceId: string) {
+      this.grepKeyword = traceId;
+      this.levelFilter = 'ALL';
+      this.viewStartRatio = 0;
+      this.viewEndRatio = 1;
+      this.isFollowLive = false;
+      this.statusNotice = this.captureLocal
+        ? `已按 ${traceId} 过滤日志`
+        : `已按 ${traceId} 过滤；LOCAL 采集未开启，Worker 任务日志不会出现在终端`;
+    },
+
+    /**
+     * 上传调用方组装的条目为一条独立云端快照（例如运行监控快照），不清理本地终端日志。
+     * 与 pushSnapshotNow 共用账号与开关校验，成功后插入快照列表。
+     */
+    async pushCustomSnapshot(entries: LatticeLogEntry[]): Promise<DebugSnapshotMeta> {
+      this.syncCloudAccountContext();
+      if (!this.cloudAccountId) throw new Error('请先登录后再同步云端快照');
+      if (!this.cloudLoggingEnabled) throw new Error('云端日志记录已关闭，请先在「日志」页开启');
+      if (entries.length === 0) throw new Error('暂无可导出的数据');
+      const accountId = this.cloudAccountId;
+      const meta = await debugLoggerDataSource.pushSnapshotToRemote(entries);
+      if (this.cloudAccountId !== accountId) throw new Error('账号已切换，本次快照未计入当前账号');
+      this.cloudLoadVersion += 1;
+      this.cloudSnapshots = [meta, ...this.cloudSnapshots];
+      this.cloudLoaded = true;
+      return meta;
+    },
+
     /** 读取当前账号的云端快照元数据列表（不下载压缩正文）。 */
     async loadCloudSnapshots() {
       this.syncCloudAccountContext();

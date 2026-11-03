@@ -5,7 +5,7 @@ import { coverImageBus } from '@/stores/app/data-sources/coverImageBus';
 import { debugLoggerDataSource } from '@/stores/app/data-sources/debugLoggerDataSource';
 import { opfsExploreStorage } from '@/stores/archive/data-sources/opfsExploreStorage';
 import { storageQuotaEvictor } from '@/stores/archive/data-sources/storageQuotaEvictor';
-import { chatDataSource } from '@/stores/chat/data-sources/chatDataSource';
+import { telegramBusClient } from '@/stores/telegram/data-sources/telegramBusClient';
 import { coverSizeOf, videoPreviewOf } from '@/stores/chat/stores/chatModel';
 import { useChatStore } from '@/stores/chat/stores/chatStore';
 import { classifyTelegramError } from '@/worker/local/chat/telegramErrors';
@@ -25,7 +25,7 @@ import type {
   TileData,
   TileGroupData,
   TileSize,
-} from '../types/tile';
+} from '@/views/main/archive/types/tile';
 
 export const SYSTEM_SEARCH_TILE_ID = 'tile-system-search';
 export const SYSTEM_SESSION_MANAGER_TILE_ID = 'tile-system-session-manager';
@@ -2848,7 +2848,7 @@ export const useTileStore = defineStore('tileBoard', () => {
     if (isSessionFileTile(tile)) {
       if (!dialog?.avatar && tile.username) {
         try {
-          const resolved = await chatDataSource.resolveUsername(accountId, tile.username);
+          const resolved = await telegramBusClient.chatCommand.resolveUsername(accountId, tile.username);
           if (resolved) {
             dialog = resolved;
           }
@@ -2859,7 +2859,7 @@ export const useTileStore = defineStore('tileBoard', () => {
       }
       if (!dialog?.avatar && tile.inviteHash) {
         try {
-          const preview = await chatDataSource.checkChatInvite(accountId, tile.inviteHash);
+          const preview = await telegramBusClient.chatCommand.checkChatInvite(accountId, tile.inviteHash);
           if (preview.dialog) {
             dialog = preview.dialog;
           }
@@ -2880,7 +2880,7 @@ export const useTileStore = defineStore('tileBoard', () => {
 
       if (dialog?.avatar) {
         try {
-          const avatarMedia = await chatDataSource.getAvatar(
+          const avatarMedia = await telegramBusClient.cover.getAvatar(
             accountId,
             dialog.peer,
             dialog.avatar.photoId,
@@ -2937,7 +2937,7 @@ export const useTileStore = defineStore('tileBoard', () => {
     // 优先通过 getHistoryAround 刷新最新消息媒体定位信息（同时可修复过期的 fileReference）
     if (msgId > 0) {
       try {
-        const page = await chatDataSource.getHistoryAround(accountId, peer, msgId, 3);
+        const page = await telegramBusClient.chatRead.getHistoryAround(accountId, peer, msgId, 3);
         const found = page.messages.find((m) => m.id === msgId) ?? page.messages[0];
         if (found?.media) {
           photoInfo = found.media.photo ?? photoInfo;
@@ -2978,25 +2978,25 @@ export const useTileStore = defineStore('tileBoard', () => {
         const size = coverSizeOf(photoInfo);
         branch = 'photo';
         sizeType = size.type;
-        mediaFile = await chatDataSource.getPhoto(accountId, peer, msgId, photoInfo, size);
+        mediaFile = await telegramBusClient.cover.getPhoto(accountId, peer, msgId, photoInfo, size);
       } else if (videoInfo) {
         const vSource = videoPreviewOf(videoInfo);
         if (vSource?.kind === 'photo') {
           const size = coverSizeOf(vSource.photo);
           branch = 'video_cover';
           sizeType = size.type;
-          mediaFile = await chatDataSource.getPhoto(accountId, peer, msgId, vSource.photo, size);
+          mediaFile = await telegramBusClient.cover.getPhoto(accountId, peer, msgId, vSource.photo, size);
         } else if (vSource?.kind === 'document') {
           branch = 'video_doc_thumb';
           sizeType = vSource.size.type;
-          mediaFile = await chatDataSource.getDocumentThumb(accountId, peer, msgId, videoInfo, vSource.size);
+          mediaFile = await telegramBusClient.cover.getDocumentThumb(accountId, peer, msgId, videoInfo, vSource.size);
         } else {
           logCover('tile_cover_skipped', 'WARN', { ...baseTags, branch: 'video', bucket: 'NO_THUMB_SOURCE' }, '视频没有可用缩略图档位');
         }
       } else if (fileInfo?.preview) {
         branch = 'file_doc_thumb';
         sizeType = fileInfo.preview.type;
-        mediaFile = await chatDataSource.getDocumentThumb(accountId, peer, msgId, fileInfo, fileInfo.preview);
+        mediaFile = await telegramBusClient.cover.getDocumentThumb(accountId, peer, msgId, fileInfo, fileInfo.preview);
       } else {
         logCover('tile_cover_skipped', 'WARN', { ...baseTags, branch: 'file', bucket: 'NO_MEDIA' }, '磁贴没有可下载媒体或缩略图档位');
       }

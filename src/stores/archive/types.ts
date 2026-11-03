@@ -337,14 +337,8 @@ export interface UserQuotaPolicyConfig {
   rules: Record<QuotaRuleKey, QuotaRuleItem>;
 }
 
-/** 黏性设备指纹档案 */
-export interface DeviceFingerprintProfile {
-  deviceModel: string;
-  systemVersion: string;
-  appVersion: string;
-  langCode: string;
-  systemLangCode: string;
-}
+export type { DeviceFingerprintProfile } from '@/types/sessionBatch';
+import type { DeviceFingerprintProfile } from '@/types/sessionBatch';
 
 /** 预备槽位 (PendingSlot) 状态 */
 export type PendingSlotStatus =
@@ -411,20 +405,8 @@ export interface SharedVaultGroupConfig {
  * Phase 4: 搜索机器人闭区间 [startPage, endPage] 自动收割机契约
  * ============================================================================
  */
-export interface BotHarvestCandidateItem {
-  key: string;
-  title: string;
-  kind: 'username' | 'invite_hash' | 'deep_link';
-  username?: string;
-  inviteHash?: string;
-  botUsername?: string;
-  startParam?: string;
-  sourcePage: number;
-  sourceTextSnippet: string;
-  alreadyInExplore: boolean;
-  alreadyJoined: boolean;
-  selected: boolean;
-}
+export type { BotHarvestCandidateItem } from '@/types/botHarvest';
+import type { BotHarvestCandidateItem } from '@/types/botHarvest';
 
 export interface BotHarvestTaskState {
   taskId: string;

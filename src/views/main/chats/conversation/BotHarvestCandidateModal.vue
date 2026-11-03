@@ -5,7 +5,7 @@
  */
 import { Bot, CheckSquare, ExternalLink, FolderPlus, Sparkles, Square, Trash2, X } from '@lucide/vue';
 import { useBotHarvesterStore } from '@/stores/chat/stores/botHarvesterStore';
-import { useTileStore } from '@/views/main/archive/store/tileStore';
+import { useTileStore } from '@/stores/archive/stores/tileStore';
 
 const harvesterStore = useBotHarvesterStore();
 const tileStore = useTileStore();

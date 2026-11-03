@@ -11,13 +11,13 @@ import { defineStore } from 'pinia';
 import { effectScope, watch } from 'vue';
 import { useChatStore } from './chatStore';
 import { useChatMediaStore } from './chatMediaStore';
-import { chatDataSource } from '../data-sources/chatDataSource';
+import { telegramBusClient } from '@/stores/telegram/data-sources/telegramBusClient';
 import { chatMediaLoader, MediaCanceledError } from '../data-sources/chatMediaLoader';
 import { chatPreferences } from '../data-sources/chatPreferences';
 import { messageViewport } from '../data-sources/messageViewport';
 import { progressiveStream } from '../data-sources/progressiveStream';
 import { videoPlayback, type PlaybackPatch } from '../data-sources/videoPlayback';
-import { TgChatRequestError } from '@/stores/telegram/data-sources/mtprotoBridge';
+import { TelegramBusRequestError } from '@/stores/telegram/data-sources/mtprotoBridge';
 import type { AutoplayPrefs, PlaybackState, PlayerPrefs, TgMessageDto, TgPeerKey, TgVideoInfo, TgVideoQuality, VideoEntry } from '../types';
 import { chooseQuality, formatBytes, formatDuration, mediaTarget, parseMediaTarget, qualityHeight, qualityLabel, videoFileKey } from './chatModel';
 
@@ -52,7 +52,7 @@ const DEFAULT_PLAYBACK: PlaybackState = { attached: false, paused: true, ended: 
 interface VideoRef { peerKey: TgPeerKey; message: TgMessageDto; video: TgVideoInfo; kind: 'video' | 'gif' | 'round' | 'file' }
 
 function isRetryable(error: unknown) {
-  const raw = `${error instanceof TgChatRequestError ? error.code : ''} ${error instanceof Error ? error.message : ''}`.toUpperCase();
+  const raw = `${error instanceof TelegramBusRequestError ? error.code : ''} ${error instanceof Error ? error.message : ''}`.toUpperCase();
   return RETRYABLE_PATTERNS.some((pattern) => raw.includes(pattern));
 }
 
@@ -290,7 +290,7 @@ export const useChatVideoStore = defineStore('chatVideo', {
         if (taskGeneration === generation && !isStreaming && this.entries[key]?.status === 'queued') {
           this.entries[key] = { status: 'loading', loaded: 0, total: quality.size };
         }
-        const file = await chatDataSource.getDocument(accountId, peer, ref.message.id, quality, { signal, onProgress });
+        const file = await telegramBusClient.mediaAsset.getDocument(accountId, peer, ref.message.id, quality, { signal, onProgress });
         return new Blob([file.bytes], { type: blobTypeOf(file.mimeType) });
       };
       const onProgress = (loaded: number, total: number) => {
@@ -319,7 +319,7 @@ export const useChatVideoStore = defineStore('chatVideo', {
           delete this.saveProgress[key];
           if (isStreaming) return;
           if (error instanceof MediaCanceledError) { if (this.entries[key]?.status !== 'ready') delete this.entries[key]; return; }
-          this.entries[key] = { status: 'error', loaded: 0, total: quality.size, error: chatDataSource.readError(error) };
+          this.entries[key] = { status: 'error', loaded: 0, total: quality.size, error: telegramBusClient.readError(error) };
         },
       );
     },

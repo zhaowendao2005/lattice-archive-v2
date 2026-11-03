@@ -2,6 +2,7 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router';
 // 守卫里需要读取登录态，所以直接引入鉴权 Store（Pinia 已在 main.ts 中先于 router 安装）
 import { isMockDev } from '@/config/env';
+import { useAppStore } from '@/stores/app/stores/appStore';
 import { useAuthStore } from '@/stores/auth/stores/authStore';
 import { installWorkspaceTransition } from './workspaceTransition';
 
@@ -94,9 +95,26 @@ const routes: RouteRecordRaw[] = [
           { path: 'platform', name: 'settings-platform', component: () => import('@/views/main/settings/subviews/PlatformSettingsView.vue') },
           { path: 'appearance', name: 'settings-appearance', component: () => import('@/views/main/settings/subviews/AppearanceSettingsView.vue') },
           { path: 'general', name: 'settings-general', component: () => import('@/views/main/settings/subviews/GeneralSettingsView.vue') },
-          { path: 'developer', name: 'settings-developer', component: () => import('@/views/main/settings/subviews/DeveloperSettingsView.vue') },
+          {
+            // 开发者选项 = 左侧二级列表 + 右侧诊断子页；子页可深链、可刷新还原。
+            path: 'developer',
+            name: 'settings-developer',
+            redirect: { name: 'settings-developer-logs' },
+            component: () => import('@/views/main/settings/subviews/DeveloperSettingsView.vue'),
+            children: [
+              { path: 'logs', name: 'settings-developer-logs', component: () => import('@/views/main/settings/subviews/developer/logs/DeveloperLogsView.vue') },
+              {
+                // 运行监控仅在开发者模式开启时可进入。
+                path: 'telegram',
+                name: 'settings-developer-telegram',
+                component: () => import('@/views/main/settings/subviews/developer/telegram-monitor/TelegramMonitorView.vue'),
+                beforeEnter: () => (useAppStore().developerMode ? true : { name: 'settings-developer-logs' }),
+              },
+            ],
+          },
           { path: 'telegram', name: 'settings-telegram', component: () => import('@/views/main/settings/subviews/telegram-binding/TelegramBindingView.vue') },
           { path: 'storage', name: 'settings-storage', component: () => import('@/views/main/settings/subviews/StorageSettingsView.vue') },
+          { path: 'performance', name: 'settings-performance', component: () => import('@/views/main/settings/subviews/PerformanceSettingsView.vue') },
         ],
       },
     ],

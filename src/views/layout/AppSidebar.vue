@@ -9,11 +9,12 @@
   · 账户菜单点击外部关闭：在 document 上捕获阶段监听 pointerdown。
 -->
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from 'vue';
+import { computed, type Directive } from 'vue';
 import { Archive, MessagesSquare, PanelLeft, Settings } from '@lucide/vue';
 import { isMockDev, isRealDev } from '@/config/env';
 import { useAppStore } from '@/stores/app/stores/appStore';
 import { useAuthStore } from '@/stores/auth/stores/authStore';
+import { sidebarAccountMenuBridge } from '@/stores/app/data-sources/sidebarAccountMenuBridge';
 import { useChatStore } from '@/stores/chat/stores/chatStore';
 import AccountMenu from './AccountMenu.vue';
 import SidebarNavItem from './SidebarNavItem.vue';
@@ -28,17 +29,11 @@ const textClass = computed(() => [
   appStore.isSidebarCollapsed ? 'ml-0 max-w-0 opacity-0' : 'ml-2.5 max-w-44 opacity-100',
 ]);
 
-// 账户菜单挂载在侧栏底部容器上，向上弹出；这个 ref 只用于判断「点击是否在菜单内」
-const accountAnchor = ref<HTMLElement | null>(null);
-
-// 点击侧栏外部时收起菜单（菜单内点击不触发）
-function handlePointerDown(event: MouseEvent) {
-  const target = event.target as Node;
-  if (accountAnchor.value?.contains(target)) return;
-  authStore.closeAccountMenu();
-}
-document.addEventListener('pointerdown', handlePointerDown, true);
-onBeforeUnmount(() => document.removeEventListener('pointerdown', handlePointerDown, true));
+/** 零 ref：账户菜单锚点与外部点击监听由 Data Source 托管。 */
+const vAccountAnchor: Directive<HTMLElement> = {
+  mounted: (el) => sidebarAccountMenuBridge.attachAccountAnchor(el),
+  beforeUnmount: () => sidebarAccountMenuBridge.attachAccountAnchor(null),
+};
 </script>
 
 <template>
@@ -105,7 +100,7 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', handlePointerD
     </nav>
 
     <!-- 底部：折叠开关 + 账户入口 -->
-    <div ref="accountAnchor" class="relative shrink-0 px-2.5 pb-2.5 space-y-0.5">
+    <div v-account-anchor class="relative shrink-0 px-2.5 pb-2.5 space-y-0.5">
       <SidebarNavItem
         :icon="PanelLeft"
         :label="appStore.isSidebarCollapsed ? '展开侧栏' : '收起侧栏'"

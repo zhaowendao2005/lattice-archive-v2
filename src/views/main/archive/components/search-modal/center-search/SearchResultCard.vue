@@ -3,7 +3,7 @@ import { computed } from 'vue';
 import { Check, CheckCircle2, GripVertical, KeyRound, RefreshCw, Sparkles, Users } from '@lucide/vue';
 import { useAggregateSearchStore } from '@/stores/archive/stores/aggregateSearchStore';
 import type { AggregateSearchResultItem } from '@/stores/archive/types';
-import { useTileStore } from '../../../store/tileStore';
+import { useTileStore } from '@/stores/archive/stores/tileStore';
 
 const props = defineProps<{
   item: AggregateSearchResultItem;

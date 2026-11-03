@@ -4,16 +4,16 @@
  * ============================================================================
  * 架构规范：
  * 1. 薄桥接层（Thin Bridge），无 Vue 响应式状态，仅做并发调度、排队、去重与限流；
- * 2. 总并发弹性限制在 16（在用户指定的 10~20 区间内）；
- * 3. 业务模块隔离与保底：
- *    - 每个业务通道（Lane: 'archive_tiles' | 'search' | 'chat_avatars' | 'chat_media'）
- *      保底至少 2 个并发槽位，防止某一个业务爆发式拉取（如批量刷新 100 个磁贴）饿死其它通道；
- *    - 磁贴批量刷新通道 ('archive_tiles') 峰值并发提升至 8（满足用户指定的“并行 8”需求）；
+ * 2. 并发上限来自统一的 Telegram 并发配置（设置 → 性能与网络），不在此硬编码：
+ *    - 总并发 = 封面 + 头像配额；Worker 内 RequestScheduler 仍按账号预算做最终限流；
+ *    - 搜索通道保底 = 搜索封面保留槽位，其余通道保底 2，防止批量刷新饿死其它通道；
  * 4. 相同 Key 的在途请求自动合并（去重），避免同一图片重复发起 MTProto 下载。
  */
 
 import { debugLoggerDataSource } from '@/stores/app/data-sources/debugLoggerDataSource';
 import { classifyTelegramError } from '@/worker/local/chat/telegramErrors';
+import type { TelegramConcurrencyConfig } from '@/worker/local/telegram/contracts/concurrency';
+import { telegramPerformancePreferences } from '@/stores/telegram/data-sources/telegramPerformancePreferences';
 
 export type CoverBusLane = 'archive_tiles' | 'search' | 'chat_avatars' | 'chat_media';
 
@@ -33,19 +33,25 @@ interface QueuedTask<T> {
   reject: (error: unknown) => void;
 }
 
-const TOTAL_MAX_CONCURRENCY = 16;
-const LANE_GUARANTEED_SLOTS: Record<CoverBusLane, number> = {
-  archive_tiles: 2,
-  search: 2,
-  chat_avatars: 2,
-  chat_media: 2,
-};
-const LANE_MAX_CONCURRENCY: Record<CoverBusLane, number> = {
-  archive_tiles: 8,
-  search: 8,
-  chat_avatars: 6,
-  chat_media: 6,
-};
+interface CoverBusLimits {
+  total: number;
+  guaranteed: Record<CoverBusLane, number>;
+  max: Record<CoverBusLane, number>;
+}
+
+function limitsFrom(config: TelegramConcurrencyConfig): CoverBusLimits {
+  const { cover, avatar, searchCoverReserved } = config.limits;
+  return {
+    total: cover + avatar,
+    guaranteed: {
+      archive_tiles: Math.min(2, cover),
+      search: Math.max(1, searchCoverReserved),
+      chat_avatars: Math.min(2, avatar),
+      chat_media: Math.min(2, cover),
+    },
+    max: { archive_tiles: cover, search: cover, chat_avatars: avatar, chat_media: cover },
+  };
+}
 
 class CoverImageBus {
   private queue: QueuedTask<any>[] = [];
@@ -58,6 +64,14 @@ class CoverImageBus {
   private totalActive = 0;
   private inflightPromises = new Map<string, Promise<any>>();
   private lastSaturatedLogAt = 0;
+  private limits: CoverBusLimits = limitsFrom(telegramPerformancePreferences.read());
+
+  constructor() {
+    telegramPerformancePreferences.subscribe((config) => {
+      this.limits = limitsFrom(config);
+      this.processQueue();
+    });
+  }
 
   private emit(
     action: string,
@@ -187,7 +201,7 @@ class CoverImageBus {
       }
     }
 
-    if (this.queue.length === 0 || this.totalActive >= TOTAL_MAX_CONCURRENCY) {
+    if (this.queue.length === 0 || this.totalActive >= this.limits.total) {
       return;
     }
 
@@ -196,14 +210,14 @@ class CoverImageBus {
     for (let i = 0; i < this.queue.length; i++) {
       const task = this.queue[i]!;
       const laneActive = this.activeByLane[task.lane];
-      const laneMax = LANE_MAX_CONCURRENCY[task.lane];
+      const laneMax = this.limits.max[task.lane];
 
       // 通道已达其最大允许并发，不能再接
       if (laneActive >= laneMax) continue;
 
       // 若总活动数还有富余，或者该通道处于其保底份额内（活跃数 < 保底数），则可以执行
-      const isGuaranteed = laneActive < LANE_GUARANTEED_SLOTS[task.lane];
-      const hasGeneralSlot = this.totalActive < TOTAL_MAX_CONCURRENCY;
+      const isGuaranteed = laneActive < this.limits.guaranteed[task.lane];
+      const hasGeneralSlot = this.totalActive < this.limits.total;
 
       if (isGuaranteed || hasGeneralSlot) {
         candidateIndex = i;
@@ -234,7 +248,7 @@ class CoverImageBus {
       });
 
     // 尝试并发填充其余空余槽位
-    if (this.totalActive < TOTAL_MAX_CONCURRENCY && this.queue.length > 0) {
+    if (this.totalActive < this.limits.total && this.queue.length > 0) {
       this.processQueue();
     }
   }

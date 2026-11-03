@@ -7,26 +7,26 @@
  * 3. 基于 UpdateEditMessage 实时事件驱动自动翻页（不阻塞等待 10s BOT_RESPONSE_TIMEOUT）。
  */
 import { defineStore } from 'pinia';
-import type { BotHarvestCandidateItem, BotHarvestTaskState } from '@/stores/archive/types';
+import type { BotHarvestTaskState } from '@/stores/archive/types';
+import type { BotHarvestCandidateItem } from '@/types/botHarvest';
 import { useSessionManagerStore } from '@/stores/archive/stores/sessionManagerStore';
-import { useTileStore } from '@/views/main/archive/store/tileStore';
+import { useTileStore } from '@/stores/archive/stores/tileStore';
 import type { SessionCredentialState } from '@/views/main/archive/types/tile';
-import {
-  detectCurrentBotPage,
-  extractBotCandidatesFromMessage,
-  findNextBotPageButton,
-  hasBotPaginationControls,
-  resolvePairedQueryForBotMessage,
-} from '@/worker/local/chat/botHarvesterParser';
 import { useChatStore } from './chatStore';
-import { chatDataSource } from '../data-sources/chatDataSource';
+import { telegramBusClient } from '@/stores/telegram/data-sources/telegramBusClient';
 import type { TgInlineButton, TgMessageDto } from '../types';
 
 const wait = (ms: number) => new Promise<void>((resolve) => { window.setTimeout(resolve, ms); });
+/** 同一消息元数据只保留一个在途 Worker 解析；过期响应不得覆盖新版本。 */
+const pendingBotMetadata = new Map<string, string>();
 
 export const useBotHarvesterStore = defineStore('botHarvester', {
   state: () => ({
     startPageByMsg: {} as Record<number, number>,
+    parsedPageByMsg: {} as Record<number, number>,
+    pairedQueryByMsg: {} as Record<number, { queryText: string; queryMsgId?: number }>,
+    metadataSignatureByMsg: {} as Record<number, string>,
+    paginationByMsg: {} as Record<number, boolean>,
     endPageByMsg: {} as Record<number, number>,
     activeTask: null as (BotHarvestTaskState & {
       harvestedCount?: number;
@@ -60,10 +60,7 @@ export const useBotHarvesterStore = defineStore('botHarvester', {
       if (this.startPageByMsg[messageId] !== undefined) {
         return this.startPageByMsg[messageId]!;
       }
-      const chatStore = useChatStore();
-      const msg = chatStore.activeWindow?.messages.find((m) => m.id === messageId);
-      const detected = detectCurrentBotPage(msg);
-      return detected && detected >= 1 ? detected : 1;
+      return this.parsedPageByMsg[messageId] ?? 1;
     },
 
     setStartPage(messageId: number, page: number) {
@@ -86,28 +83,30 @@ export const useBotHarvesterStore = defineStore('botHarvester', {
       this.endPageByMsg[messageId] = clamped;
     },
 
-    /** 获取当前机器人回复消息所关联的「我方发出查询词」 */
+    /** 获取 Worker 解析并缓存的查询词。 */
     getPairedQuery(messageId: number): { queryText: string; queryMsgId?: number } {
-      const chatStore = useChatStore();
-      const winMessages = chatStore.activeWindow?.messages ?? [];
-      const botMsg = winMessages.find((m) => m.id === messageId);
-      const fallback = chatStore.activeChatKey
-        ? chatStore.lastSentQueryByPeer[chatStore.activeChatKey]
-        : undefined;
-      return resolvePairedQueryForBotMessage(botMsg, winMessages, fallback);
+      return this.pairedQueryByMsg[messageId] ?? { queryText: '当前页检索' };
     },
 
-    /** 判断内联键盘是否包含搜索机器人的翻页按钮 */
-    hasPaginationControls(rows: TgInlineButton[][]): boolean {
-      return hasBotPaginationControls(rows);
+    hasPaginationControls(_rows: TgInlineButton[][], messageId?: number): boolean {
+      return messageId ? Boolean(this.paginationByMsg[messageId]) : false;
     },
 
-    findNextPageButton(rows: TgInlineButton[][], nextPageNum: number): TgInlineButton | null {
-      return findNextBotPageButton(rows, nextPageNum);
-    },
-
-    extractCandidatesFromMessage(msg: TgMessageDto, pageNum: number): BotHarvestCandidateItem[] {
-      return extractBotCandidatesFromMessage(msg, pageNum);
+    async refreshMessageMetadata(accountId: string, message: TgMessageDto, windowMessages: TgMessageDto[] = [], fallbackLastQuery?: string) {
+      const signature = JSON.stringify([accountId, message.id, message.text, message.replyMarkup, message.replyToId, windowMessages.map((item) => [item.id, item.text, item.out, item.replyToId]), fallbackLastQuery ?? '']);
+      const key = String(message.id);
+      if (this.metadataSignatureByMsg[message.id] === signature || pendingBotMetadata.get(key) === signature) return;
+      pendingBotMetadata.set(key, signature);
+      try {
+        const metadata = await telegramBusClient.bot.metadata(accountId, message, windowMessages, fallbackLastQuery);
+        if (pendingBotMetadata.get(key) !== signature) return;
+        this.metadataSignatureByMsg[message.id] = signature;
+        if (metadata.page && metadata.page > 0) this.parsedPageByMsg[message.id] = metadata.page;
+        this.paginationByMsg[message.id] = metadata.hasPagination;
+        this.pairedQueryByMsg[message.id] = metadata.pairedQuery;
+      } finally {
+        if (pendingBotMetadata.get(key) === signature) pendingBotMetadata.delete(key);
+      }
     },
 
     mergeCandidates(items: BotHarvestCandidateItem[]) {
@@ -130,7 +129,10 @@ export const useBotHarvesterStore = defineStore('botHarvester', {
 
       const startPage = this.getStartPage(messageId);
       const endPage = this.getEndPage(messageId);
-      const paired = this.getPairedQuery(messageId);
+      const initialMsg = chatStore.activeWindow?.messages.find((m) => m.id === messageId);
+      const paired = initialMsg
+        ? (await telegramBusClient.bot.metadata(accountId, initialMsg, chatStore.activeWindow?.messages ?? [], chatStore.activeChatKey ? chatStore.lastSentQueryByPeer[chatStore.activeChatKey] : undefined)).pairedQuery
+        : this.getPairedQuery(messageId);
       this.harvestNotice = null;
 
       const taskId = sessionStore.enqueueTask({
@@ -140,8 +142,7 @@ export const useBotHarvesterStore = defineStore('botHarvester', {
         accountId,
       });
 
-      const initialMsg = chatStore.activeWindow?.messages.find((m) => m.id === messageId);
-      const initialPage = detectCurrentBotPage(initialMsg) ?? startPage;
+      const initialPage = initialMsg ? ((await telegramBusClient.bot.metadata(accountId, initialMsg, chatStore.activeWindow?.messages ?? [])).page ?? startPage) : startPage;
       const loopStart = Math.min(startPage, initialPage);
 
       this.activeTask = {
@@ -170,7 +171,7 @@ export const useBotHarvesterStore = defineStore('botHarvester', {
 
           const currentMsg = chatStore.activeWindow?.messages.find((m) => m.id === messageId);
           if (currentMsg && page >= startPage) {
-            const pageItems = this.extractCandidatesFromMessage(currentMsg, page);
+            const pageItems = await telegramBusClient.bot.extractCandidates(accountId, currentMsg, page);
             this.mergeCandidates(pageItems);
             this.activeTask.harvestedCount = this.candidates.length;
             sessionStore.updateTaskProgress(taskId, Math.max(1, page - startPage + 1));
@@ -179,7 +180,7 @@ export const useBotHarvesterStore = defineStore('botHarvester', {
           if (page >= endPage) break;
 
           const nextBtn = currentMsg?.replyMarkup
-            ? this.findNextPageButton(currentMsg.replyMarkup, page + 1)
+            ? await telegramBusClient.bot.findNextButton(accountId, currentMsg.replyMarkup, page + 1)
             : null;
           if (!nextBtn || !nextBtn.data) break;
 
@@ -192,10 +193,10 @@ export const useBotHarvesterStore = defineStore('botHarvester', {
           }
 
           // 1. 先注册 UpdateEditMessage 实时事件监听器（机器人编辑消息即在 200~500ms 内触发）
-          const editWaiter = chatDataSource.waitForMessageEdit(dialog.key, messageId, 4800);
+          const editWaiter = telegramBusClient.bot.waitForMessageEdit(dialog.key, messageId, 4800);
 
           // 2. 异步触发 GetBotCallbackAnswer（不阻塞等待 10s BOT_RESPONSE_TIMEOUT，且吞掉非致命超时）
-          void chatDataSource
+          void telegramBusClient.bot
             .pressBotCallback(accountId, dialog.peer, messageId, nextBtn.data)
             .catch(() => undefined);
 
@@ -205,7 +206,7 @@ export const useBotHarvesterStore = defineStore('botHarvester', {
 
           if (!editedMsg) {
             try {
-              const refreshed = await chatDataSource.getHistoryAround(accountId, dialog.peer, messageId, 3);
+              const refreshed = await telegramBusClient.chatRead.getHistoryAround(accountId, dialog.peer, messageId, 3);
               const updatedMsg = refreshed.messages.find((m) => m.id === messageId);
               if (updatedMsg && chatStore.activeWindow) {
                 const idx = chatStore.activeWindow.messages.findIndex((m) => m.id === messageId);
@@ -226,7 +227,7 @@ export const useBotHarvesterStore = defineStore('botHarvester', {
           this.isCandidateModalOpen = true;
         }
       } catch (err) {
-        const msg = chatDataSource.readError(err);
+        const msg = telegramBusClient.readError(err);
         if (this.activeTask) {
           this.activeTask.status = 'error';
           this.activeTask.pauseReason = msg;

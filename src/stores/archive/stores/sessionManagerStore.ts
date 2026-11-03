@@ -28,11 +28,11 @@ import { storageQuotaEvictor } from '../data-sources/storageQuotaEvictor';
 import { sessionBatchImporter } from '../data-sources/sessionBatchImporter';
 import { exploreSyncEngine } from '../data-sources/exploreSyncEngine';
 import { useAggregateSearchStore } from './aggregateSearchStore';
-import { useTileStore } from '@/views/main/archive/store/tileStore';
+import { useTileStore } from '@/stores/archive/stores/tileStore';
 import type { SessionCredentialState } from '@/views/main/archive/types/tile';
 import { useChatStore } from '@/stores/chat/stores/chatStore';
 import { useChatMediaStore } from '@/stores/chat/stores/chatMediaStore';
-import { chatDataSource } from '@/stores/chat/data-sources/chatDataSource';
+import { telegramBusClient } from '@/stores/telegram/data-sources/telegramBusClient';
 import { useTelegramStore } from '@/stores/telegram/stores/telegramStore';
 import { tgSessionVault } from '@/stores/telegram/data-sources/tgSessionVault';
 import { debugLoggerDataSource } from '@/stores/app/data-sources/debugLoggerDataSource';
@@ -518,7 +518,7 @@ export const useSessionManagerStore = defineStore('sessionManager', {
         }
 
         if (this.archiveInTelegram && peersToArchive.length > 0 && chatStore.accountId) {
-          await chatDataSource.batchSetDialogsArchived(chatStore.accountId, peersToArchive, true);
+          await telegramBusClient.chatCommand.batchSetDialogsArchived(chatStore.accountId, peersToArchive, true);
         }
 
         debugLoggerDataSource.emitFrontendLog({
@@ -577,7 +577,7 @@ export const useSessionManagerStore = defineStore('sessionManager', {
               this.patrolNotice = check.reason ?? '配额受限';
               break;
             }
-            const preview = await chatDataSource.checkChatInvite(accountId, hash);
+            const preview = await telegramBusClient.chatCommand.checkChatInvite(accountId, hash);
             const credId = `temp-invite-${hash}`;
             const peerKey = preview.dialog?.key ?? `invite-${hash}`;
             const cred: TempSessionCredential = {
@@ -611,7 +611,7 @@ export const useSessionManagerStore = defineStore('sessionManager', {
               this.patrolNotice = check.reason ?? '配额受限';
               break;
             }
-            const dialog = await chatDataSource.resolveUsername(accountId, cleanUsername);
+            const dialog = await telegramBusClient.chatCommand.resolveUsername(accountId, cleanUsername);
             if (!dialog) continue;
             const credId = `temp-user-${dialog.key}`;
             const cred: TempSessionCredential = {
@@ -642,7 +642,7 @@ export const useSessionManagerStore = defineStore('sessionManager', {
         await this.persistGovernanceToOpfs();
         this.patrolNotice = `已成功解析并入池 ${addedCount} 个免打扰临时会话凭据`;
       } catch (err) {
-        this.patrolNotice = chatDataSource.readError(err);
+        this.patrolNotice = telegramBusClient.readError(err);
       } finally {
         this.isAddingCredential = false;
       }
@@ -733,7 +733,7 @@ export const useSessionManagerStore = defineStore('sessionManager', {
         }
 
         if (channelPeers.length > 0) {
-          const batchRes = await chatDataSource.batchCheckChannels(accountId, channelPeers);
+          const batchRes = await telegramBusClient.chatCommand.batchCheckChannels(accountId, channelPeers);
           const mapByKey = new Map(batchRes.dialogs.map((d) => [d.key as string, d]));
           for (const cred of this.tempCredentials) {
             const fresh = mapByKey.get(cred.peerKey);
@@ -755,7 +755,7 @@ export const useSessionManagerStore = defineStore('sessionManager', {
           if (!cred.autoRenew) continue;
           if (cred.inviteHash) {
             try {
-              const preview = await chatDataSource.checkChatInvite(accountId, cred.inviteHash);
+              const preview = await telegramBusClient.chatCommand.checkChatInvite(accountId, cred.inviteHash);
               cred.title = preview.title;
               cred.participantsCount = preview.participantsCount;
               cred.accessHash = preview.dialog?.peer.accessHash ?? cred.accessHash;
@@ -771,8 +771,8 @@ export const useSessionManagerStore = defineStore('sessionManager', {
         this.completeTask(taskId);
         this.patrolNotice = `已完成 ${this.tempCredentials.length} 个临时凭据的静默健康巡检`;
       } catch (err) {
-        this.failTask(taskId, chatDataSource.readError(err));
-        this.patrolNotice = chatDataSource.readError(err);
+        this.failTask(taskId, telegramBusClient.readError(err));
+        this.patrolNotice = telegramBusClient.readError(err);
       } finally {
         this.isPatrollingPool = false;
       }
@@ -823,7 +823,7 @@ export const useSessionManagerStore = defineStore('sessionManager', {
         for (const acc of telegramStore.accounts) {
           const existing = this.governanceRecords[acc.tg_user_id];
           try {
-            const report = await chatDataSource.probeAccountHealth(acc.tg_user_id);
+            const report = await telegramBusClient.account.probeAccountHealth(acc.tg_user_id);
             const createdAtSec = report.currentSessionCreatedAt ?? Math.floor(Date.now() / 1000);
             const ageHours = Math.max(0, (Date.now() / 1000 - createdAtSec) / 3600);
             this.governanceRecords[acc.tg_user_id] = {
@@ -891,7 +891,7 @@ export const useSessionManagerStore = defineStore('sessionManager', {
       this.isSpawningSlot[accountId] = true;
       this.batchImportNotice = null;
       try {
-        const res = await chatDataSource.spawnPendingSlot(
+        const res = await telegramBusClient.account.spawnPendingSlot(
           accountId,
           telegramStore.credentials.apiId,
           telegramStore.credentials.apiHash,
@@ -929,7 +929,7 @@ export const useSessionManagerStore = defineStore('sessionManager', {
         this.spawn2FAPasswordInput = '';
         this.batchImportNotice = `已通过 6 步同机回环成功裂变并封印热备槽位 ${slotId}`;
       } catch (err) {
-        this.batchImportNotice = `生成热备槽位失败：${chatDataSource.readError(err)}`;
+        this.batchImportNotice = `生成热备槽位失败：${telegramBusClient.readError(err)}`;
       } finally {
         this.isSpawningSlot[accountId] = false;
       }
@@ -980,7 +980,7 @@ export const useSessionManagerStore = defineStore('sessionManager', {
         this.batchImportNotice = '请先在设置中保存 Telegram API 凭据';
         return;
       }
-      const parsed = sessionBatchImporter.parseTextLines(this.batchImportTextInput);
+      const parsed = await sessionBatchImporter.parseTextLines(this.batchImportTextInput);
       if (parsed.length === 0) {
         this.batchImportNotice = '请输入有效的 StringSession 字符串（每行一条）';
         return;
@@ -1073,7 +1073,7 @@ export const useSessionManagerStore = defineStore('sessionManager', {
       this.isInitializingVault = true;
       this.vaultNotice = null;
       try {
-        const info = await chatDataSource.ensureVaultForumTopics(accountId, dialog.peer);
+        const info = await telegramBusClient.vault.ensureVaultForumTopics(accountId, dialog.peer);
         this.vaultConfig = {
           enabled: true,
           vaultPeerKey: info.vaultPeerKey,
@@ -1086,7 +1086,7 @@ export const useSessionManagerStore = defineStore('sessionManager', {
         await this.persistGovernanceToOpfs();
         this.vaultNotice = `已成功绑定「${info.vaultTitle}」并确保 5 大标准 Forum 话题卷就绪`;
       } catch (err) {
-        this.vaultNotice = `初始化备份群话题失败：${chatDataSource.readError(err)}`;
+        this.vaultNotice = `初始化备份群话题失败：${telegramBusClient.readError(err)}`;
       } finally {
         this.isInitializingVault = false;
       }
@@ -1107,21 +1107,17 @@ export const useSessionManagerStore = defineStore('sessionManager', {
       this.isSyncingBeacon = true;
       this.vaultNotice = null;
       try {
-        const payload = JSON.stringify({
-          updatedAt: Date.now(),
-          credentials: this.tempCredentials,
-        });
-        const res = await chatDataSource.syncBeaconCredentials(
+        // 信标卷为只读扫描：旧接口的加密载荷参数从未被 Worker 使用，已随旧 Data Source 一并移除。
+        const res = await telegramBusClient.vault.syncBeaconCredentials(
           accountId,
           vaultPeer,
           this.vaultConfig.topics.beacon,
-          payload,
         );
         this.vaultConfig.lastBeaconSyncAtMs = Date.now();
         await this.persistGovernanceToOpfs();
         this.vaultNotice = `已从信标卷同步 ${res.syncedDialogs.length} 个跨设备新鲜凭据`;
       } catch (err) {
-        this.vaultNotice = `信标同步失败：${chatDataSource.readError(err)}`;
+        this.vaultNotice = `信标同步失败：${telegramBusClient.readError(err)}`;
       } finally {
         this.isSyncingBeacon = false;
       }
@@ -1168,7 +1164,7 @@ export const useSessionManagerStore = defineStore('sessionManager', {
 
       try {
         if (tile.noforwards) {
-          const res = await chatDataSource.cloneNoForwardsToVault(
+          const res = await telegramBusClient.vault.cloneNoForwardsToVault(
             accountId,
             fromPeer,
             vaultPeer,
@@ -1184,7 +1180,7 @@ export const useSessionManagerStore = defineStore('sessionManager', {
             };
           }
         } else {
-          const res = await chatDataSource.forwardToVault(
+          const res = await telegramBusClient.vault.forwardToVault(
             accountId,
             fromPeer,
             vaultPeer,
@@ -1202,7 +1198,7 @@ export const useSessionManagerStore = defineStore('sessionManager', {
         tileStore.saveState();
         this.completeTask(taskId);
       } catch (err) {
-        this.failTask(taskId, chatDataSource.readError(err));
+        this.failTask(taskId, telegramBusClient.readError(err));
       }
     },
 

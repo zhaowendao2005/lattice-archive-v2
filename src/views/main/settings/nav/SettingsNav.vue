@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { Code2, Database, Laptop, Palette, Send, SlidersHorizontal } from '@lucide/vue';
+import { Code2, Database, Gauge, Laptop, Palette, Send, SlidersHorizontal } from '@lucide/vue';
 import type { Component } from 'vue';
 
-export type SettingsSubTab = 'platform' | 'appearance' | 'developer' | 'general' | 'storage' | 'telegram';
+export type SettingsSubTab = 'platform' | 'appearance' | 'developer' | 'general' | 'storage' | 'performance' | 'telegram';
 
 interface NavItem {
   key: SettingsSubTab;
@@ -15,6 +15,7 @@ const NAV_ITEMS: NavItem[] = [
   { key: 'telegram', label: '账户与绑定', icon: Send },
   { key: 'developer', label: '开发者选项', icon: Code2 },
   { key: 'storage', label: '数据与归档', icon: Database },
+  { key: 'performance', label: '性能与网络', icon: Gauge },
   { key: 'platform', label: '平台与运行时', icon: SlidersHorizontal, disabled: true },
   { key: 'appearance', label: '外观与显示', icon: Palette, disabled: true },
   { key: 'general', label: '通用设置', icon: Laptop, disabled: true },

@@ -23,7 +23,7 @@ import type {
 } from '../types';
 import { useChatStore } from '@/stores/chat/stores/chatStore';
 import { coverSizeOf, videoPreviewOf } from '@/stores/chat/stores/chatModel';
-import { chatDataSource } from '@/stores/chat/data-sources/chatDataSource';
+import { telegramBusClient } from '@/stores/telegram/data-sources/telegramBusClient';
 import { coverImageBus } from '@/stores/app/data-sources/coverImageBus';
 import { debugLoggerDataSource } from '@/stores/app/data-sources/debugLoggerDataSource';
 import {
@@ -474,7 +474,7 @@ class AggregateSearchDataSource {
             );
             res = { messages: [], totalCount: 0, hasMore: false };
           } else {
-            res = await chatDataSource.searchMessages(accountId, {
+            res = await telegramBusClient.search.searchMessages(accountId, {
               peer: dialog.peer,
               query: query.keyword,
               filterType,
@@ -485,7 +485,7 @@ class AggregateSearchDataSource {
             });
           }
         } else {
-          res = await chatDataSource.searchMessages(accountId, {
+          res = await telegramBusClient.search.searchMessages(accountId, {
             query: query.keyword,
             filterType,
             minDate: query.minDate,
@@ -782,7 +782,7 @@ class AggregateSearchDataSource {
             return null;
           }
           try {
-            const media = await chatDataSource.getAvatar(
+            const media = await telegramBusClient.cover.getAvatar(
               accountId,
               dialog.peer,
               dialog.avatar.photoId,
@@ -815,7 +815,7 @@ class AggregateSearchDataSource {
         // 若缺少媒体定位信息但存在 msgId，先拉取单条上下文以补全新鲜 fileReference
         if (!photoInfo && !videoInfo && !fileInfo && msgId > 0) {
           try {
-            const page = await chatDataSource.getHistoryAround(accountId, peer, msgId, 3);
+            const page = await telegramBusClient.chatRead.getHistoryAround(accountId, peer, msgId, 3);
             const found = page.messages.find((m) => m.id === msgId) ?? page.messages[0];
             if (found?.media) {
               photoInfo = found.media.photo;
@@ -870,18 +870,18 @@ class AggregateSearchDataSource {
             const size = coverSizeOf(photoInfo);
             branch = 'photo';
             sizeType = size.type;
-            mediaFile = await chatDataSource.getPhoto(accountId, peer, msgId, photoInfo, size);
+            mediaFile = await telegramBusClient.cover.getPhoto(accountId, peer, msgId, photoInfo, size, 'search');
           } else if (videoInfo) {
             const source = videoPreviewOf(videoInfo);
             if (source?.kind === 'photo') {
               const size = coverSizeOf(source.photo);
               branch = 'video_cover';
               sizeType = size.type;
-              mediaFile = await chatDataSource.getPhoto(accountId, peer, msgId, source.photo, size);
+              mediaFile = await telegramBusClient.cover.getPhoto(accountId, peer, msgId, source.photo, size, 'search');
             } else if (source?.kind === 'document') {
               branch = 'video_doc_thumb';
               sizeType = source.size.type;
-              mediaFile = await chatDataSource.getDocumentThumb(accountId, peer, msgId, videoInfo, source.size);
+              mediaFile = await telegramBusClient.cover.getDocumentThumb(accountId, peer, msgId, videoInfo, source.size, 'search');
             } else {
               this.logCoverSkipped(item, 'NO_THUMB_SOURCE', { ...baseTags, branch: 'video' });
               return null;
@@ -889,7 +889,7 @@ class AggregateSearchDataSource {
           } else if (fileInfo?.preview) {
             branch = 'file_doc_thumb';
             sizeType = fileInfo.preview.type;
-            mediaFile = await chatDataSource.getDocumentThumb(accountId, peer, msgId, fileInfo, fileInfo.preview);
+            mediaFile = await telegramBusClient.cover.getDocumentThumb(accountId, peer, msgId, fileInfo, fileInfo.preview, 'search');
           } else {
             this.logCoverSkipped(item, 'NO_THUMB_SOURCE', { ...baseTags, branch: 'file' });
             return null;

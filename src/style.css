@@ -49,6 +49,12 @@
   --color-media-control: var(--media-control);
   --color-media-surface: var(--media-surface);
 
+  /* 运行监控曲线：四条业务总线的区分色（见 design-system 规范「运行监控」一节） */
+  --color-monitor-search: var(--monitor-search);
+  --color-monitor-cover: var(--monitor-cover);
+  --color-monitor-media: var(--monitor-media);
+  --color-monitor-stream: var(--monitor-stream);
+
   /* 圆角阶梯 */
   --radius-xs: 4px;
   --radius-sm: 6px;
@@ -125,6 +131,12 @@
     --media-control: oklch(0 0 0 / 0.5);
     --media-surface: oklch(0.22 0 0 / 0.92);
 
+    /* 运行监控曲线（亮色）：蓝阶梯为主，辅以青 / 紫 / 琥珀区分总线 */
+    --monitor-search: oklch(0.55 0.20 248);
+    --monitor-cover: oklch(0.62 0.13 195);
+    --monitor-media: oklch(0.55 0.18 295);
+    --monitor-stream: oklch(0.70 0.15 75);
+
     /* 默认平台尺寸令牌 (Windows Standard) */
     --hit-target: 40px;
     --control-h: 40px;
@@ -156,6 +168,11 @@
 
       --border: oklch(0.28 0.025 245);
       --input: oklch(0.32 0.03 245);
+
+      --monitor-search: oklch(0.68 0.17 248);
+      --monitor-cover: oklch(0.75 0.12 195);
+      --monitor-media: oklch(0.70 0.15 295);
+      --monitor-stream: oklch(0.80 0.14 75);
     }
   }
 
@@ -181,6 +198,11 @@
 
     --border: oklch(0.28 0.025 245);
     --input: oklch(0.32 0.03 245);
+
+    --monitor-search: oklch(0.68 0.17 248);
+    --monitor-cover: oklch(0.75 0.12 195);
+    --monitor-media: oklch(0.70 0.15 295);
+    --monitor-stream: oklch(0.80 0.14 75);
   }
 
   /* 平台尺寸阶梯适配 */

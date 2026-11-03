@@ -9,7 +9,7 @@ import {
   GROUP_COLUMNS,
   UNIT_SIZE,
   useTileStore,
-} from '../../store/tileStore';
+} from '@/stores/archive/stores/tileStore';
 import { archiveDomRegistry } from '../../store/archiveDomRegistry';
 import { computeDisplacedPositions } from '../../utils/layoutEngine';
 import TileGroupContainer from './TileGroupContainer.vue';

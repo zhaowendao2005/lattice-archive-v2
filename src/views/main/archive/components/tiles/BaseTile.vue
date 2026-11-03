@@ -9,7 +9,7 @@ import {
   GROUP_COLUMNS,
   UNIT_SIZE,
   useTileStore,
-} from '../../store/tileStore';
+} from '@/stores/archive/stores/tileStore';
 import { computeDisplacedPositions } from '../../utils/layoutEngine';
 
 const props = defineProps<{

@@ -4,7 +4,9 @@
  * 严格遵循零本地 ref / reactive 约束。
  */
 import { Bot, Eye, Loader2, Play, Square } from '@lucide/vue';
+import { watch } from 'vue';
 import { useBotHarvesterStore } from '@/stores/chat/stores/botHarvesterStore';
+import { useChatStore } from '@/stores/chat/stores/chatStore';
 import type { TgInlineButton } from '@/stores/chat/types';
 
 const props = defineProps<{
@@ -13,11 +15,34 @@ const props = defineProps<{
 }>();
 
 const harvesterStore = useBotHarvesterStore();
+const chatStore = useChatStore();
+
+// 机器人分页元数据交由 Worker 解析；视图只读取 Store 缓存。
+watch(
+  () => {
+    const messages = chatStore.activeWindow?.messages ?? [];
+    const message = messages.find((item) => item.id === props.messageId);
+    const query = chatStore.activeChatKey ? chatStore.lastSentQueryByPeer[chatStore.activeChatKey] : '';
+    return [props.messageId, props.rows, chatStore.accountId, message?.text, message?.replyMarkup, messages, query];
+  },
+  () => {
+    const accountId = chatStore.accountId;
+    const message = chatStore.activeWindow?.messages.find((item) => item.id === props.messageId);
+    if (!accountId || !message) return;
+    void harvesterStore.refreshMessageMetadata(
+      accountId,
+      message,
+      chatStore.activeWindow?.messages ?? [],
+      chatStore.activeChatKey ? chatStore.lastSentQueryByPeer[chatStore.activeChatKey] : undefined,
+    );
+  },
+  { immediate: true },
+);
 </script>
 
 <template>
   <div
-    v-if="harvesterStore.hasPaginationControls(props.rows)"
+    v-if="harvesterStore.hasPaginationControls(props.rows, props.messageId)"
     class="mt-1 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-primary/30 bg-primary/5 px-3 py-1.5 text-xs"
   >
     <div class="flex flex-wrap items-center gap-2">

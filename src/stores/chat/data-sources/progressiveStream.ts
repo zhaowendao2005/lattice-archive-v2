@@ -8,9 +8,9 @@
  * 4. 当浏览器因 seek 或关闭播放器取消 Range 请求且无其余等待者时，立即通过 AbortController → `chatCancel` 中止 Worker 分片下载；
  * 5. 对瞬时网络/超时错误按 250ms→4s 指数退避重试最多 5 次。
  */
-import { TgChatRequestError } from '@/stores/telegram/data-sources/mtprotoBridge';
+import { TelegramBusRequestError } from '@/stores/telegram/data-sources/mtprotoBridge';
 import type { TgPeerRef, TgVideoQuality } from '../types';
-import { chatDataSource } from './chatDataSource';
+import { telegramBusClient } from '@/stores/telegram/data-sources/telegramBusClient';
 import { chatMediaCache } from './chatMediaCache';
 
 const PART_SIZE = 512 * 1024;
@@ -57,7 +57,7 @@ let swControlling = false;
 let readyListener: ((ready: boolean) => void) | null = null;
 
 function isRetryable(error: unknown): boolean {
-  const raw = `${error instanceof TgChatRequestError ? error.code : ''} ${error instanceof Error ? error.message : ''}`.toUpperCase();
+  const raw = `${error instanceof TelegramBusRequestError ? error.code : ''} ${error instanceof Error ? error.message : ''}`.toUpperCase();
   return RETRYABLE_PATTERNS.some((pattern) => raw.includes(pattern));
 }
 
@@ -103,7 +103,7 @@ async function fetchBlockWithRetry(
   for (let attempt = 0; ; attempt += 1) {
     if (signal.aborted) throw new Error('TG_CANCELED');
     try {
-      const part = await chatDataSource.getDocumentPart(
+      const part = await telegramBusClient.stream.getDocumentPart(
         descriptor.accountId,
         descriptor.peer,
         descriptor.messageId,

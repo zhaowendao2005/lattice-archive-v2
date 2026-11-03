@@ -9,7 +9,7 @@
  * 注意：archives 表来自早期原型，当前业务主体（聊天 / 归档瓦片）
  * 走各自 data-sources 里的存储实现，不要在此无脑堆业务表。
  */
-import type { ArchiveItem, PlatformInfo, SqliteQueryResult, SqliteRunResult } from '../types/database';
+import type { ArchiveItem, PlatformInfo, SqliteQueryResult, SqliteRunResult } from '../../../types/database';
 
 class DatabaseService {
   /** 启动时探测一次：window.sqliteAPI 存在即视为 Electron 宿主 */

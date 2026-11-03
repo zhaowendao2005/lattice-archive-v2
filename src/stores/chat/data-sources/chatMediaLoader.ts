@@ -6,15 +6,22 @@
  * 媒体预载与消息历史请求解耦：并发上限保证滚动大列表时不会挤压会话 / 历史 RPC。
  *
  * 两条通道：
- * - image：照片档位 / 视频缩略图，并发 3，按条数（400）LRU；
- * - video：完整视频文件，并发 2，按字节（256 MB）LRU；正在播放的 URL 通过 pin 免于淘汰。
+ * - image：头像 / 照片档位 / 视频缩略图，并发 = 封面 + 头像配额，按条数（400）LRU；
+ * - video：完整视频文件，并发 = 完整媒体配额，按字节（256 MB）LRU；正在播放的 URL 通过 pin 免于淘汰。
+ * 并发配额来自统一的 Telegram 并发配置；Worker 内 RequestScheduler 按账号预算做最终限流。
  * 视频任务可在下载中途 abort（Worker 在分片边界停止）。
  * 另有附件文件的「保存后保留」区（saveBlob / resave）：不参与上述两条通道的预算，单独按字节 LRU 回收。
  */
+import type { TelegramConcurrencyConfig } from '@/worker/local/telegram/contracts/concurrency';
+import { telegramPerformancePreferences } from '@/stores/telegram/data-sources/telegramPerformancePreferences';
+
 export type MediaLane = 'image' | 'video';
 
-/** video 通道并发 2：查看器的大文件下载不会让气泡内的小 GIF / 圆形视频长时间排队。 */
-const LANE_CONCURRENCY: Record<MediaLane, number> = { image: 3, video: 2 };
+function laneConcurrencyFrom(config: TelegramConcurrencyConfig): Record<MediaLane, number> {
+  return { image: config.limits.cover + config.limits.avatar, video: config.limits.fullMedia };
+}
+
+let laneConcurrency = laneConcurrencyFrom(telegramPerformancePreferences.read());
 /** 参考实现的退避节奏：约 250 ms、500 ms、1 s、2 s、4 s，最多 5 次。 */
 const IMAGE_RETRY_DELAYS_MS = [250, 500, 1_000, 2_000, 4_000];
 /** 完整视频重新下载成本高：只对网络类错误重试 2 次。 */
@@ -122,7 +129,7 @@ async function execute(task: MediaTask, taskGeneration: number) {
 function pump() {
   queue.sort((a, b) => b.priority - a.priority);
   for (const lane of ['image', 'video'] as const) {
-    while (running[lane] < LANE_CONCURRENCY[lane]) {
+    while (running[lane] < laneConcurrency[lane]) {
       const index = queue.findIndex((task) => task.lane === lane);
       if (index < 0) break;
       const [task] = queue.splice(index, 1);
@@ -143,6 +150,11 @@ function pump() {
     }
   }
 }
+
+telegramPerformancePreferences.subscribe((config) => {
+  laneConcurrency = laneConcurrencyFrom(config);
+  pump();
+});
 
 export const chatMediaLoader = {
   /** 已在内存中的 URL；命中时顺带刷新 LRU 顺序。 */

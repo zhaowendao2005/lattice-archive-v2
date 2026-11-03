@@ -1,14 +1,14 @@
 /**
  * chat 域附件文件下载（非视频类文档：普通文件 / 音频 / 语音）。
  *
- * - 下载：经 chatDataSource.getDocument 走本地 Worker 的完整文件通道（512 KiB 分片 × 4 路并行），字节进度写入 downloads；
+ * - 下载：经 telegramBusClient.mediaAsset.getDocument 走本地 Worker 的完整文件通道（512 KiB 分片 × 4 路并行），字节进度写入 downloads；
  * - 保存：完成后交给 chatMediaLoader.saveBlob 触发浏览器保存；≤ 64 MB 的文件保留 URL，再次点击瞬时重新保存；
  * - 取消：下载中再次点击即中断（Worker 在分片边界停止）；
  * - 上限：整文件需驻留内存，超过 FILE_MEMORY_LIMIT 的文件提示改用官方客户端（后续可接 Service Worker 流式落盘）。
  */
 import { defineStore } from 'pinia';
 import { useChatStore } from './chatStore';
-import { chatDataSource } from '../data-sources/chatDataSource';
+import { telegramBusClient } from '@/stores/telegram/data-sources/telegramBusClient';
 import { chatMediaLoader } from '../data-sources/chatMediaLoader';
 import type { FeedDocument } from '../types';
 import { formatBytes, parseMediaTarget } from './chatModel';
@@ -87,7 +87,7 @@ export const useChatFileStore = defineStore('chatFile', {
       this.downloads[file.key] = { status: 'loading', loaded: 0, total: info.size };
       const isCurrent = () => taskGeneration === generation && controllers.get(file.key) === controller;
       try {
-        const result = await chatDataSource.getDocument(accountId, peer, messageId, info, {
+        const result = await telegramBusClient.mediaAsset.getDocument(accountId, peer, messageId, info, {
           signal: controller.signal,
           onProgress: (loaded, total) => {
             if (isCurrent()) this.downloads[file.key] = { status: 'loading', loaded, total };
@@ -98,7 +98,7 @@ export const useChatFileStore = defineStore('chatFile', {
         this.downloads[file.key] = { status: 'done', loaded: info.size, total: info.size };
       } catch (error) {
         if (!isCurrent() || controller.signal.aborted) return;
-        this.downloads[file.key] = { status: 'error', loaded: 0, total: info.size, error: chatDataSource.readError(error) };
+        this.downloads[file.key] = { status: 'error', loaded: 0, total: info.size, error: telegramBusClient.readError(error) };
       } finally {
         if (controllers.get(file.key) === controller) controllers.delete(file.key);
       }

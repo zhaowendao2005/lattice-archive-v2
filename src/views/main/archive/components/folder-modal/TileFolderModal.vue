@@ -15,7 +15,7 @@ import { useChatStore } from '@/stores/chat/stores/chatStore';
 import { useChatMediaStore } from '@/stores/chat/stores/chatMediaStore';
 import type { TgPeerKey } from '@/stores/chat/types';
 import type { FileTileData, FolderTileData, TileData } from '../../types/tile';
-import { countFolderItemsRecursive, useTileStore } from '../../store/tileStore';
+import { countFolderItemsRecursive, useTileStore } from '@/stores/archive/stores/tileStore';
 import { getFileVisual } from '../tiles/fileVisuals';
 
 const props = defineProps<{

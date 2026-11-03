@@ -20,7 +20,9 @@ Lattice Archive v2：Vue 3 + TypeScript + Vite + Pinia + Tailwind CSS v4 的归�
 | --- | --- |
 | `pnpm dev` | Vite 前端开发服务器，`/api` 代理到本机 Worker（`127.0.0.1:8787`） |
 | `pnpm worker:dev` | 本地 Worker（`local` 环境，允许 `localhost` Turnstile hostname） |
-| `pnpm build` | 前端 + Worker 全量类型检查并构建到 `dist/` |
+| `pnpm build` | 架构检查 + 前端 + Worker 全量类型检查并构建到 `dist/` |
+| `pnpm arch:check` | 架构边界检查（GramJS 边界、视图零 ref、禁止硬编码并发等，见 `scripts/check-architecture.mjs`） |
+| `pnpm test:scheduler` | Telegram RequestScheduler 行为测试 |
 | `pnpm worker:types` | 由 Wrangler 生成 `Env` 绑定类型（**禁止手写 Env**） |
 | `pnpm worker:migrate:local` | 本地 D1 迁移 |
 | `pnpm deploy` | 一键部署：自动构建 → 按 `deploy.config.json` 的 `d1Mode` 处理远端 D1 → 部署 Worker |
@@ -77,7 +79,8 @@ deploy.config.json  # 当前 D1 部署模式与库名
 ## 5. 变更检查清单
 
 - [ ] `src/views/**` 无 `ref` / `reactive`，无直接网络请求
-- [ ] `pnpm build` 通过（含 Worker 严格类型检查）
+- [ ] `pnpm build` 通过（含架构检查与 Worker 严格类型检查）；遗留豁免只减不增
+- [ ] 改动 Telegram 调度 / 并发配置后 `pnpm test:scheduler` 通过
 - [ ] 修改 Worker 绑定后已运行 `pnpm worker:types`
 - [ ] 更换域名/子域时，同步 `TURNSTILE_HOSTNAMES`、`ALLOWED_ORIGINS`、Turnstile widget 域名与 README
 - [ ] 未提交 `.dev.vars`、`.env.local`、`.wrangler/`、`dist/`

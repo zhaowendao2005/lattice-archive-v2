@@ -5,7 +5,7 @@ import { useChatStore } from '@/stores/chat/stores/chatStore';
 import { useChatMediaStore } from '@/stores/chat/stores/chatMediaStore';
 import type { TgPeerKey } from '@/stores/chat/types';
 import type { FolderTileData, TileData } from '../../types/tile';
-import { countFolderItemsRecursive } from '../../store/tileStore';
+import { countFolderItemsRecursive } from '@/stores/archive/stores/tileStore';
 import BaseTile from './BaseTile.vue';
 import { getFileVisual } from './fileVisuals';
 

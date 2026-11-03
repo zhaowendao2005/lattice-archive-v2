@@ -1,5 +1,5 @@
 import type { TileData } from '../types/tile';
-import { getTileSpan, GROUP_COLUMNS } from '../store/tileStore';
+import { getTileSpan, GROUP_COLUMNS } from '@/stores/archive/stores/tileStore';
 
 export function computeDisplacedPositions(
   groupTiles: TileData[],

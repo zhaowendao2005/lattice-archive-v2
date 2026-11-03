@@ -35,6 +35,17 @@
 | **Media Muted** | `--media-muted` / `text-media-muted` | 次要计数、来源时间与副文案 |
 | **Media Track / Buffered** | `--media-track` / `--media-buffered` | 进度条底轨与已缓冲进度条 |
 
+### 运行监控曲线令牌（Monitor Series）
+
+设置 → 开发者选项 → Telegram 连接监控中的总线状态点与 Canvas 曲线使用以下令牌；Canvas 通过 `getComputedStyle` 读取 CSS 变量，不得在脚本中写死颜色：
+
+| 总线 | CSS 变量 / 原子类 |
+| :--- | :--- |
+| SearchBus | `--monitor-search` / `bg-monitor-search` |
+| CoverBus | `--monitor-cover` / `bg-monitor-cover` |
+| MediaAssetBus | `--monitor-media` / `bg-monitor-media` |
+| StreamBus | `--monitor-stream` / `bg-monitor-stream` |
+
 **铁律**：视图中只允许使用上表的语义原子类，**严禁直接写 `slate-*`、`sky-*` 等调色板色或十六进制色值**，否则暗色模式与后续换肤都会失效。
 
 ### 字体与字号

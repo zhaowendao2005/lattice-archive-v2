@@ -2,7 +2,7 @@
 import { computed } from 'vue';
 import { Check, ChevronRight, Folder, FolderOpen, FolderPlus, MessageSquare } from '@lucide/vue';
 import { useAggregateSearchStore } from '@/stores/archive/stores/aggregateSearchStore';
-import { countFolderItemsRecursive } from '../../../store/tileStore';
+import { countFolderItemsRecursive } from '@/stores/archive/stores/tileStore';
 import type { FileTileData, FolderTileData } from '../../../types/tile';
 import { getFileVisual } from '../../tiles/fileVisuals';
 

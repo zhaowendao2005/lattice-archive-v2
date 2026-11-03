@@ -27,7 +27,7 @@ import { useAggregateSearchStore } from '@/stores/archive/stores/aggregateSearch
 import { useSessionManagerStore } from '@/stores/archive/stores/sessionManagerStore';
 import { useChatStore } from '@/stores/chat/stores/chatStore';
 import type { TgPeerKey } from '@/stores/chat/types';
-import { useTileStore } from '../../store/tileStore';
+import { useTileStore } from '@/stores/archive/stores/tileStore';
 import { archiveDomRegistry } from '../../store/archiveDomRegistry';
 
 const router = useRouter();

@@ -16,7 +16,7 @@ import {
 } from '@lucide/vue';
 import { useAggregateSearchStore } from '@/stores/archive/stores/aggregateSearchStore';
 import { useSessionManagerStore } from '@/stores/archive/stores/sessionManagerStore';
-import { useTileStore } from './store/tileStore';
+import { useTileStore } from '@/stores/archive/stores/tileStore';
 import TileBoard from './components/board/TileBoard.vue';
 import TileFolderModal from './components/folder-modal/TileFolderModal.vue';
 import FileDetailModal from './components/file-modal/FileDetailModal.vue';

@@ -11,7 +11,7 @@ import {
   GROUP_COLUMNS,
   UNIT_SIZE,
   useTileStore,
-} from '../../store/tileStore';
+} from '@/stores/archive/stores/tileStore';
 import { archiveDomRegistry } from '../../store/archiveDomRegistry';
 import FileTile from '../tiles/FileTile.vue';
 import FolderTile from '../tiles/FolderTile.vue';
