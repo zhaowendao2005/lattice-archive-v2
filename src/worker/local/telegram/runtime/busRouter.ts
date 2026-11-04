@@ -175,7 +175,7 @@ export async function routeBusRequest<B extends BusName, O extends BusOpName<B>>
   const env: ExecEnv = {
     client,
     scheduler,
-    task: { priority, traceId: context.traceId },
+    task: { priority, traceId: context.traceId, signal: token.signal },
     token,
     onProgress: (loaded, total) => runtime.progress(context.requestId, loaded, total),
   };

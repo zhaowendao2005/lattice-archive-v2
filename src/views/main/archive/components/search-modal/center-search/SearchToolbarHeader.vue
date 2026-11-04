@@ -19,7 +19,8 @@ function handleTriggerSearch() {
 
 function handleClearKeyword() {
   searchStore.keyword = '';
-  void searchStore.executeStreamingSearch();
+  // 清空关键词只停止当前检索，不发起空关键词搜索。
+  if (searchStore.isStreaming) searchStore.stopSearch();
 }
 </script>
 
@@ -33,6 +34,7 @@ function handleClearKeyword() {
 
       <input
         v-model="searchStore.keyword"
+        data-search-keyword
         type="text"
         placeholder="输入关键词聚合检索视频、图片、会话、文本文件与其他归档..."
         class="h-full min-w-0 flex-1 bg-transparent text-white placeholder-white/35 outline-none"
@@ -97,8 +99,10 @@ function handleClearKeyword() {
       <!-- 2. 预留 SVG 图标按钮 1：排序方式（预留） -->
       <button
         type="button"
-        class="flex size-10 items-center justify-center rounded-[2px] border border-white/12 bg-white/[0.03] text-white/45 transition-colors hover:border-white/25 hover:bg-white/[0.07] hover:text-white/85"
-        title="排序规则（预留功能）"
+        title="排序规则（预留功能，暂未启用）"
+        disabled
+        aria-disabled="true"
+        class="flex size-10 items-center justify-center rounded-[2px] border border-white/12 bg-white/[0.03] text-white/45 transition-colors hover:border-white/25 hover:bg-white/[0.07] hover:text-white/85 disabled:cursor-not-allowed disabled:opacity-40"
       >
         <ArrowUpDown class="size-4" :stroke-width="1.75" />
       </button>
@@ -106,8 +110,10 @@ function handleClearKeyword() {
       <!-- 3. 预留 SVG 图标按钮 2：视图密度（预留） -->
       <button
         type="button"
-        class="flex size-10 items-center justify-center rounded-[2px] border border-white/12 bg-white/[0.03] text-white/45 transition-colors hover:border-white/25 hover:bg-white/[0.07] hover:text-white/85"
-        title="卡片布局密度（预留功能）"
+        title="卡片布局密度（预留功能，暂未启用）"
+        disabled
+        aria-disabled="true"
+        class="flex size-10 items-center justify-center rounded-[2px] border border-white/12 bg-white/[0.03] text-white/45 transition-colors hover:border-white/25 hover:bg-white/[0.07] hover:text-white/85 disabled:cursor-not-allowed disabled:opacity-40"
       >
         <LayoutList class="size-4" :stroke-width="1.75" />
       </button>
@@ -115,8 +121,10 @@ function handleClearKeyword() {
       <!-- 4. 预留 SVG 图标按钮 3：高级检索语法（预留） -->
       <button
         type="button"
-        class="flex size-10 items-center justify-center rounded-[2px] border border-white/12 bg-white/[0.03] text-white/45 transition-colors hover:border-white/25 hover:bg-white/[0.07] hover:text-white/85"
-        title="语义与正则增强（预留功能）"
+        title="语义与正则增强（预留功能，暂未启用）"
+        disabled
+        aria-disabled="true"
+        class="flex size-10 items-center justify-center rounded-[2px] border border-white/12 bg-white/[0.03] text-white/45 transition-colors hover:border-white/25 hover:bg-white/[0.07] hover:text-white/85 disabled:cursor-not-allowed disabled:opacity-40"
       >
         <Sparkles class="size-4" :stroke-width="1.75" />
       </button>

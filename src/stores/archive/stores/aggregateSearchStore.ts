@@ -4,11 +4,17 @@
  * ============================================================================
  * 严格遵循 `.rules/state-management.md` 视图层零本地 `ref` 铁律：
  * 弹窗开关、左右两栏折叠态、左栏 Tree 展开状态、中栏搜索词、筛选菜单展开与「搜索前/搜索后」多选态、
- * 右栏两类会话范围（已加入会话 / 只有凭据会话）控制、流式检索结果与分页懒加载、
+ * 右栏两类会话范围（已加入会话 / 只有凭据会话）控制、逐会话流式结果与虚拟视口、
  * 卡片高亮多选与 Shift 连续多选、跨栏拖拽归档状态全部收敛于此 Store。
  */
 import { defineStore } from 'pinia';
-import { computed, ref } from 'vue';
+import { computed, nextTick, ref, watch, type ComponentPublicInstance } from 'vue';
+import { SEARCH_CATEGORY_OPTIONS } from './searchCategories';
+import { streamFocusedSearch } from './focusedSearch';
+import { parseSearchSize, scopeRowHeight, searchWindow, SEARCH_ROW_HEIGHT, SearchResultProjection, variableWindow } from '@/worker/local/archive/searchModel';
+import { searchResultGestureDataSource } from '../data-sources/searchResultGestureDataSource';
+import { searchViewportDataSource, searchScopeViewportDataSource } from '../data-sources/searchViewportDataSource';
+import { useChatStore } from '@/stores/chat/stores/chatStore';
 import type { FileTileData, FolderTileData } from '@/views/main/archive/types/tile';
 import { useTileStore } from '@/stores/archive/stores/tileStore';
 import { aggregateSearchDataSource } from '../data-sources/aggregateSearchDataSource';
@@ -25,7 +31,7 @@ import type {
   TreeEditingNodeState,
 } from '../types';
 
-const PAGE_SIZE = 15;
+const PAGE_SIZE = 50;
 
 export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
   const tileStore = useTileStore();
@@ -62,19 +68,21 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
   const keyword = ref('');
   const isFilterMenuOpen = ref(false);
   const activeFilterStage = ref<SearchFilterStage>('pre');
-  /** 搜索前筛选步骤 1：点击「按文件类型筛选」标签后展开所有可选项 */
-  const isPreTypeOptionsListed = ref(false);
-  /** 搜索前筛选步骤 2 & 3：多选选中的文件类型（视频、图片、会话、文本文件、其他） */
+  /** 搜索前多选文件类型 */
   const selectedPreCategories = ref<SearchPreFilterCategory[]>([]);
   const preExtensions = ref('');
-  const preMinSizeMb = ref('');
-  const preMaxSizeMb = ref('');
+  const forceFullScan = ref(false);
   /** 搜索后筛选：对已流式返回的结果集进行客户端二次筛选 */
   const selectedPostCategories = ref<SearchPreFilterCategory[]>([]);
   const postKeyword = ref('');
   const postResolutionFilter = ref<'all' | '720p' | '1080p' | '4k'>('all');
   const postDurationFilter = ref<'all' | 'short' | 'medium' | 'long'>('all');
-  const postSizeFilter = ref<'all' | 'small' | 'medium' | 'large'>('all');
+  /**
+   * 精确资源大小（MB）。Telegram Search 没有体积参数，因此只能在结果返回后本地过滤；
+   * 该条件只作用于视频与图片，其他类型不受影响。
+   */
+  const postMinSizeMb = ref<string | number>('');
+  const postMaxSizeMb = ref<string | number>('');
   const postExcludeNoForwards = ref(false);
   const postDeduplicateByDocId = ref(true);
 
@@ -82,16 +90,22 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
   const activeScopeTab = ref<SearchScopeSessionKind>('joined');
   const selectedScopeSessionIds = ref<string[]>([]);
 
-  // ── 5. 流式搜索与触底懒加载状态 ────────────────────────────────────
+  // ── 5. 流式搜索与虚拟视口状态 ────────────────────────────────────
   const rawResults = ref<AggregateSearchResultItem[]>([]);
   const isStreaming = ref(false);
-  const isLoadingMore = ref(false);
   const hasSearched = ref(false);
-  const currentPage = ref(1);
   const totalMatched = ref(0);
-  const hasMore = ref(false);
   const peerProgress = ref<Record<string, SearchPeerProgress>>({});
   const searchEpoch = ref(0);
+  const searchError = ref('');
+  const searchStatus = ref<'idle' | 'streaming' | 'stopped' | 'completed' | 'partial' | 'error'>('idle');
+  const viewportTop = ref(0);
+  const viewportHeight = ref(600);
+  const resultIds = new Set<string>();
+  const coverControllers = new Map<string, AbortController>();
+  let queuedItems: AggregateSearchResultItem[] = [];
+  let flushTimer: ReturnType<typeof setTimeout> | undefined;
+
 
   // ── 6. 搜索结果卡片选择与 Shift 连续多选状态 ───────────────────────
   const selectedResultIds = ref<string[]>([]);
@@ -116,7 +130,7 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
   });
 
   // ── Getters / 派生状态 ─────────────────────────────────────────────
-  const categoryOptions = computed(() => aggregateSearchDataSource.getCategoryOptions());
+  const categoryOptions = computed(() => SEARCH_CATEGORY_OPTIONS);
   const allScopeSessions = computed(() => aggregateSearchDataSource.getScopeSessions());
 
   const joinedScopeSessions = computed(() =>
@@ -130,6 +144,61 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
       ? joinedScopeSessions.value
       : credentialOnlyScopeSessions.value,
   );
+
+  const scopeViewportTop = ref(0);
+  const scopeViewportHeight = ref(600);
+  // 会话行高不统一（凭据且带过期时间的卡片更高），因此用前缀偏移做变高窗口。
+  const scopeOffsets = computed(() => {
+    const offsets = [0];
+    for (const session of currentTabScopeSessions.value) offsets.push(offsets[offsets.length - 1] + scopeRowHeight(session));
+    return offsets;
+  });
+  const scopeWindow = computed(() => variableWindow(scopeOffsets.value, scopeViewportTop.value, scopeViewportHeight.value));
+  const virtualScopeSessions = computed(() => currentTabScopeSessions.value.slice(scopeWindow.value.start, scopeWindow.value.end));
+  const scopePaddingTop = computed(() => scopeWindow.value.paddingTop);
+  const scopePaddingBottom = computed(() => scopeWindow.value.paddingBottom);
+  const scopeRowHeightOf = scopeRowHeight;
+  const isPreTypeOptionsListed = ref(false);
+  function togglePreTypeOptionsList() {
+    isPreTypeOptionsListed.value = !isPreTypeOptionsListed.value;
+  }
+  const resultRowHeight = SEARCH_ROW_HEIGHT;
+  const selectedScopeSet = computed(() => new Set(selectedScopeSessionIds.value));
+  function bindScopeViewport(target: Element | ComponentPublicInstance | null) {
+    searchScopeViewportDataSource.bind(target instanceof HTMLElement ? target : null, (top, height) => {
+      scopeViewportTop.value = top; scopeViewportHeight.value = height;
+    });
+  }
+  watch(activeScopeTab, () => { scopeViewportTop.value = 0; searchScopeViewportDataSource.reset(); });
+
+  // 右栏真实会话头像：只给当前虚拟窗口 + overscan 内的会话加载，滚出窗口即取消并释放封面槽位。
+  const scopeAvatarUrls = ref<Record<string, string>>({});
+  const scopeAvatarControllers = new Map<string, AbortController>();
+  function abortScopeAvatars() {
+    for (const controller of scopeAvatarControllers.values()) controller.abort();
+    scopeAvatarControllers.clear();
+  }
+  watch(() => [virtualScopeSessions.value, isModalOpen.value] as const, ([items, open]) => {
+    const visible = new Set(items.map(item => item.id));
+    for (const [id, controller] of scopeAvatarControllers) {
+      if (!visible.has(id)) { controller.abort(); scopeAvatarControllers.delete(id); }
+    }
+    if (!open) return;
+    for (const session of items) {
+      if (!session.avatar || scopeAvatarUrls.value[session.id] || scopeAvatarControllers.has(session.id)) continue;
+      const controller = new AbortController();
+      scopeAvatarControllers.set(session.id, controller);
+      void aggregateSearchDataSource.fetchScopeAvatarDataUrl(session, controller.signal)
+        .then(url => {
+          if (controller.signal.aborted || !url) return;
+          scopeAvatarUrls.value = { ...scopeAvatarUrls.value, [session.id]: url };
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          if (scopeAvatarControllers.get(session.id) === controller) scopeAvatarControllers.delete(session.id);
+        });
+    }
+  }, { flush: 'post' });
 
   const selectedJoinedCount = computed(
     () =>
@@ -202,64 +271,74 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
     return allExploreSessionIds.value.filter(id => selectedScopeSessionIds.value.includes(id)).length;
   });
 
-  /** 经过「搜索后筛选」二次过滤后的最终展示卡片列表 */
-  const displayedResults = computed(() => {
-    let list = rawResults.value;
-    if (selectedPostCategories.value.length > 0) {
-      const postSet = new Set(selectedPostCategories.value);
-      list = list.filter(item => postSet.has(item.category));
+  const resultProjection = new SearchResultProjection();
+  /** 体积条件解析失败时不阻断渲染，错误文案在筛选菜单里提示。 */
+  const postSizeBounds = computed(() => {
+    try {
+      const minSizeBytes = parseSearchSize(postMinSizeMb.value);
+      const maxSizeBytes = parseSearchSize(postMaxSizeMb.value);
+      if (minSizeBytes !== undefined && maxSizeBytes !== undefined && minSizeBytes > maxSizeBytes) {
+        return { minSizeBytes: undefined, maxSizeBytes: undefined, error: '最小体积不能大于最大体积' };
+      }
+      return { minSizeBytes, maxSizeBytes, error: '' };
+    } catch (error) {
+      return { minSizeBytes: undefined, maxSizeBytes: undefined, error: error instanceof Error ? error.message : '请检查文件大小条件' };
     }
-    const pkw = postKeyword.value.trim().toLowerCase();
-    if (pkw) {
-      list = list.filter(
-        item =>
-          item.title.toLowerCase().includes(pkw) ||
-          item.snippet.toLowerCase().includes(pkw) ||
-          item.sessionTitle.toLowerCase().includes(pkw),
-      );
+  });
+  const displayedResults = computed(() => resultProjection.update(rawResults.value, {
+    categories: [...selectedPostCategories.value],
+    keyword: postKeyword.value,
+    resolution: postResolutionFilter.value,
+    duration: postDurationFilter.value,
+    minSizeBytes: postSizeBounds.value.minSizeBytes,
+    maxSizeBytes: postSizeBounds.value.maxSizeBytes,
+    excludeProtected: postExcludeNoForwards.value,
+    deduplicate: postDeduplicateByDocId.value,
+  }));
+
+  const resultWindow = computed(() => searchWindow(displayedResults.value.length, viewportTop.value, viewportHeight.value));
+  const virtualResults = computed(() => displayedResults.value.slice(resultWindow.value.start, resultWindow.value.end));
+  const virtualPaddingTop = computed(() => resultWindow.value.start * SEARCH_ROW_HEIGHT);
+  const virtualPaddingBottom = computed(() => Math.max(0, displayedResults.value.length - resultWindow.value.end) * SEARCH_ROW_HEIGHT);
+  const peerSummary = computed(() => Object.values(peerProgress.value).reduce((summary, peer) => {
+    summary.total++;
+    summary.checked += peer.checked;
+    summary.matched += peer.matched;
+    if (peer.status === 'completed') summary.completed++;
+    if (peer.status === 'error') summary.failed++;
+    return summary;
+  }, { total: 0, completed: 0, failed: 0, checked: 0, matched: 0 }));
+  const failedPeers = computed(() => Object.values(peerProgress.value).filter(peer => peer.status === 'error'));
+  function bindResultsViewport(target: Element | ComponentPublicInstance | null) {
+    searchViewportDataSource.bind(target instanceof HTMLElement ? target : null, (top, height) => {
+      viewportTop.value = top;
+      viewportHeight.value = height;
+    });
+  }
+  function abortCovers() {
+    for (const controller of coverControllers.values()) controller.abort();
+    coverControllers.clear();
+    loadingHighResIds.value = {};
+  }
+  watch(() => [virtualResults.value, isModalOpen.value] as const, ([items]) => {
+    const visibleIds = new Set(items.map(item => item.id));
+    for (const [id, controller] of coverControllers) if (!visibleIds.has(id)) controller.abort();
+    if (isModalOpen.value && searchStatus.value !== 'stopped') {
+      for (const item of items) if (canAutoLoadCover(item)) void loadHighResThumbnailForItem(item);
     }
-    if (postExcludeNoForwards.value) {
-      list = list.filter(item => !item.noforwards);
-    }
-    if (postResolutionFilter.value !== 'all') {
-      list = list.filter(item => {
-        const h = item.height ?? 0;
-        if (postResolutionFilter.value === '4k') return h >= 2160;
-        if (postResolutionFilter.value === '1080p') return h >= 1080;
-        if (postResolutionFilter.value === '720p') return h >= 720;
-        return true;
-      });
-    }
-    if (postDurationFilter.value !== 'all') {
-      list = list.filter(item => {
-        const d = item.durationSeconds ?? 0;
-        if (postDurationFilter.value === 'short') return d > 0 && d < 60;
-        if (postDurationFilter.value === 'medium') return d >= 60 && d <= 900;
-        if (postDurationFilter.value === 'long') return d > 900;
-        return true;
-      });
-    }
-    if (postSizeFilter.value !== 'all') {
-      list = list.filter(item => {
-        const b = item.sizeBytes ?? 0;
-        const mb = b / (1024 * 1024);
-        if (postSizeFilter.value === 'small') return mb < 50;
-        if (postSizeFilter.value === 'medium') return mb >= 50 && mb <= 500;
-        if (postSizeFilter.value === 'large') return mb > 500;
-        return true;
-      });
-    }
-    if (postDeduplicateByDocId.value) {
-      const seenDocIds = new Set<string>();
-      list = list.filter(item => {
-        const docId = item.videoInfo?.id ?? item.fileInfo?.id ?? item.photoInfo?.id;
-        if (!docId) return true;
-        if (seenDocIds.has(docId)) return false;
-        seenDocIds.add(docId);
-        return true;
-      });
-    }
-    return list;
+  }, { flush: 'post' });
+  watch(() => useChatStore().accountId, () => {
+    stopSearch();
+    abortScopeAvatars();
+    scopeAvatarUrls.value = {};
+    rawResults.value = [];
+    resultIds.clear();
+    selectedResultIds.value = [];
+    peerProgress.value = {};
+    totalMatched.value = 0;
+    hasSearched.value = false;
+    searchStatus.value = 'idle';
+    searchError.value = '';
   });
 
   const selectedResultSet = computed(() => new Set(selectedResultIds.value));
@@ -273,8 +352,12 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
       selectedPreCategories.value.length +
       selectedPostCategories.value.length +
       (postKeyword.value.trim() ? 1 : 0) +
+      (postResolutionFilter.value !== 'all' ? 1 : 0) +
+      (postDurationFilter.value !== 'all' ? 1 : 0) +
+      (postSizeBounds.value.minSizeBytes !== undefined || postSizeBounds.value.maxSizeBytes !== undefined ? 1 : 0) +
+      (postExcludeNoForwards.value ? 1 : 0) +
       (preExtensions.value.trim() ? 1 : 0) +
-      (preMinSizeMb.value.trim() || preMaxSizeMb.value.trim() ? 1 : 0),
+      (forceFullScan.value ? 1 : 0),
   );
 
   // ── Actions ────────────────────────────────────────────────────────
@@ -293,16 +376,15 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
   function openModal() {
     ensureTreeInitialized();
     isModalOpen.value = true;
-    if (!hasSearched.value && rawResults.value.length === 0) {
-      void executeStreamingSearch();
-    }
+    // 打开窗口不发起任何检索：关键词、范围与筛选都由用户显式提交后才生效。
   }
 
   function closeModal() {
     stopSearch();
+    abortScopeAvatars();
+    searchResultGestureDataSource.cancel();
     aggregateSearchDataSource.clearTreeHoverExpand();
     isStreaming.value = false;
-    isLoadingMore.value = false;
     isFilterMenuOpen.value = false;
     cancelDragToTree();
     closeTreeContextMenu();
@@ -311,11 +393,12 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
   }
 
   function stopSearch() {
+    flushSearchItems();
+    abortCovers();
+    if (searchStatus.value === 'streaming') searchStatus.value = 'stopped';
     searchEpoch.value += 1;
     aggregateSearchDataSource.abortActiveStream();
     isStreaming.value = false;
-    isLoadingMore.value = false;
-    hasMore.value = false;
   }
 
   function toggleLeftPane() {
@@ -382,12 +465,7 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
     activeFilterStage.value = stage;
   }
 
-  /** 步骤 1：点击「按文件类型筛选」标签，把所有可选项罗列出来 */
-  function togglePreTypeOptionsList() {
-    isPreTypeOptionsListed.value = !isPreTypeOptionsListed.value;
-  }
-
-  /** 步骤 2：点击可选项表示选中/取消选中（支持多选） */
+  /** 搜索前多选类型 */
   function togglePreCategory(category: SearchPreFilterCategory) {
     if (selectedPreCategories.value.includes(category)) {
       selectedPreCategories.value = selectedPreCategories.value.filter(c => c !== category);
@@ -403,8 +481,7 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
   function clearPreCategories() {
     selectedPreCategories.value = [];
     preExtensions.value = '';
-    preMinSizeMb.value = '';
-    preMaxSizeMb.value = '';
+    forceFullScan.value = false;
   }
 
   function togglePostCategory(category: SearchPreFilterCategory) {
@@ -416,13 +493,16 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
   }
 
   function resetAllFilters() {
-    selectedPreCategories.value = [];
+    clearPreCategories();
+    searchError.value = '';
     selectedPostCategories.value = [];
     postKeyword.value = '';
     postResolutionFilter.value = 'all';
     postDurationFilter.value = 'all';
-    postSizeFilter.value = 'all';
+    postMinSizeMb.value = '';
+    postMaxSizeMb.value = '';
     postExcludeNoForwards.value = false;
+    postDeduplicateByDocId.value = true;
   }
 
   // ── 右栏：按会话控制搜索范围交互 ──────────────────────────────────
@@ -638,7 +718,7 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
     }
   }
 
-  // ── 流式搜索与触底懒加载执行引擎 ──────────────────────────────────
+  // ── 流式搜索与批量提交执行引擎 ──────────────────────────────────
   function logSearch(
     action: string,
     level: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR',
@@ -664,42 +744,34 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
     return Boolean(item.photoInfo || item.videoInfo || item.fileInfo?.preview);
   }
 
-  /** 新卡片落位后自动补全高清封面（经 coverImageBus 的 search 通道限流）。 */
-  function autoLoadCoversForChunk(items: AggregateSearchResultItem[]) {
-    let queued = 0;
-    for (const item of items) {
-      if (!canAutoLoadCover(item)) continue;
-      queued += 1;
-      void loadHighResThumbnailForItem(item);
-    }
-    if (queued > 0) {
-      logSearch(
-        'store_auto_cover_queued',
-        'DEBUG',
-        { queued, chunkSize: items.length },
-        '自动为新结果卡片补全高清缩略图',
-      );
+  /** One persistent ID index; empty progress chunks never scan the result array. */
+  function flushSearchItems() {
+    if (flushTimer) clearTimeout(flushTimer);
+    flushTimer = undefined;
+    if (queuedItems.length) {
+      rawResults.value.push(...queuedItems);
+      queuedItems = [];
     }
   }
-
-  /** 把新分片并入 rawResults，并用数组里的响应式代理触发自动补图。 */
-  function appendChunkItems(
-    chunkItems: AggregateSearchResultItem[],
-    chunkTotalMatched: number,
-    chunkHasMore: boolean,
-  ) {
-    const existing = new Set(rawResults.value.map((item) => item.id));
-    const fresh = chunkItems.filter((item) => !existing.has(item.id));
-    rawResults.value.push(...fresh);
-    totalMatched.value = chunkTotalMatched;
-    hasMore.value = chunkHasMore;
-    if (fresh.length > 0) {
-      const proxies = rawResults.value.slice(rawResults.value.length - fresh.length);
-      autoLoadCoversForChunk(proxies);
+  function appendChunkItems(items: AggregateSearchResultItem[], total: number) {
+    for (const item of items) {
+      if (resultIds.has(item.id)) continue;
+      resultIds.add(item.id);
+      queuedItems.push(item);
     }
+    totalMatched.value = total;
+    if (queuedItems.length && !flushTimer) flushTimer = setTimeout(flushSearchItems, 32);
   }
 
   async function executeStreamingSearch() {
+    searchError.value = '';
+    // 空关键词不发起任何检索：服务端按会话搜索时必须有关键词，否则会退化成全量拉取。
+    if (!keyword.value.trim()) {
+      searchError.value = '请输入关键词后再搜索';
+      void nextTick(() => searchViewportDataSource.focusKeywordInput());
+      return;
+    }
+    stopSearch();
     const epoch = ++searchEpoch.value;
     const signal = aggregateSearchDataSource.createStreamSignal();
     const startedAt = Date.now();
@@ -707,85 +779,51 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
       keywordLength: keyword.value.trim().length,
       categories: selectedPreCategories.value.join(',') || 'all',
       scopeCount: selectedScopeSessionIds.value.length,
+      forceRefresh: forceFullScan.value,
       pageSize: PAGE_SIZE,
     };
-    logSearch('store_search_start', 'INFO', queryMeta, '开始新的聚合搜索');
-
+    logSearch('store_search_start', 'INFO', queryMeta, '开始逐会话聚焦搜索');
     hasSearched.value = true;
     isStreaming.value = true;
-    isLoadingMore.value = false;
-    currentPage.value = 1;
+    searchStatus.value = 'streaming';
     rawResults.value = [];
+    queuedItems = [];
+    resultIds.clear();
     totalMatched.value = 0;
-    hasMore.value = false;
     selectedResultIds.value = [];
     lastClickedIndex.value = null;
-    loadingHighResIds.value = {};
     highResLoadedIds.value = {};
     brokenThumbIds.value = {};
     peerProgress.value = {};
-
-    const toBytes = (raw: string) => {
-      const value = Number(raw.trim());
-      return Number.isFinite(value) && value >= 0 ? Math.round(value * 1024 * 1024) : undefined;
-    };
-
+    viewportTop.value = 0;
+    searchViewportDataSource.reset();
     const query = {
       keyword: keyword.value,
+      forceRefresh: forceFullScan.value,
       preCategories: [...selectedPreCategories.value],
-      preExtensions: preExtensions.value.split(/[\s,;]+/).map((value) => value.trim().replace(/^\./, '').toLowerCase()).filter(Boolean),
-      minSizeBytes: toBytes(preMinSizeMb.value),
-      maxSizeBytes: toBytes(preMaxSizeMb.value),
-      scopeSessionIds: [...selectedScopeSessionIds.value],
-      page: 1,
-      pageSize: PAGE_SIZE,
+      preExtensions: preExtensions.value.split(/[\s,;]+/).map(value => value.trim().replace(/^\./, '').toLowerCase()).filter(Boolean),
+      scopeSessionIds: [...selectedScopeSessionIds.value], pageSize: PAGE_SIZE,
     };
-
     try {
-      for await (const chunk of aggregateSearchDataSource.streamFocusedSearch(query, signal)) {
+      for await (const chunk of streamFocusedSearch(query, signal)) {
         if (epoch !== searchEpoch.value || signal.aborted) return;
-        if (chunk.peerProgress) {
-          peerProgress.value = {
-            ...peerProgress.value,
-            [`${chunk.peerProgress.accountId}:${chunk.peerProgress.peerKey}`]: chunk.peerProgress,
-          };
-        }
-        appendChunkItems(chunk.items, chunk.totalMatched, chunk.hasMore);
+        if (chunk.peerProgress) peerProgress.value[`${chunk.peerProgress.accountId}:${chunk.peerProgress.peerKey}`] = chunk.peerProgress;
+        appendChunkItems(chunk.items, chunk.totalMatched);
       }
-      logSearch(
-        'store_search_done',
-        'INFO',
-        {
-          ...queryMeta,
-          loaded: rawResults.value.length,
-          totalMatched: totalMatched.value,
-          hasMore: hasMore.value,
-        },
-        '搜索流式推送完成',
-        Date.now() - startedAt,
-      );
+      if (epoch !== searchEpoch.value || signal.aborted) return;
+      flushSearchItems();
+      searchStatus.value = peerSummary.value.failed > 0 ? 'partial' : 'completed';
+      logSearch('store_search_done', 'INFO', { ...queryMeta, loaded: rawResults.value.length, totalMatched: totalMatched.value, failedPeers: peerSummary.value.failed }, '聚焦搜索结束', Date.now() - startedAt);
     } catch (error) {
-      const info = classifyTelegramError(error);
-      if (epoch === searchEpoch.value) {
-        hasMore.value = false;
-        logSearch(
-          'store_search_error',
-          'ERROR',
-          {
-            ...queryMeta,
-            bucket: info.bucket,
-            code: info.code,
-            retryable: info.retryable,
-            loaded: rawResults.value.length,
-          },
-          info.description,
-          Date.now() - startedAt,
-        );
+      if (epoch === searchEpoch.value && !signal.aborted) {
+        flushSearchItems();
+            searchStatus.value = 'error';
+        const info = classifyTelegramError(error);
+        searchError.value = info.bucket === 'UNKNOWN' ? '搜索未完成，请检查连接和会话范围后重试' : info.description;
+        logSearch('store_search_error', 'ERROR', { ...queryMeta, bucket: info.bucket, code: info.code }, '聚焦搜索异常结束', Date.now() - startedAt);
       }
     } finally {
-      if (epoch === searchEpoch.value) {
-        isStreaming.value = false;
-      }
+      if (epoch === searchEpoch.value) isStreaming.value = false;
     }
   }
 
@@ -808,7 +846,8 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
   }
 
   // ── 卡片点击选择与按住 Shift 连续区间多选 ─────────────────────────
-  function handleResultCardClick(index: number, item: AggregateSearchResultItem, event: MouseEvent) {
+  function handleResultCardClick(index: number, item: AggregateSearchResultItem, event: MouseEvent | KeyboardEvent) {
+    if (event.type === 'click' && searchResultGestureDataSource.consumeClick(item.id)) return;
     const list = displayedResults.value;
     if (event.shiftKey && lastClickedIndex.value !== null && list.length > 0) {
       const start = Math.max(0, Math.min(lastClickedIndex.value, index));
@@ -841,10 +880,14 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
    */
   async function loadHighResThumbnailForItem(item: AggregateSearchResultItem) {
     if (!item || loadingHighResIds.value[item.id]) return;
+    const epoch = searchEpoch.value;
+    const controller = new AbortController();
+    coverControllers.set(item.id, controller);
     item.hdThumbAttempted = true;
     loadingHighResIds.value[item.id] = true;
     try {
-      const hdDataUrl = await aggregateSearchDataSource.fetchHighResThumbnailDataUrl(item);
+      const hdDataUrl = await aggregateSearchDataSource.fetchHighResThumbnailDataUrl(item, controller.signal, epoch);
+      if (controller.signal.aborted || epoch !== searchEpoch.value || !isModalOpen.value) return;
       if (hdDataUrl) {
         item.thumbnailUrl = hdDataUrl;
         item.hdThumbLoaded = true;
@@ -871,6 +914,7 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
         );
       }
     } catch (error) {
+      if (controller.signal.aborted || epoch !== searchEpoch.value) return;
       const info = classifyTelegramError(error);
       item.hdThumbError = info.code;
       logSearch(
@@ -886,9 +930,28 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
         info.description,
       );
     } finally {
-      delete loadingHighResIds.value[item.id];
+      if (controller.signal.aborted) {
+        item.hdThumbAttempted = false;
+        if (epoch === searchEpoch.value && isModalOpen.value && searchStatus.value !== 'stopped' && virtualResults.value.some(visible => visible.id === item.id)) {
+          void nextTick(() => { if (canAutoLoadCover(item)) void loadHighResThumbnailForItem(item); });
+        }
+      }
+      if (coverControllers.get(item.id) === controller) {
+        coverControllers.delete(item.id);
+        delete loadingHighResIds.value[item.id];
+      }
     }
   }
+
+  function startResultPointerGesture(item: AggregateSearchResultItem, event: PointerEvent) {
+    searchResultGestureDataSource.begin(item.id, event, {
+      start: (x, y) => startDragResultsToTree(item, x, y),
+      move: updateDragToTreePointer,
+      finish: finishDragToTree,
+      cancel: cancelDragToTree,
+    });
+  }
+  function releaseResultGesture(id: string) { searchResultGestureDataSource.release(id); }
 
   // ── 跨栏拖拽：从搜索结果向左拖拽到文件树（磁贴拓扑） ─────────────
   function startDragResultsToTree(
@@ -1115,22 +1178,23 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
     keyword,
     isFilterMenuOpen,
     activeFilterStage,
-    isPreTypeOptionsListed,
     selectedPreCategories,
     preExtensions,
-    preMinSizeMb,
-    preMaxSizeMb,
+    forceFullScan,
     selectedPostCategories,
     postKeyword,
     postResolutionFilter,
     postDurationFilter,
-    postSizeFilter,
+    postMinSizeMb,
+    postMaxSizeMb,
+    postSizeBounds,
     postExcludeNoForwards,
     postDeduplicateByDocId,
     categoryOptions,
     activeFilterCount,
     toggleFilterMenu,
     setFilterStage,
+    isPreTypeOptionsListed,
     togglePreTypeOptionsList,
     togglePreCategory,
     selectAllPreCategories,
@@ -1145,6 +1209,14 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
     joinedScopeSessions,
     credentialOnlyScopeSessions,
     currentTabScopeSessions,
+    virtualScopeSessions,
+    scopePaddingTop,
+    scopePaddingBottom,
+    scopeRowHeightOf,
+    scopeAvatarUrls,
+    resultRowHeight,
+    bindScopeViewport,
+    selectedScopeSet,
     selectedJoinedCount,
     selectedCredentialCount,
     exploreSessionFolders,
@@ -1163,12 +1235,18 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
     // 流式搜索与懒加载
     rawResults,
     displayedResults,
+    virtualResults,
+    virtualPaddingTop,
+    virtualPaddingBottom,
+    resultWindow,
+    bindResultsViewport,
+    searchError,
+    searchStatus,
+    peerSummary,
+    failedPeers,
     isStreaming,
-    isLoadingMore,
     hasSearched,
-    currentPage,
     totalMatched,
-    hasMore,
     peerProgress,
     executeStreamingSearch,
     stopSearch,
@@ -1192,6 +1270,8 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
     dragToTree,
     startInternalTreeNodeDrag,
     startDragResultsToTree,
+    startResultPointerGesture,
+    releaseResultGesture,
     updateDragToTreePointer,
     finishDragToTree,
     cancelDragToTree,

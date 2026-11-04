@@ -37,7 +37,7 @@
 
 ### 运行监控曲线令牌（Monitor Series）
 
-设置 → 开发者选项 → Telegram 连接监控中的总线状态点与 Canvas 曲线使用以下令牌；Canvas 通过 `getComputedStyle` 读取 CSS 变量，不得在脚本中写死颜色：
+设置 → 开发者选项 → Telegram 连接监控中的总线状态点与 ECharts 曲线使用以下令牌；ECharts 通过 `getComputedStyle` 读取 CSS 变量，不得在脚本中写死颜色：
 
 | 总线 | CSS 变量 / 原子类 |
 | :--- | :--- |
@@ -45,6 +45,13 @@
 | CoverBus | `--monitor-cover` / `bg-monitor-cover` |
 | MediaAssetBus | `--monitor-media` / `bg-monitor-media` |
 | StreamBus | `--monitor-stream` / `bg-monitor-stream` |
+| ChatReadBus | `--monitor-chat-read` / `bg-monitor-chat-read` |
+| ChatCommandBus | `--monitor-chat-command` / `bg-monitor-chat-command` |
+| BotInteractionBus | `--monitor-bot` / `bg-monitor-bot` |
+| VaultTransferBus | `--monitor-vault` / `bg-monitor-vault` |
+| AccountSessionBus | `--monitor-account` / `bg-monitor-account` |
+
+九条曲线按总线 ID 固定取色，不随图例过滤或排序重排；颜色之外必须同时提供图例名称与数据表，身份不能只靠颜色。
 
 **铁律**：视图中只允许使用上表的语义原子类，**严禁直接写 `slate-*`、`sky-*` 等调色板色或十六进制色值**，否则暗色模式与后续换肤都会失效。
 

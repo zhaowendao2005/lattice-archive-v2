@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { CheckSquare, Loader2, SearchX, Sparkles, Square } from '@lucide/vue';
+import { CheckSquare, Loader2, Search, SearchX, Sparkles, Square } from '@lucide/vue';
 import { useAggregateSearchStore } from '@/stores/archive/stores/aggregateSearchStore';
 import SearchResultCard from './SearchResultCard.vue';
 
@@ -14,7 +14,7 @@ const searchStore = useAggregateSearchStore();
       <!-- 左侧：流式进度与命中统计 -->
       <div class="flex items-center gap-2 text-white/60">
         <span
-          v-if="searchStore.isStreaming || searchStore.isLoadingMore"
+          v-if="searchStore.isStreaming"
           class="flex items-center gap-1.5 text-sky-300"
         >
           <Loader2 class="size-3.5 animate-spin text-sky-400" />
@@ -44,8 +44,8 @@ const searchStore = useAggregateSearchStore();
           会话范围：{{ searchStore.selectedScopeSessionIds.length }} 个会话
         </span>
         <span v-if="Object.keys(searchStore.peerProgress).length > 0" class="text-white/45">
-          {{ Object.values(searchStore.peerProgress).filter(p => p.status === 'completed').length }} 个会话已完成
-          · {{ Object.values(searchStore.peerProgress).filter(p => p.status === 'error').length }} 个会话失败
+          {{ searchStore.peerSummary.completed }} 个会话已完成
+          · {{ searchStore.peerSummary.failed }} 个会话失败
         </span>
       </div>
 
@@ -86,18 +86,64 @@ const searchStore = useAggregateSearchStore();
       </div>
     </div>
 
-    <!-- 流式结果滚动容器 -->
-    <div
-      class="search-results-viewport search-modal-scroll min-h-0 flex-1 space-y-2 overflow-y-auto p-4"
+    <!-- 搜索错误与失败会话详情（沿用 HEAD 的红色警示风格） -->
+    <p
+      v-if="searchStore.searchError"
+      role="alert"
+      class="shrink-0 border-b border-rose-400/30 bg-rose-500/10 px-4 py-2 text-[11px] text-rose-200"
     >
-      <!-- 搜索结果卡片列表 -->
-      <SearchResultCard
-        v-for="(item, index) in searchStore.displayedResults"
-        :key="item.id"
-        :item="item"
-        :index="index"
-        :selected="searchStore.selectedResultSet.has(item.id)"
-      />
+      {{ searchStore.searchError }}
+    </p>
+    <details
+      v-if="searchStore.failedPeers.length"
+      class="shrink-0 border-b border-rose-400/30 bg-rose-500/10 px-4 py-2 text-[11px] text-rose-200"
+    >
+      <summary class="cursor-pointer">
+        {{ searchStore.failedPeers.length }} 个会话失败，结果不完整（展开详情）
+      </summary>
+      <p v-for="peer in searchStore.failedPeers" :key="peer.peerKey" class="mt-1 font-mono text-[10px] text-rose-300">
+        {{ peer.peerKey }} · {{ peer.errorCode }}
+      </p>
+    </details>
+
+    <!-- 流式结果滚动容器（固定行高虚拟窗口：只挂载可视行与上下各 5 行） -->
+    <div
+      :ref="searchStore.bindResultsViewport"
+      class="search-results-viewport search-modal-scroll min-h-0 flex-1 overflow-y-auto p-4 [overflow-anchor:none]"
+      role="listbox"
+      aria-label="聚焦搜索结果，支持多选及拖入左侧目录"
+      aria-multiselectable="true"
+    >
+      <div :style="{ paddingTop: `${searchStore.virtualPaddingTop}px`, paddingBottom: `${searchStore.virtualPaddingBottom}px` }">
+        <div
+          v-for="(item, index) in searchStore.virtualResults"
+          :key="item.id"
+          class="pb-2"
+          :style="{ height: `${searchStore.resultRowHeight}px` }"
+        >
+          <SearchResultCard
+            :item="item"
+            :index="searchStore.resultWindow.start + index"
+            :selected="searchStore.selectedResultSet.has(item.id)"
+          />
+        </div>
+      </div>
+
+      <!-- 初始状态：打开窗口不会自动发起检索 -->
+      <div
+        v-if="!searchStore.hasSearched && !searchStore.isStreaming"
+        class="my-auto flex flex-col items-center justify-center py-16 text-center"
+      >
+        <div
+          class="flex size-12 items-center justify-center rounded-[2px] border border-white/10 bg-white/[0.03] text-white/35"
+        >
+          <Search class="size-6" :stroke-width="1.6" />
+        </div>
+        <p class="mt-3 text-xs font-medium text-white/75">输入关键词后按回车开始搜索</p>
+        <p class="mt-1 text-[11px] text-white/40">
+          打开窗口不会自动检索；可先在右侧选择会话范围与搜索前类型，再点击搜索
+        </p>
+      </div>
 
       <!-- 空状态 -->
       <div
@@ -114,19 +160,23 @@ const searchStore = useAggregateSearchStore();
           <SearchX class="size-6" :stroke-width="1.6" />
         </div>
         <p class="mt-3 text-xs font-medium text-white/75">
-          未找到符合当前筛选与会话范围的归档条目
+          {{
+            searchStore.searchStatus === 'stopped'
+              ? '已停止搜索，当前没有匹配结果'
+              : searchStore.searchStatus === 'error' || searchStore.searchStatus === 'partial'
+                ? '搜索未完整完成，请查看错误后重试'
+                : '未找到符合当前筛选与会话范围的归档条目'
+          }}
         </p>
         <p class="mt-1 text-[11px] text-white/40">
           可尝试放宽「搜索前文件类型」或右侧「会话范围控制」后重新点击搜索
         </p>
       </div>
 
-      <!-- 底部懒加载哨兵与流式加载状态 -->
-      <div
-        class="flex items-center justify-center py-3 text-[11px] text-white/40"
-      >
+      <!-- 底部流式加载状态 -->
+      <div class="flex items-center justify-center py-3 text-[11px] text-white/40">
         <div
-          v-if="searchStore.isStreaming || searchStore.isLoadingMore"
+          v-if="searchStore.isStreaming"
           class="flex items-center gap-2 text-sky-300/85"
         >
           <Loader2 class="size-3.5 animate-spin text-sky-400" />

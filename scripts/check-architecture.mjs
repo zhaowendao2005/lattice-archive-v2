@@ -26,6 +26,7 @@ const LEGACY = {
 
 /** 主线程允许引用的 local Worker 模块：纯类型契约与纯函数。 */
 const WORKER_IMPORT_ALLOW = [
+  /^@\/worker\/local\/archive\/(searchContracts|searchModel)$/,
   /^@\/worker\/local\/protocol$/,
   /^@\/worker\/local\/chatProtocol$/,
   /^@\/worker\/local\/chat\/telegramErrors$/,

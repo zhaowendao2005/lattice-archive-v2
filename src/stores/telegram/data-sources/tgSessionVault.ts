@@ -88,6 +88,8 @@ async function deleteRecord(recordKey: string) {
 }
 
 export const tgSessionVault = {
+  /** Non-extractable device key; structured-cloned only to trusted local encryption Workers. */
+  localEncryptionKey: key,
   deviceId(): string {
     const storage = getStorage();
     if (!storage) return 'server';

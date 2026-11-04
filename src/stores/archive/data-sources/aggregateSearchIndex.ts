@@ -1,143 +1,46 @@
+/** Thin bridge: all IndexedDB, JSON and encryption work runs in the local index Worker. */
 import { tgSessionVault } from '@/stores/telegram/data-sources/tgSessionVault';
-import type { AggregateSearchResultItem } from '../types';
-
-const DB_NAME = 'lattice-aggregate-search-index';
-const STORE_NAME = 'snapshots';
-const VERSION = 1;
-
-export interface SearchIndexCoverage {
-  peerKey: string;
-  accountId: string;
-  queryKey: string;
-  minDate?: number;
-  maxDate?: number;
-  /** The oldest history position that has been committed for this peer. */
-  oldestDate?: number;
-  oldestMessageId?: number;
-  nextOffsetId?: number;
-  complete: boolean;
-  updatedAt: number;
+import type { AggregateSearchResultItem, SearchIndexCommand, SearchIndexCoverage, SearchIndexLookup, SearchIndexReply } from '@/worker/local/archive/searchContracts';
+export type { SearchIndexCoverage } from '@/worker/local/archive/searchContracts';
+let worker: Worker | undefined;
+let ready: Promise<void> | undefined;
+let sequence = 0;
+const pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+function fail() {
+  for (const item of pending.values()) { clearTimeout(item.timer); item.reject(new Error('本地搜索索引不可用')); }
+  pending.clear(); worker?.terminate(); worker = undefined; ready = undefined;
 }
-
-export interface SearchIndexSnapshot {
-  version: 1;
-  accountId: string;
-  savedAt: number;
-  records: AggregateSearchResultItem[];
-  coverage: SearchIndexCoverage[];
-}
-
-interface EncryptedRecord {
-  key: string;
-  iv: ArrayBuffer;
-  payload: ArrayBuffer;
-}
-
-const keyOf = (accountId: string) => `account:${accountId}`;
-
-function openDb(): Promise<IDBDatabase> {
+function send<T>(command: SearchIndexCommand): Promise<T> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, VERSION);
-    request.onupgradeneeded = () => {
-      if (!request.result.objectStoreNames.contains(STORE_NAME)) {
-        request.result.createObjectStore(STORE_NAME, { keyPath: 'key' });
-      }
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+    const id = ++sequence;
+    const timer = setTimeout(fail, 30_000);
+    pending.set(id, { resolve: value => resolve(value as T), reject, timer });
+    try { worker!.postMessage({ id, command }); } catch { fail(); }
   });
 }
-
-async function readRecord(accountId: string): Promise<EncryptedRecord | undefined> {
-  const database = await openDb();
-  try {
-    return await new Promise<EncryptedRecord | undefined>((resolve, reject) => {
-      const request = database.transaction(STORE_NAME, 'readonly').objectStore(STORE_NAME).get(keyOf(accountId));
-      request.onsuccess = () => resolve(request.result as EncryptedRecord | undefined);
-      request.onerror = () => reject(request.error);
-    });
-  } finally {
-    database.close();
-  }
-}
-
-async function writeRecord(_accountId: string, record: EncryptedRecord): Promise<void> {
-  const database = await openDb();
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const request = database.transaction(STORE_NAME, 'readwrite').objectStore(STORE_NAME).put(record);
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
-    });
-  } finally {
-    database.close();
-  }
-}
-
-function mergeRecords(previous: AggregateSearchResultItem[], next: AggregateSearchResultItem[]) {
-  const byId = new Map(previous.map((item) => [item.id, item]));
-  for (const item of next) byId.set(item.id, item);
-  return Array.from(byId.values());
-}
-
-function mergeCoverage(previous: SearchIndexCoverage[], next: SearchIndexCoverage[]) {
-  const byKey = new Map(previous.map((item) => [`${item.accountId}:${item.peerKey}:${item.queryKey}`, item]));
-  for (const item of next) {
-    const key = `${item.accountId}:${item.peerKey}:${item.queryKey}`;
-    const old = byKey.get(key);
-    byKey.set(key, old && old.updatedAt > item.updatedAt ? old : item);
-  }
-  return Array.from(byKey.values());
-}
-
-export const aggregateSearchIndex = {
-  async read(accountId: string): Promise<SearchIndexSnapshot> {
-    try {
-      const record = await readRecord(accountId);
-      if (!record) return { version: 1, accountId, savedAt: 0, records: [], coverage: [] };
-      const snapshot = await tgSessionVault.open<SearchIndexSnapshot>(record);
-      if (snapshot.version !== 1 || snapshot.accountId !== accountId) {
-        return { version: 1, accountId, savedAt: 0, records: [], coverage: [] };
-      }
-      return snapshot;
-    } catch {
-      return { version: 1, accountId, savedAt: 0, records: [], coverage: [] };
-    }
-  },
-
-  async commit(
-    accountId: string,
-    records: AggregateSearchResultItem[],
-    coverage: SearchIndexCoverage[],
-  ): Promise<void> {
-    const previous = await this.read(accountId);
-    const snapshot: SearchIndexSnapshot = {
-      version: 1,
-      accountId,
-      savedAt: Date.now(),
-      records: mergeRecords(previous.records, records),
-      coverage: mergeCoverage(previous.coverage, coverage),
+async function call<T>(command: SearchIndexCommand): Promise<T> {
+  if (!ready) ready = (async () => {
+    const key = await tgSessionVault.localEncryptionKey();
+    worker = new Worker(new URL('../../../worker/local/archive/searchIndex.worker.ts', import.meta.url), { type: 'module' });
+    worker.onmessage = (event: MessageEvent<SearchIndexReply>) => {
+      const item = pending.get(event.data.id);
+      if (!item) return;
+      pending.delete(event.data.id); clearTimeout(item.timer);
+      if (event.data.error) item.reject(new Error(event.data.error)); else item.resolve(event.data.value);
     };
-    const sealed = await tgSessionVault.seal(snapshot);
-    await writeRecord(accountId, { key: keyOf(accountId), ...sealed });
+    worker.onerror = fail;
+    worker.onmessageerror = fail;
+    await send<void>({ op: 'init', key });
+  })().catch(error => { fail(); throw error; });
+  await ready;
+  return send<T>(command);
+}
+export const aggregateSearchIndex = {
+  lookup(accountId: string, peerKey: string, queryKey: string) { return call<SearchIndexLookup>({ op: 'lookup', accountId, peerKey, queryKey }); },
+  invalidate(accountId: string, peerKey: string, queryKey: string) { return call<void>({ op: 'invalidate', accountId, peerKey, queryKey }); },
+  page(key: string) { return call<AggregateSearchResultItem[]>({ op: 'page', key }); },
+  commit(accountId: string, peerKey: string, queryKey: string, items: AggregateSearchResultItem[], coverage: SearchIndexCoverage) {
+    return call<void>({ op: 'commit', accountId, peerKey, queryKey, items, coverage });
   },
-
-  findCoverage(snapshot: SearchIndexSnapshot, accountId: string, peerKey: string, queryKey: string) {
-    return snapshot.coverage.find((item) =>
-      item.accountId === accountId && item.peerKey === peerKey && item.queryKey === queryKey,
-    );
-  },
-
-  async remove(accountId: string): Promise<void> {
-    const database = await openDb();
-    try {
-      await new Promise<void>((resolve, reject) => {
-        const request = database.transaction(STORE_NAME, 'readwrite').objectStore(STORE_NAME).delete(keyOf(accountId));
-        request.onsuccess = () => resolve();
-        request.onerror = () => reject(request.error);
-      });
-    } finally {
-      database.close();
-    }
-  },
+  remove(accountId: string) { return call<void>({ op: 'remove', accountId }); },
 };

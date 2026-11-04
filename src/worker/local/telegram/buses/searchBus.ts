@@ -178,9 +178,10 @@ export async function searchMessages(
       ? rawResult.nextRate
       : undefined;
     const lastMsg = messages[messages.length - 1];
-    const nextOffsetId = lastMsg?.id;
+    const nextOffsetId = rawResult.messages[rawResult.messages.length - 1]?.id;
     const nextOffsetPeer = lastMsg ? dialogs[lastMsg.peerKey]?.peer : undefined;
-    const hasMore = messages.length >= limit;
+    // Peer scans terminate on an empty server page, never on a short/partially converted page.
+    const hasMore = req.peer ? rawResult.messages.length > 0 : rawResult.messages.length >= limit;
 
     emitLocalSpan({
       domain: 'chat.search',

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, onUnmounted } from 'vue';
 import { Check, CheckCircle2, GripVertical, KeyRound, RefreshCw, Sparkles, Users } from '@lucide/vue';
 import { useAggregateSearchStore } from '@/stores/archive/stores/aggregateSearchStore';
 import type { AggregateSearchResultItem } from '@/stores/archive/types';
@@ -36,69 +36,41 @@ function handleThumbError() {
   searchStore.markThumbBroken(props.item, props.item.thumbnailUrl);
 }
 
-let suppressNextClick = false;
-
-function handleCardClick(event: MouseEvent) {
-  if (suppressNextClick) {
-    suppressNextClick = false;
-    return;
-  }
-  searchStore.handleResultCardClick(props.index, props.item, event);
+/** 拖动文字区域滚动条不应启动跨栏拖拽，只有点在内容区域才交给手势。 */
+function isScrollbarHit(event: MouseEvent | PointerEvent): boolean {
+  const scroller = (event.target as HTMLElement).closest<HTMLElement>('.search-row-scroll');
+  return Boolean(scroller && event.clientX > scroller.getBoundingClientRect().left + scroller.clientWidth);
 }
 
 function onCardPointerDown(event: PointerEvent) {
-  if (event.button !== 0) return;
-  const startX = event.clientX;
-  const startY = event.clientY;
-  let dragStarted = false;
-
-  const cleanup = () => {
-    window.removeEventListener('pointermove', onPointerMove);
-    window.removeEventListener('pointerup', onPointerUp);
-    window.removeEventListener('pointercancel', onPointerUp);
-  };
-
-  const onPointerMove = (moveEvent: PointerEvent) => {
-    if (!dragStarted) {
-      if (
-        Math.abs(moveEvent.clientX - startX) < 5 &&
-        Math.abs(moveEvent.clientY - startY) < 5
-      ) {
-        return;
-      }
-      dragStarted = true;
-      suppressNextClick = true;
-      window.setTimeout(() => {
-        suppressNextClick = false;
-      }, 0);
-      searchStore.startDragResultsToTree(props.item, moveEvent.clientX, moveEvent.clientY);
-    }
-    searchStore.updateDragToTreePointer(moveEvent.clientX, moveEvent.clientY);
-  };
-
-  const onPointerUp = () => {
-    cleanup();
-    if (dragStarted) {
-      searchStore.finishDragToTree();
-    }
-  };
-
-  window.addEventListener('pointermove', onPointerMove);
-  window.addEventListener('pointerup', onPointerUp);
-  window.addEventListener('pointercancel', onPointerUp);
+  if (isScrollbarHit(event)) return;
+  searchStore.startResultPointerGesture(props.item, event);
 }
+
+function onCardClick(event: MouseEvent) {
+  if (isScrollbarHit(event)) return;
+  searchStore.handleResultCardClick(props.index, props.item, event);
+}
+
+// 拖拽手势（指针监听、阈值、拖拽后吞掉误触 click）由 Store 经 searchResultGestureDataSource 管理。
+onUnmounted(() => searchStore.releaseResultGesture(props.item.id));
 </script>
 
 <template>
   <article
-    class="group relative flex cursor-grab select-none items-center gap-3 rounded-[2px] border p-2.5 transition-all duration-150 active:cursor-grabbing"
+    class="group relative flex h-full cursor-grab select-none items-center gap-3 rounded-[2px] border p-2.5 transition-all duration-150 active:cursor-grabbing"
     :class="
       selected
         ? 'border-sky-400/85 bg-sky-500/[0.17] ring-1 ring-sky-400/55 shadow-[inset_0_1px_0_0_rgba(56,189,248,0.28),0_6px_18px_-6px_rgba(14,165,233,0.3)]'
         : 'border-white/10 bg-white/[0.03] hover:border-white/25 hover:bg-white/[0.06]'
     "
+    role="option"
+    :aria-selected="selected"
+    tabindex="0"
     @pointerdown="onCardPointerDown"
-    @click="handleCardClick"
+    @click="onCardClick"
+    @keydown.enter.prevent="searchStore.handleResultCardClick(index, item, $event)"
+    @keydown.space.prevent="searchStore.handleResultCardClick(index, item, $event)"
   >
     <!-- 左端：正方形缩略图容器 (Square Thumbnail，支持单独点击加载高清缩略图) -->
     <div
@@ -162,7 +134,7 @@ function onCardPointerDown(event: PointerEvent) {
     </div>
 
     <!-- 右侧：Title 与结构化元数据 -->
-    <div class="min-w-0 flex-1">
+    <div class="search-row-scroll min-h-0 min-w-0 flex-1 self-stretch overflow-y-auto">
       <!-- 第一行：Title + 类型标签 + 归档状态 -->
       <div class="flex items-center gap-2">
         <h3

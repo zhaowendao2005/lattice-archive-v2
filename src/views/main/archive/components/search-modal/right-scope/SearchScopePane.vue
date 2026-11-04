@@ -157,18 +157,30 @@ function handleApplyScopeSearch() {
         </div>
       </div>
 
-      <!-- 会话范围列表滚动容器 -->
-      <div class="search-modal-scroll min-h-0 flex-1 space-y-2 overflow-y-auto p-2.5">
+      <!-- 会话范围列表滚动容器（变高虚拟窗口：凭据过期行更高，用前缀偏移定位） -->
+      <div
+        :ref="searchStore.bindScopeViewport"
+        class="search-modal-scroll min-h-0 flex-1 overflow-y-auto p-2.5 [overflow-anchor:none]"
+      >
         <ExploreScopeView v-if="searchStore.activeScopeTab === 'explore'" />
-        <template v-else>
-          <ScopeSessionItem
-            v-for="session in searchStore.currentTabScopeSessions"
+        <div
+          v-else
+          :style="{ paddingTop: `${searchStore.scopePaddingTop}px`, paddingBottom: `${searchStore.scopePaddingBottom}px` }"
+        >
+          <div
+            v-for="session in searchStore.virtualScopeSessions"
             :key="session.id"
-            :session="session"
-            :selected="searchStore.selectedScopeSessionIds.includes(session.id)"
-            @toggle="searchStore.toggleScopeSession"
-          />
-        </template>
+            class="pb-2"
+            :style="{ height: `${searchStore.scopeRowHeightOf(session)}px` }"
+          >
+            <ScopeSessionItem
+              :session="session"
+              :selected="searchStore.selectedScopeSessionIds.includes(session.id)"
+              :avatar-url="searchStore.scopeAvatarUrls[session.id]"
+              @toggle="searchStore.toggleScopeSession"
+            />
+          </div>
+        </div>
       </div>
 
       <!-- 右栏底部：立即按所选会话范围检索与重置 -->

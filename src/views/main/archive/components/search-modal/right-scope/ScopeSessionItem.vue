@@ -5,29 +5,45 @@ import type { SearchScopeSessionDto } from '@/stores/archive/types';
 defineProps<{
   session: SearchScopeSessionDto;
   selected: boolean;
+  /** 真实会话头像 Data URL；缺失时回退为会话缩写方块。 */
+  avatarUrl?: string;
 }>();
 
 const emit = defineEmits<{
   (e: 'toggle', sessionId: string): void;
 }>();
+
+/** 点击文字区域滚动条不应切换选中，只有点在内容区域才切换。 */
+function onRootClick(event: MouseEvent, sessionId: string) {
+  const scroller = (event.target as HTMLElement).closest<HTMLElement>('.search-row-scroll');
+  if (scroller && event.clientX > scroller.getBoundingClientRect().left + scroller.clientWidth) return;
+  emit('toggle', sessionId);
+}
 </script>
 
 <template>
   <div
-    class="group relative flex cursor-pointer select-none items-start gap-2.5 rounded-[2px] border p-2.5 transition-all duration-150"
+    class="group relative flex h-full cursor-pointer select-none items-start gap-2.5 rounded-[2px] border p-2.5 transition-all duration-150"
     :class="
       selected
         ? 'border-sky-400/75 bg-sky-500/[0.16] ring-1 ring-sky-400/40 shadow-[inset_0_1px_0_0_rgba(56,189,248,0.2)]'
         : 'border-white/10 bg-white/[0.03] hover:border-white/25 hover:bg-white/[0.06]'
     "
-    @click="emit('toggle', session.id)"
+    @click="onRootClick($event, session.id)"
   >
-    <!-- 左端：正方形会话缩略图方块 -->
+    <!-- 左端：真实会话头像（缺失时回退为会话缩写方块） -->
     <div
-      class="relative flex size-9 shrink-0 items-center justify-center rounded-[2px] font-mono text-xs font-semibold shadow-sm"
+      class="relative flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-[2px] font-mono text-xs font-semibold shadow-sm"
       :class="session.accentClass"
     >
-      <span>{{ session.initials }}</span>
+      <img
+        v-if="avatarUrl"
+        :src="avatarUrl"
+        :alt="session.title"
+        loading="lazy"
+        class="h-full w-full object-cover"
+      />
+      <span v-else>{{ session.initials }}</span>
       <span
         class="absolute -bottom-1 -right-1 flex size-4 items-center justify-center rounded-[2px] border border-black/60 bg-slate-950 text-white/80"
       >
@@ -41,7 +57,7 @@ const emit = defineEmits<{
     </div>
 
     <!-- 中部：会话标题、凭据标签与元数据 -->
-    <div class="min-w-0 flex-1">
+    <div class="search-row-scroll min-h-0 min-w-0 flex-1 self-stretch overflow-y-auto">
       <div class="flex items-center gap-1.5">
         <p class="truncate text-[12px] font-medium text-white/92">
           {{ session.title }}

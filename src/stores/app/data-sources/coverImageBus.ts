@@ -21,6 +21,8 @@ export interface CoverBusTaskOptions<T> {
   key: string;
   lane: CoverBusLane;
   priority?: number; // 数值越大越优先
+  /** 视口离开 / 弹窗关闭时中止：排队中的任务立即出队，不再占用调度槽位。 */
+  signal?: AbortSignal;
   fetch: () => Promise<T>;
 }
 
@@ -31,6 +33,17 @@ interface QueuedTask<T> {
   fetch: () => Promise<T>;
   resolve: (value: T) => void;
   reject: (error: unknown) => void;
+  detach?: () => void;
+}
+
+function abortError(): Error {
+  const error = new Error('封面任务已取消');
+  error.name = 'AbortError';
+  return error;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
 }
 
 interface CoverBusLimits {
@@ -94,7 +107,10 @@ class CoverImageBus {
    * 提交一个封面/缩略图加载任务到总线
    */
   request<T>(options: CoverBusTaskOptions<T>): Promise<T> {
-    const { key, lane, priority = 10, fetch } = options;
+    const { key, lane, priority = 10, fetch, signal } = options;
+
+    // 0. 已经取消的请求不进入队列，避免快速滚动时堆积无效任务。
+    if (signal?.aborted) return Promise.reject(abortError());
 
     // 1. 在途请求去重：若相同 key 正在下载中，直接复用其 Promise
     const existing = this.inflightPromises.get(key);
@@ -124,14 +140,20 @@ class CoverImageBus {
     );
 
     const promise = new Promise<T>((resolve, reject) => {
-      this.queue.push({
+      const task: QueuedTask<T> = {
         key,
         lane,
         priority,
         fetch,
         resolve,
         reject,
-      });
+      };
+      if (signal) {
+        const onAbort = () => this.abortQueued(key);
+        signal.addEventListener('abort', onAbort, { once: true });
+        task.detach = () => signal.removeEventListener('abort', onAbort);
+      }
+      this.queue.push(task);
       // 按优先级从大到小排序
       this.queue.sort((a, b) => b.priority - a.priority);
       this.processQueue();
@@ -153,6 +175,11 @@ class CoverImageBus {
         return value;
       })
       .catch((error: unknown) => {
+        // 取消是预期路径（视口滚走 / 弹窗关闭），不计为失败。
+        if (isAbortError(error)) {
+          this.emit('bus_aborted', 'DEBUG', { key, lane, queued: this.queue.length, totalActive: this.totalActive }, '封面任务已取消');
+          throw error;
+        }
         const info = classifyTelegramError(error);
         this.emit(
           'bus_error',
@@ -173,11 +200,23 @@ class CoverImageBus {
         throw error;
       })
       .finally(() => {
-        this.inflightPromises.delete(key);
+        // 只有当前登记的就是本任务时才清理：取消后立刻重新排队会写入新的 Promise。
+        if (this.inflightPromises.get(key) === promise) this.inflightPromises.delete(key);
       });
 
     this.inflightPromises.set(key, promise);
     return promise;
+  }
+
+  /** 从等待队列移除并立即结束；已经执行中的任务由调度器在 fetch 结束时回收槽位。 */
+  private abortQueued(key: string): void {
+    const index = this.queue.findIndex((task) => task.key === key);
+    if (index < 0) return;
+    const [task] = this.queue.splice(index, 1);
+    task?.detach?.();
+    // 同步清掉在途登记：紧接着重新进入视口时应创建新任务，而不是复用已取消的 Promise。
+    this.inflightPromises.delete(key);
+    task?.reject(abortError());
   }
 
   /**

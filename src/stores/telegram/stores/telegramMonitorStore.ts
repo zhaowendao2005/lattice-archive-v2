@@ -20,6 +20,7 @@ import {
   type MonitorLaneView,
   type MonitorSnapshot,
 } from '../data-sources/telegramMonitorDataSource';
+import type { SeriesBus } from '../data-sources/monitorSeries';
 import { useTelegramPerformanceStore } from './telegramPerformanceStore';
 import { useTelegramStore } from './telegramStore';
 import { useDebugLoggerStore } from '@/stores/app/stores/debugLoggerStore';
@@ -45,6 +46,8 @@ export interface MonitorBusCard {
   bytesRate: number;
   okRate: number;
   errorRate: number;
+  /** 终态请求速率（成功 + 失败 + 取消）。 */
+  requestsRate: number;
   status: 'idle' | 'normal' | 'degraded' | 'frozen';
 }
 
@@ -60,6 +63,11 @@ export const useTelegramMonitorStore = defineStore('telegramMonitor', () => {
   const isExporting = ref(false);
   const exportNotice = ref('');
   const exportError = ref('');
+  /** 图表显隐与区间选择；曲线原始数据留在 Data Source 的内存序列里，不进入响应式状态。 */
+  const hiddenBuses = ref<SeriesBus[]>([]);
+  const followLive = ref(true);
+  const zoomRange = ref<{ start: number; end: number } | null>(null);
+  const showTable = ref(false);
 
   const accounts = computed(() => snapshot.value.accounts);
   const effectiveAccountId = computed(() => {
@@ -98,6 +106,7 @@ export const useTelegramMonitorStore = defineStore('telegramMonitor', () => {
       bytesRate: rpcLanes.reduce((n, l) => n + l.bytesRate, 0),
       okRate: rpcLanes.reduce((n, l) => n + l.okRate, 0),
       errorRate: rpcLanes.reduce((n, l) => n + l.errorRate, 0),
+      requestsRate: rpcLanes.reduce((n, l) => n + l.okRate + l.errorRate + l.cancelledRate, 0),
       status,
     };
   }));
@@ -135,11 +144,72 @@ export const useTelegramMonitorStore = defineStore('telegramMonitor', () => {
     snapshot.value = next;
   }
 
+  function syncChartState() {
+    telegramMonitorDataSource.setChartState({
+      hiddenBuses: hiddenBuses.value,
+      followLive: followLive.value,
+      zoom: zoomRange.value,
+    });
+  }
+
+  /** 图例与图表联动：隐藏的曲线照常采样，只是不绘制。 */
+  function setHiddenBuses(next: readonly SeriesBus[]) {
+    if (next.length === hiddenBuses.value.length && next.every((bus, index) => hiddenBuses.value[index] === bus)) return;
+    hiddenBuses.value = [...next];
+    syncChartState();
+  }
+
+  function toggleBus(bus: SeriesBus) {
+    setHiddenBuses(hiddenBuses.value.includes(bus)
+      ? hiddenBuses.value.filter((item) => item !== bus)
+      : [...hiddenBuses.value, bus]);
+  }
+
+  function showAllBuses() { setHiddenBuses([]); }
+
+  /** 手动拖到历史区间后固定查看；数据仍在继续采样，点这里恢复跟随最新帧。 */
+  function setZoomFromChart(range: { start: number; end: number }) {
+    const current = zoomRange.value;
+    // 三张图通过 echarts.connect 联动，同一次拖动会触发多次回调；只有范围实质变化才写状态。
+    if (!followLive.value && current
+      && Math.abs(current.start - range.start) < 500
+      && Math.abs(current.end - range.end) < 500) return;
+    followLive.value = false;
+    zoomRange.value = { ...range };
+    syncChartState();
+  }
+
+  function returnToLive() {
+    followLive.value = true;
+    zoomRange.value = null;
+    syncChartState();
+  }
+
+  function toggleTable() { showTable.value = !showTable.value; }
+
+  const zoomLabel = computed(() => {
+    if (followLive.value || !zoomRange.value) return '跟随实时';
+    const format = (at: number) => new Date(at).toLocaleTimeString('zh-CN', { hour12: false });
+    return `固定区间 ${format(zoomRange.value.start)} – ${format(zoomRange.value.end)}`;
+  });
+
+  /** 内存占用估算：随每次快照更新刷新。 */
+  const chartMemoryLabel = computed(() => {
+    void snapshot.value;
+    const bytes = telegramMonitorDataSource.estimateMemoryBytes();
+    return bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  });
+
   /** 进入监控页（含 KeepAlive 激活）：未暂停时订阅。 */
   function open() {
     isOpen.value = true;
+    telegramMonitorDataSource.setChartHandlers({
+      onZoomChange: setZoomFromChart,
+      onLegendChange: setHiddenBuses,
+    });
     if (!paused.value) telegramMonitorDataSource.start(hz.value, applySnapshot);
     telegramMonitorDataSource.setFocusAccount(effectiveAccountId.value);
+    syncChartState();
   }
 
   /** 离开监控页 / 被 KeepAlive 隐藏 / 关闭开发者模式：退订，Worker 停止推送。 */
@@ -259,6 +329,16 @@ export const useTelegramMonitorStore = defineStore('telegramMonitor', () => {
     isExporting,
     exportNotice,
     exportError,
+    hiddenBuses,
+    followLive,
+    zoomRange,
+    showTable,
+    zoomLabel,
+    chartMemoryLabel,
+    toggleBus,
+    showAllBuses,
+    returnToLive,
+    toggleTable,
     accounts,
     effectiveAccountId,
     account,

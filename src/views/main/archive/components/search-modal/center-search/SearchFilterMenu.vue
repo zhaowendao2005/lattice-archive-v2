@@ -223,7 +223,7 @@ const CATEGORY_ICON_MAP: Record<SearchPreFilterCategory, Component> = {
                 </button>
               </div>
 
-              <div class="mt-3 grid gap-2 sm:grid-cols-3">
+              <div class="mt-3 grid gap-2 sm:grid-cols-2">
                 <label class="flex min-w-0 flex-col gap-1 text-[11px] text-white/55">
                   <span>文件扩展名</span>
                   <input
@@ -233,29 +233,15 @@ const CATEGORY_ICON_MAP: Record<SearchPreFilterCategory, Component> = {
                     class="h-7 rounded-[2px] border border-white/15 bg-black/40 px-2 text-xs text-white outline-none placeholder-white/30 focus:border-sky-400/70"
                   />
                 </label>
-                <label class="flex min-w-0 flex-col gap-1 text-[11px] text-white/55">
-                  <span>最小体积（MB）</span>
-                  <input
-                    v-model="searchStore.preMinSizeMb"
-                    type="number"
-                    min="0"
-                    step="1"
-                    placeholder="不限"
-                    class="h-7 rounded-[2px] border border-white/15 bg-black/40 px-2 text-xs text-white outline-none placeholder-white/30 focus:border-sky-400/70"
-                  />
-                </label>
-                <label class="flex min-w-0 flex-col gap-1 text-[11px] text-white/55">
-                  <span>最大体积（MB）</span>
-                  <input
-                    v-model="searchStore.preMaxSizeMb"
-                    type="number"
-                    min="0"
-                    step="1"
-                    placeholder="不限"
-                    class="h-7 rounded-[2px] border border-white/15 bg-black/40 px-2 text-xs text-white outline-none placeholder-white/30 focus:border-sky-400/70"
-                  />
-                </label>
+                <p class="self-end text-[10px] leading-4 text-white/40">
+                  类型会被拆成独立的服务端过滤请求；体积条件无法传给 Telegram，请改用「搜索后」的精确资源大小。
+                </p>
               </div>
+              <label class="mt-3 flex cursor-pointer items-center gap-2 text-[11px] text-white/55">
+                <input v-model="searchStore.forceFullScan" type="checkbox" class="rounded border-white/20" />
+                <span>忽略缓存，全量复核旧消息的编辑与删除</span>
+              </label>
+              <p class="mt-2 text-[10px] text-white/40">修改后点击搜索生效。</p>
             </div>
           </div>
         </div>
@@ -330,16 +316,26 @@ const CATEGORY_ICON_MAP: Record<SearchPreFilterCategory, Component> = {
           </label>
 
           <label class="flex items-center gap-1">
-            <span class="text-white/45">体积：</span>
-            <select
-              v-model="searchStore.postSizeFilter"
-              class="h-6 rounded border border-white/15 bg-black/50 px-1.5 text-[11px] text-white"
-            >
-              <option value="all">全部体积</option>
-              <option value="small">&lt; 50 MB</option>
-              <option value="medium">50 ~ 500 MB</option>
-              <option value="large">&gt; 500 MB</option>
-            </select>
+            <span class="text-white/45">资源大小：</span>
+            <input
+              v-model="searchStore.postMinSizeMb"
+              data-search-min-size
+              type="number"
+              min="0"
+              step="any"
+              placeholder="最小 MB"
+              class="h-6 w-20 rounded border border-white/15 bg-black/50 px-1.5 text-[11px] text-white placeholder-white/30 outline-none focus:border-sky-400/70"
+            />
+            <span class="text-white/30">~</span>
+            <input
+              v-model="searchStore.postMaxSizeMb"
+              data-search-max-size
+              type="number"
+              min="0"
+              step="any"
+              placeholder="最大 MB"
+              class="h-6 w-20 rounded border border-white/15 bg-black/50 px-1.5 text-[11px] text-white placeholder-white/30 outline-none focus:border-sky-400/70"
+            />
           </label>
 
           <label class="flex cursor-pointer items-center gap-1">
@@ -352,6 +348,16 @@ const CATEGORY_ICON_MAP: Record<SearchPreFilterCategory, Component> = {
             <span>按 document.id 跨群去重</span>
           </label>
         </div>
+        <p
+          v-if="searchStore.postSizeBounds.error"
+          role="alert"
+          class="mt-2 text-[11px] text-rose-300"
+        >
+          {{ searchStore.postSizeBounds.error }}
+        </p>
+        <p class="mt-1.5 text-[10px] text-white/40">
+          资源大小只作用于视频与图片；留空为不限，设置后排除大小未知的媒体。
+        </p>
       </div>
     </div>
   </div>

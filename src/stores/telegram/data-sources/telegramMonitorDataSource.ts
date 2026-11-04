@@ -1,29 +1,37 @@
 /**
- * [DATA SOURCE] Telegram 运行监控桥接（薄桥接 + 高频缓冲 + Canvas 句柄）
+ * [DATA SOURCE] Telegram 运行监控桥接（薄桥接 + 内存序列 + ECharts 句柄）
  *
  * 职责：
  * 1. 经 mtprotoHub 订阅 Worker BusMonitor：租约续约、页面隐藏自动退订 / 恢复、帧序号断档时请求全量重同步；
- * 2. 高频帧不直接写响应式状态：任务表用普通 Map 增量维护，时间序列写入定长 Float64Array 环形缓冲；
- * 3. 每个 requestAnimationFrame 最多向 Store 提交一次整体替换的浅层快照，并在同一回调内重绘 Canvas；
- * 4. 托管 Canvas DOM 句柄（视图零 ref）。曲线数据不进入 Store。
+ * 2. 高频帧不直接写响应式状态：任务表用普通 Map 增量维护；
+ * 3. 每条总线的并发 / 请求速率 / 字节吞吐写入按账号隔离的内存序列（不设时间上限）；
+ * 4. 托管 ECharts 实例、降采样与 setOption 节流；曲线数组不进入 Store。
  */
 import { mtprotoHub } from './mtprotoBridge';
 import {
-  LANE_BUS,
   MONITOR_LEASE_RENEW_MS,
   MONITOR_MAX_EVENTS,
   type MonitorAccountStats,
-  type MonitorBusId,
   type MonitorEvent,
   type MonitorFrame,
   type MonitorLaneStats,
   type MonitorTask,
 } from '@/worker/local/telegram/contracts/monitor';
+import {
+  aggregateBuses,
+  mergeTimedPoints,
+  MonitorSeriesStore,
+  SERIES_BUSES,
+  type SeriesBus,
+  type SeriesMetric,
+} from './monitorSeries';
+import type { EChartsType } from 'echarts/core';
 
 export interface MonitorLaneView extends MonitorLaneStats {
   /** 每秒速率（指数平滑）。 */
   okRate: number;
   errorRate: number;
+  cancelledRate: number;
   bytesRate: number;
   status: 'normal' | 'degraded' | 'frozen';
   frozenSeconds: number;
@@ -58,40 +66,49 @@ export const EMPTY_MONITOR_SNAPSHOT: MonitorSnapshot = {
   events: [],
 };
 
-/** 曲线：最近 120 秒，最高 10 帧/秒。 */
+export interface MonitorChartState {
+  hiddenBuses: readonly SeriesBus[];
+  followLive: boolean;
+  zoom: { start: number; end: number } | null;
+}
+
+export interface MonitorChartHandlers {
+  onZoomChange?: (range: { start: number; end: number }) => void;
+  onLegendChange?: (hidden: readonly SeriesBus[]) => void;
+}
+
+/** X 轴默认跟随窗口：最近 2 分钟。 */
 const SERIES_WINDOW_MS = 120_000;
-const SERIES_CAPACITY = 1200;
-const CHART_BUSES: MonitorBusId[] = ['search', 'cover', 'mediaAsset', 'stream'];
-const BUS_COLOR_VAR: Record<string, string> = {
+/** 全量概览的桶数：slider 与“看到全程”都靠它。 */
+const OVERVIEW_BUCKETS = 600;
+const RATE_SMOOTHING = 0.35;
+const CHART_GROUP = 'telegram-monitor';
+
+const BUS_COLOR_VAR: Record<SeriesBus, string> = {
   search: '--monitor-search',
   cover: '--monitor-cover',
   mediaAsset: '--monitor-media',
   stream: '--monitor-stream',
+  chatRead: '--monitor-chat-read',
+  chatCommand: '--monitor-chat-command',
+  bot: '--monitor-bot',
+  vault: '--monitor-vault',
+  account: '--monitor-account',
 };
-const RATE_SMOOTHING = 0.35;
-
-/** 定长数值环：写入 O(1)，读取时按时间顺序遍历。 */
-class Ring {
-  readonly data = new Float64Array(SERIES_CAPACITY);
-  head = 0;
-  size = 0;
-  push(value: number) {
-    this.data[this.head] = value;
-    this.head = (this.head + 1) % SERIES_CAPACITY;
-    if (this.size < SERIES_CAPACITY) this.size += 1;
-  }
-  at(i: number) { return this.data[(this.head - this.size + i + SERIES_CAPACITY) % SERIES_CAPACITY]!; }
-  clear() { this.head = 0; this.size = 0; }
-}
-
-const series = {
-  time: new Ring(),
-  queued: new Ring(),
-  bytesRate: new Ring(),
-  flood: new Ring(),
-  active: Object.fromEntries(CHART_BUSES.map((bus) => [bus, new Ring()])) as Record<string, Ring>,
+/** 短标签：九条曲线要同时出现在一行可滚动的图例里。顺序与 MONITOR_BUSES 一致。 */
+const BUS_LABEL: Record<SeriesBus, string> = {
+  search: '搜索',
+  cover: '封面与头像',
+  mediaAsset: '完整文件',
+  stream: '视频流',
+  chatRead: 'Chat 读取',
+  chatCommand: 'Chat 命令',
+  bot: '机器人',
+  vault: '保险库',
+  account: '账号会话',
 };
 
+const seriesStores = new Map<string, MonitorSeriesStore>();
 let subscriberId: string | null = null;
 let hz = 4;
 let leaseTimer: number | null = null;
@@ -109,12 +126,27 @@ let accounts: MonitorAccountStats[] = [];
 let lanes: MonitorLaneView[] = [];
 let hiddenTaskCount = 0;
 let mode = '';
-const previousTotals = new Map<string, { at: number; ok: number; error: number; bytes: number; okRate: number; errorRate: number; bytesRate: number }>();
+const previousTotals = new Map<string, {
+  at: number; ok: number; error: number; cancelled: number; bytes: number;
+  okRate: number; errorRate: number; cancelledRate: number; bytesRate: number;
+}>();
 
-let canvas: HTMLCanvasElement | null = null;
-/** 尺寸变化时重绘（暂停或无新帧时也保持曲线清晰）。 */
-let resizeObserver: ResizeObserver | null = null;
+interface ChartEntry {
+  element: HTMLElement;
+  chart: EChartsType;
+  resizeObserver: ResizeObserver | null;
+  intersectionObserver: IntersectionObserver | null;
+  visible: boolean;
+  dirty: boolean;
+}
+const charts = new Map<SeriesMetric, ChartEntry>();
+const pendingElements = new Map<SeriesMetric, HTMLElement | null>();
+let chartState: MonitorChartState = { hiddenBuses: [], followLive: true, zoom: null };
+let chartHandlers: MonitorChartHandlers = {};
+let echartsCore: typeof import('./monitorEcharts')['echarts'] | null = null;
+let echartsLoader: Promise<typeof import('./monitorEcharts')['echarts']> | null = null;
 let colorCache: { at: number; colors: Record<string, string> } | null = null;
+let chartFrame = 0;
 
 function laneKey(lane: MonitorLaneStats) { return `${lane.accountId}:${lane.lane}`; }
 
@@ -124,67 +156,45 @@ function toLaneViews(raw: MonitorLaneStats[], at: number): MonitorLaneView[] {
     const prev = previousTotals.get(key);
     let okRate = 0;
     let errorRate = 0;
+    let cancelledRate = 0;
     let bytesRate = 0;
     if (prev && at > prev.at) {
       const dt = (at - prev.at) / 1000;
       const smooth = (old: number, next: number) => old + (next - old) * RATE_SMOOTHING;
       okRate = smooth(prev.okRate, Math.max(0, lane.okTotal - prev.ok) / dt);
       errorRate = smooth(prev.errorRate, Math.max(0, lane.errorTotal - prev.error) / dt);
+      cancelledRate = smooth(prev.cancelledRate, Math.max(0, lane.cancelledTotal - prev.cancelled) / dt);
       bytesRate = smooth(prev.bytesRate, Math.max(0, lane.bytesTotal - prev.bytes) / dt);
     }
-    previousTotals.set(key, { at, ok: lane.okTotal, error: lane.errorTotal, bytes: lane.bytesTotal, okRate, errorRate, bytesRate });
+    previousTotals.set(key, {
+      at, ok: lane.okTotal, error: lane.errorTotal, cancelled: lane.cancelledTotal, bytes: lane.bytesTotal,
+      okRate, errorRate, cancelledRate, bytesRate,
+    });
     const frozenSeconds = lane.frozenUntil > at ? Math.ceil((lane.frozenUntil - at) / 1000) : 0;
     const status = frozenSeconds > 0 ? 'frozen' : lane.effective < lane.configured ? 'degraded' : 'normal';
-    return { ...lane, okRate, errorRate, bytesRate, status, frozenSeconds };
+    return { ...lane, okRate, errorRate, cancelledRate, bytesRate, status, frozenSeconds };
   });
 }
 
-function pushSeries(at: number, frameEvents: MonitorEvent[]) {
-  const accountId = focusAccountId ?? accounts.find((a) => a.tier === 'P0')?.accountId ?? accounts[0]?.accountId;
+function resolvedAccountId(): string | null {
+  return focusAccountId ?? accounts.find((account) => account.tier === 'P0')?.accountId ?? accounts[0]?.accountId ?? null;
+}
+
+function seriesStore(create = true): MonitorSeriesStore | null {
+  const accountId = resolvedAccountId();
+  if (!accountId) return null;
+  let store = seriesStores.get(accountId);
+  if (!store && create) { store = new MonitorSeriesStore(); seriesStores.set(accountId, store); }
+  return store ?? null;
+}
+
+function pushSeries(at: number) {
+  const accountId = resolvedAccountId();
   if (!accountId) return;
+  const store = seriesStore();
+  if (!store) return;
   const own = lanes.filter((lane) => lane.accountId === accountId);
-  series.time.push(at);
-  for (const bus of CHART_BUSES) {
-    // MediaAssetBus 以分片 RPC 衡量真实并发（fullMedia 只是文件数）。
-    const active = own.filter((lane) => LANE_BUS[lane.lane] === bus && lane.lane !== 'fullMedia').reduce((n, lane) => n + lane.active, 0);
-    series.active[bus]!.push(active);
-  }
-  series.queued.push(own.reduce((n, lane) => n + lane.queued, 0));
-  series.bytesRate.push(own.reduce((n, lane) => n + lane.bytesRate, 0));
-  series.flood.push(frameEvents.filter((event) => event.kind === 'flood_wait' && event.accountId === accountId).length);
-}
-
-function clearSeries() {
-  series.time.clear();
-  series.queued.clear();
-  series.bytesRate.clear();
-  series.flood.clear();
-  for (const ring of Object.values(series.active)) ring.clear();
-}
-
-function handleFrame(frame: MonitorFrame) {
-  const gap = !frame.full && lastSeq !== 0 && frame.seq !== lastSeq + 1;
-  lastSeq = frame.seq;
-  lastFrameAt = Date.now();
-  hz = frame.hz;
-  mode = frame.mode;
-  accounts = frame.accounts;
-  lanes = toLaneViews(frame.lanes, frame.at);
-  hiddenTaskCount = frame.hiddenTaskCount;
-  if (gap) {
-    // 帧丢失：增量任务不可信，等待全量帧后再更新任务表与事件流。
-    if (subscriberId) mtprotoHub.bridge().monitorResync(subscriberId);
-  } else {
-    if (frame.full) { tasks.clear(); events = []; }
-    for (const task of frame.taskUpserts) tasks.set(task.id, task);
-    for (const id of frame.taskRemovals) tasks.delete(id);
-    if (frame.events.length) {
-      events = events.concat(frame.events);
-      if (events.length > MONITOR_MAX_EVENTS) events = events.slice(events.length - MONITOR_MAX_EVENTS);
-    }
-  }
-  pushSeries(frame.at, gap ? [] : frame.events);
-  scheduleCommit();
+  store.append(at, aggregateBuses(own));
 }
 
 const STATE_ORDER: Record<MonitorTask['state'], number> = { running: 0, queued: 1, ok: 2, error: 2, cancelled: 2 };
@@ -217,23 +227,33 @@ function scheduleCommit() {
   requestAnimationFrame(() => {
     rafPending = false;
     commit?.(buildSnapshot());
-    draw();
+    scheduleChartUpdate();
   });
 }
 
-function readColors(el: HTMLElement): Record<string, string> {
-  const now = Date.now();
-  if (colorCache && now - colorCache.at < 2000) return colorCache.colors;
-  const style = getComputedStyle(el);
-  const colors: Record<string, string> = {
-    border: style.getPropertyValue('--border').trim(),
-    muted: style.getPropertyValue('--muted-foreground').trim(),
-    destructive: style.getPropertyValue('--destructive').trim(),
-    foreground: style.getPropertyValue('--foreground').trim(),
-  };
-  for (const [bus, variable] of Object.entries(BUS_COLOR_VAR)) colors[bus] = style.getPropertyValue(variable).trim();
-  colorCache = { at: now, colors };
-  return colors;
+function handleFrame(frame: MonitorFrame) {
+  const gap = !frame.full && lastSeq !== 0 && frame.seq !== lastSeq + 1;
+  lastSeq = frame.seq;
+  lastFrameAt = Date.now();
+  hz = frame.hz;
+  mode = frame.mode;
+  accounts = frame.accounts;
+  lanes = toLaneViews(frame.lanes, frame.at);
+  hiddenTaskCount = frame.hiddenTaskCount;
+  if (gap) {
+    // 帧丢失：增量任务不可信，等待全量帧后再更新任务表与事件流。
+    if (subscriberId) mtprotoHub.bridge().monitorResync(subscriberId);
+  } else {
+    if (frame.full) { tasks.clear(); events = []; }
+    for (const task of frame.taskUpserts) tasks.set(task.id, task);
+    for (const id of frame.taskRemovals) tasks.delete(id);
+    if (frame.events.length) {
+      events = events.concat(frame.events);
+      if (events.length > MONITOR_MAX_EVENTS) events = events.slice(events.length - MONITOR_MAX_EVENTS);
+    }
+  }
+  pushSeries(frame.at);
+  scheduleCommit();
 }
 
 function formatRate(bytesPerSecond: number) {
@@ -242,85 +262,239 @@ function formatRate(bytesPerSecond: number) {
   return `${bytesPerSecond.toFixed(0)} B/s`;
 }
 
-/** 三段曲线：并发（按总线分色）、排队、吞吐；限流事件以竖线标记。 */
-function draw() {
-  const el = canvas;
-  if (!el || !el.isConnected) return;
-  const dpr = window.devicePixelRatio || 1;
-  const width = el.clientWidth;
-  const height = el.clientHeight;
-  if (width === 0 || height === 0) return;
-  if (el.width !== Math.round(width * dpr) || el.height !== Math.round(height * dpr)) {
-    el.width = Math.round(width * dpr);
-    el.height = Math.round(height * dpr);
+function formatConcurrency(value: number) { return String(Math.round(value)); }
+function formatRequests(value: number) { return `${Number(value.toFixed(1))}/s`; }
+function formatMetric(metric: SeriesMetric, value: number) {
+  return metric === 'concurrency' ? formatConcurrency(value) : metric === 'requests' ? formatRequests(value) : formatRate(value);
+}
+
+/** 从语义令牌读取颜色；ECharts 不允许在脚本里写死调色板。 */
+function readColors(): Record<string, string> {
+  const now = Date.now();
+  if (colorCache && now - colorCache.at < 2000) return colorCache.colors;
+  const style = getComputedStyle(document.documentElement);
+  const colors: Record<string, string> = {
+    border: style.getPropertyValue('--border').trim() || 'rgba(128,128,128,0.25)',
+    muted: style.getPropertyValue('--muted-foreground').trim() || '#888',
+  };
+  for (const bus of SERIES_BUSES) colors[bus] = style.getPropertyValue(BUS_COLOR_VAR[bus]).trim() || '#888';
+  colorCache = { at: now, colors };
+  return colors;
+}
+
+async function ensureEcharts(): Promise<typeof import('./monitorEcharts')['echarts']> {
+  if (echartsCore) return echartsCore;
+  if (!echartsLoader) {
+    echartsLoader = import('./monitorEcharts').then((module) => {
+      echartsCore = module.echarts;
+      return module.echarts;
+    });
   }
-  const ctx = el.getContext('2d');
-  if (!ctx) return;
-  const colors = readColors(el);
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, width, height);
-  ctx.font = '11px ui-sans-serif, system-ui, sans-serif';
-  ctx.textBaseline = 'top';
+  return echartsLoader;
+}
 
-  const now = series.time.size ? series.time.at(series.time.size - 1) : Date.now();
-  const start = now - SERIES_WINDOW_MS;
-  const labelW = 64;
-  const plotW = Math.max(10, width - labelW);
-  const rows = [
-    { title: '并发', rings: CHART_BUSES.map((bus) => ({ ring: series.active[bus]!, color: colors[bus]! })), format: (v: number) => String(Math.round(v)) },
-    { title: '排队', rings: [{ ring: series.queued, color: colors.muted! }], format: (v: number) => String(Math.round(v)) },
-    { title: '吞吐', rings: [{ ring: series.bytesRate, color: colors.mediaAsset! }], format: formatRate },
-  ];
-  const rowH = height / rows.length;
-  const xOf = (t: number) => labelW + ((t - start) / SERIES_WINDOW_MS) * plotW;
+function baseOption(metric: SeriesMetric, colors: Record<string, string>) {
+  return {
+    animation: false,
+    backgroundColor: 'transparent',
+    textStyle: { fontSize: 11, fontFamily: 'ui-sans-serif, system-ui, sans-serif' },
+    grid: { left: 52, right: 14, top: 34, bottom: 56 },
+    legend: {
+      type: 'scroll',
+      top: 0,
+      left: 0,
+      right: 0,
+      itemWidth: 14,
+      itemHeight: 2,
+      itemGap: 10,
+      textStyle: { fontSize: 11, color: colors.muted },
+      pageTextStyle: { color: colors.muted },
+      data: SERIES_BUSES.map((bus) => BUS_LABEL[bus]),
+    },
+    tooltip: {
+      trigger: 'axis',
+      confine: true,
+      axisPointer: { type: 'line', lineStyle: { color: colors.muted, opacity: 0.4 } },
+      valueFormatter: (value: number) => formatMetric(metric, Number(value)),
+    },
+    xAxis: {
+      type: 'time',
+      axisLine: { lineStyle: { color: colors.border } },
+      axisTick: { show: false },
+      axisLabel: { color: colors.muted, hideOverlap: true },
+      splitLine: { show: false },
+    },
+    yAxis: {
+      type: 'value',
+      minInterval: metric === 'concurrency' ? 1 : 0,
+      axisLine: { show: false },
+      axisTick: { show: false },
+      axisLabel: { color: colors.muted, formatter: (value: number) => formatMetric(metric, Number(value)) },
+      splitLine: { lineStyle: { color: colors.border, type: 'solid' } },
+    },
+    dataZoom: [
+      {
+        id: 'range', type: 'slider', height: 16, bottom: 8,
+        borderColor: 'transparent', backgroundColor: 'transparent',
+        fillerColor: 'rgba(128,128,128,0.14)',
+        dataBackground: { lineStyle: { color: colors.muted, opacity: 0.45 }, areaStyle: { color: colors.muted, opacity: 0.12 } },
+        selectedDataBackground: { lineStyle: { color: colors.search, opacity: 0.7 }, areaStyle: { color: colors.search, opacity: 0.16 } },
+        handleStyle: { color: colors.search },
+        moveHandleStyle: { color: colors.search, opacity: 0.5 },
+        textStyle: { color: colors.muted, fontSize: 10 },
+      },
+      { id: 'inside-zoom', type: 'inside' },
+    ],
+    series: SERIES_BUSES.map((bus) => ({
+      id: bus,
+      name: BUS_LABEL[bus],
+      type: 'line',
+      showSymbol: false,
+      symbol: 'none',
+      sampling: 'minmax',
+      lineStyle: { width: 1.5, color: colors[bus] },
+      itemStyle: { color: colors[bus] },
+      emphasis: { focus: 'series' },
+      data: [] as Array<[number, number]>,
+    })),
+  };
+}
 
-  rows.forEach((row, index) => {
-    const top = index * rowH + 4;
-    const plotH = rowH - 12;
-    let max = 1;
-    for (const { ring } of row.rings) for (let i = 0; i < ring.size; i += 1) {
-      if (series.time.at(i) >= start) max = Math.max(max, ring.at(i));
-    }
-    // 网格与标签
-    ctx.strokeStyle = colors.border!;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(labelW, top + plotH + 0.5);
-    ctx.lineTo(width, top + plotH + 0.5);
-    ctx.stroke();
-    ctx.fillStyle = colors.muted!;
-    ctx.fillText(row.title, 0, top);
-    ctx.fillText(row.format(max), 0, top + 14);
-    // 曲线
-    for (const { ring, color } of row.rings) {
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      let started = false;
-      for (let i = 0; i < ring.size; i += 1) {
-        const t = series.time.at(i);
-        if (t < start) continue;
-        const x = xOf(t);
-        const y = top + plotH - (ring.at(i) / max) * plotH;
-        if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
-      }
-      ctx.stroke();
-    }
+function currentWindow(store: MonitorSeriesStore): { start: number; end: number; first: number; last: number } | null {
+  const last = store.latestTime();
+  if (!last) return null;
+  const first = store.firstTime() || last;
+  if (chartState.zoom && !chartState.followLive) {
+    const start = Math.max(first, chartState.zoom.start);
+    const end = Math.min(last, chartState.zoom.end);
+    if (end > start) return { start, end, first, last };
+  }
+  return { start: Math.max(first, last - SERIES_WINDOW_MS), end: last, first, last };
+}
+
+function updateCharts() {
+  const core = echartsCore;
+  if (!core || charts.size === 0) return;
+  const store = seriesStore(false);
+  if (!store) return;
+  const window = currentWindow(store);
+  if (!window) return;
+  const colors = readColors();
+  const selected: Record<string, boolean> = {};
+  for (const bus of SERIES_BUSES) selected[BUS_LABEL[bus]] = !chartState.hiddenBuses.includes(bus);
+
+  for (const [metric, entry] of charts) {
+    if (!entry.visible) { entry.dirty = true; continue; }
+    const overview = store.buildSeries(metric, window.first, window.last, OVERVIEW_BUCKETS);
+    const detailBuckets = Math.max(120, Math.round(entry.element.clientWidth || 600) * 2);
+    const detail = store.buildSeries(metric, window.start, window.end, detailBuckets);
+    entry.chart.setOption({
+      legend: { selected },
+      dataZoom: [
+        { id: 'range', startValue: window.start, endValue: window.end },
+        { id: 'inside-zoom', startValue: window.start, endValue: window.end },
+      ],
+      series: SERIES_BUSES.map((bus) => ({
+        id: bus,
+        lineStyle: { width: 1.5, color: colors[bus] },
+        itemStyle: { color: colors[bus] },
+        data: mergeTimedPoints(overview[bus], detail[bus]),
+      })),
+    }, { lazyUpdate: true });
+    entry.dirty = false;
+  }
+}
+
+/** 每帧最多重绘一次；隐藏的图表只标记 dirty，重新可见时再补一次。 */
+function scheduleChartUpdate() {
+  if (chartFrame) return;
+  chartFrame = requestAnimationFrame(() => {
+    chartFrame = 0;
+    updateCharts();
   });
+}
 
-  // 限流标记贯穿三段
-  ctx.strokeStyle = colors.destructive!;
-  ctx.lineWidth = 1;
-  for (let i = 0; i < series.flood.size; i += 1) {
-    if (series.flood.at(i) <= 0) continue;
-    const t = series.time.at(i);
-    if (t < start) continue;
-    const x = Math.round(xOf(t)) + 0.5;
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, height);
-    ctx.stroke();
+function applyInteractionHandlers(chart: EChartsType) {
+  chart.on('legendselectchanged', (...args: unknown[]) => {
+    const params = (args[0] ?? {}) as { selected?: Record<string, boolean> };
+    const selected = params.selected ?? {};
+    const hidden = SERIES_BUSES.filter((bus) => selected[BUS_LABEL[bus]] === false);
+    chartHandlers.onLegendChange?.(hidden);
+  });
+  chart.on('datazoom', () => {
+    const option = chart.getOption() as { dataZoom?: Array<{ startValue?: number; endValue?: number }> };
+    const range = option.dataZoom?.[0];
+    const start = typeof range?.startValue === 'number' ? range.startValue : undefined;
+    const end = typeof range?.endValue === 'number' ? range.endValue : undefined;
+    if (start === undefined || end === undefined || end <= start) return;
+    chartHandlers.onZoomChange?.({ start, end });
+  });
+}
+
+/** 视图通过指令挂载 / 卸载单个指标图表；实例与 DOM 句柄都留在这里。 */
+async function attachChart(metric: SeriesMetric, element: HTMLElement | null) {
+  pendingElements.set(metric, element);
+  if (!element) { detachChart(metric); return; }
+  const existing = charts.get(metric);
+  if (existing && existing.element === element) return;
+  if (existing) detachChart(metric);
+
+  const core = await ensureEcharts();
+  // 动态 import 期间组件可能已卸载或换元素。
+  if (pendingElements.get(metric) !== element || !element.isConnected) return;
+
+  const colors = readColors();
+  const chart = core.init(element, undefined, { renderer: 'canvas', useDirtyRect: true });
+  chart.group = CHART_GROUP;
+  core.connect(CHART_GROUP);
+  chart.setOption(baseOption(metric, colors));
+  applyInteractionHandlers(chart);
+
+  const entry: ChartEntry = {
+    element,
+    chart,
+    resizeObserver: null,
+    intersectionObserver: null,
+    visible: true,
+    dirty: true,
+  };
+  if (typeof ResizeObserver !== 'undefined') {
+    const observer = new ResizeObserver(() => {
+      if (chartFrame) cancelAnimationFrame(chartFrame);
+      chartFrame = requestAnimationFrame(() => {
+        chartFrame = 0;
+        if (charts.get(metric) !== entry) return;
+        chart.resize();
+        updateCharts();
+      });
+    });
+    observer.observe(element);
+    entry.resizeObserver = observer;
   }
+  if (typeof IntersectionObserver !== 'undefined') {
+    const observer = new IntersectionObserver((records) => {
+      const visible = records.some((record) => record.isIntersecting);
+      if (visible === entry.visible) return;
+      entry.visible = visible;
+      if (visible && entry.dirty) scheduleChartUpdate();
+    });
+    observer.observe(element);
+    entry.intersectionObserver = observer;
+  }
+  charts.set(metric, entry);
+  updateCharts();
+}
+
+function detachChart(metric: SeriesMetric) {
+  const pending = pendingElements.get(metric);
+  // 仍在异步加载且元素已挂载时保留登记，由 attachChart 的过期检查自行收尾。
+  if (!pending || !pending.isConnected) pendingElements.delete(metric);
+  const entry = charts.get(metric);
+  if (!entry) return;
+  charts.delete(metric);
+  entry.resizeObserver?.disconnect();
+  entry.intersectionObserver?.disconnect();
+  entry.chart.dispose();
 }
 
 function subscribe() {
@@ -341,9 +515,10 @@ function onVisibilityChange() {
 }
 
 export const telegramMonitorDataSource = {
-  /** 开始订阅：同一时间只有一个订阅；重复调用只更新提交回调。 */
-  start(rate: number, onCommit: (snapshot: MonitorSnapshot) => void) {
+  /** 开始订阅：同一时间只有一个订阅；重复调用只更新提交回调与交互处理函数。 */
+  start(rate: number, onCommit: (snapshot: MonitorSnapshot) => void, handlers?: MonitorChartHandlers) {
     commit = onCommit;
+    if (handlers) chartHandlers = handlers;
     hz = rate;
     if (subscriberId) return;
     subscriberId = crypto.randomUUID();
@@ -378,34 +553,42 @@ export const telegramMonitorDataSource = {
     subscribe();
   },
 
-  /** 曲线跟随的账号；切换后清空曲线，避免混入其他账号数据。 */
+  /** 曲线跟随的账号；各账号的序列彼此隔离，切换后不会混入其他账号数据。 */
   setFocusAccount(accountId: string | null) {
     if (focusAccountId === accountId) return;
     focusAccountId = accountId;
-    clearSeries();
-    draw();
+    updateCharts();
   },
 
-  attachCanvas(el: HTMLCanvasElement | null) {
-    resizeObserver?.disconnect();
-    resizeObserver = null;
-    canvas = el;
-    colorCache = null;
-    if (!el) return;
-    if (typeof ResizeObserver !== 'undefined') {
-      resizeObserver = new ResizeObserver(() => requestAnimationFrame(draw));
-      resizeObserver.observe(el);
-    }
-    draw();
+  /** 曲线显隐 / 是否跟随实时 / 固定区间选择。隐藏的曲线照常采样，只是不参与绘制。 */
+  setChartState(next: Partial<MonitorChartState>) {
+    chartState = { ...chartState, ...next };
+    updateCharts();
   },
 
-  /** 用户主动清空：任务、事件、曲线与速率基线。 */
+  setChartHandlers(handlers: MonitorChartHandlers) {
+    chartHandlers = handlers;
+  },
+
+  attachChart,
+
+  detachChart,
+
+  /** 内存占用估算（全部账号的序列合计）。 */
+  estimateMemoryBytes() {
+    let total = 0;
+    for (const store of seriesStores.values()) total += store.estimateBytes();
+    return total;
+  },
+
+  /** 用户主动清空：任务、事件与当前账号曲线。 */
   reset() {
     tasks.clear();
     events = [];
     previousTotals.clear();
-    clearSeries();
+    seriesStore()?.clear();
     scheduleCommit();
+    updateCharts();
   },
 
   formatRate,

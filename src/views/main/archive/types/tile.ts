@@ -8,18 +8,8 @@ export type TileSize = 'small' | 'medium' | 'wide' | 'large';
 
 export type TileItemType = 'file' | 'folder';
 
-export type FileCategory =
-  | 'pdf'
-  | 'doc'
-  | 'code'
-  | 'image'
-  | 'archive'
-  | 'audio'
-  | 'video'
-  | 'text'
-  | 'data'
-  | 'exec'
-  | 'generic';
+import type { FileCategory } from '@/worker/local/archive/searchContracts';
+export type { FileCategory } from '@/worker/local/archive/searchContracts';
 
 /** 缩略图生命周期状态 */
 export type TileThumbStatus = 'ready' | 'pending' | 'failed' | 'none';

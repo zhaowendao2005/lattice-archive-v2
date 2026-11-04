@@ -117,4 +117,23 @@ onUnmounted(() => {
 :deep(.search-modal-scroll::-webkit-scrollbar-thumb) {
   background: rgba(255, 255, 255, 0.18);
 }
+
+/* 卡片内文字溢出时的竖向滚动：比列表滚动条更细，但保持可见 */
+:deep(.search-row-scroll) {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.3) transparent;
+}
+
+:deep(.search-row-scroll::-webkit-scrollbar) {
+  width: 3px;
+}
+
+:deep(.search-row-scroll::-webkit-scrollbar-track) {
+  background: transparent;
+}
+
+:deep(.search-row-scroll::-webkit-scrollbar-thumb) {
+  background: rgba(255, 255, 255, 0.3);
+  border-radius: 2px;
+}
 </style>

@@ -101,8 +101,8 @@ export interface ScheduleOptions {
   traceId?: string;
 }
 
-/** 总线请求上下文中传给调度器的部分（优先级与 traceId 来自上游 TelegramBusContext）。 */
-export type BusTaskOptions = Pick<ScheduleOptions, 'priority' | 'traceId'>;
+/** 总线请求上下文中传给调度器的部分（优先级、traceId 与取消信号来自上游 TelegramBusContext）。 */
+export type BusTaskOptions = Pick<ScheduleOptions, 'priority' | 'traceId' | 'signal'>;
 
 /** 传给任务函数的句柄：上报字节与进度，供监控面板计算吞吐。 */
 export interface TaskHandle {
