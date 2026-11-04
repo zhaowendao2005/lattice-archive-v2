@@ -8,7 +8,10 @@ import { storageQuotaEvictor } from '@/stores/archive/data-sources/storageQuotaE
 import { telegramBusClient } from '@/stores/telegram/data-sources/telegramBusClient';
 import { coverSizeOf, videoPreviewOf } from '@/stores/chat/stores/chatModel';
 import { useChatStore } from '@/stores/chat/stores/chatStore';
+import { useChatMediaStore } from '@/stores/chat/stores/chatMediaStore';
+import { mediaTarget } from '@/stores/chat/stores/chatModel';
 import { classifyTelegramError } from '@/worker/local/chat/telegramErrors';
+import { attachCanonicalResource, materializeResourceMirrors, migrateExploreManifestV2ToV3, stripResourceMirrors } from '../utils/resourceManifest';
 import type { TgMediaFile, TgPeerKey, TgPeerRef } from '@/stores/chat/types';
 import type {
   AggregateSearchResultItem,
@@ -843,6 +846,7 @@ export const useTileStore = defineStore('tileBoard', () => {
   const groups = ref<TileGroupData[]>([]);
   const tiles = ref<TileData[]>([]);
   const tombstones = ref<Record<string, number>>({});
+  const resources = ref<NonNullable<ExploreManifestV2['resources']>>({});
   const tempCredentials = ref<TempSessionCredential[]>([]);
   const vaultConfig = ref<SharedVaultGroupConfig>({
     enabled: false,
@@ -1056,15 +1060,10 @@ export const useTileStore = defineStore('tileBoard', () => {
     return stack;
   }
 
-  /**
-   * 收集所有存活磁贴的 ID 集合（用于孤儿缩略图 GC）
-   */
-  function collectAllTileIds(list: TileData[] = tiles.value, out = new Set<string>()): Set<string> {
+  function collectAllResourceIds(list: TileData[] = tiles.value, out = new Set<string>()): Set<string> {
     for (const item of list) {
-      out.add(item.id);
-      if (item.type === 'folder') {
-        collectAllTileIds(item.children, out);
-      }
+      if (item.type === 'folder') collectAllResourceIds(item.children, out);
+      else if (item.resourceId) out.add(item.resourceId);
     }
     return out;
   }
@@ -1121,17 +1120,18 @@ export const useTileStore = defineStore('tileBoard', () => {
    * 构造当前 Explore VFS 完整 Manifest 快照（深拷贝为纯 JSON，剥离响应式 Proxy 与临时 blob: URL）
    */
   function buildExploreManifest(): ExploreManifestV2 {
-    return {
-      schemaVersion: 2,
+    return stripResourceMirrors({
+      schemaVersion: 3,
       revision: revision.value,
       updatedAtMs: updatedAtMs.value,
       deviceId: opfsExploreStorage.getOrCreateDeviceId(),
       groups: JSON.parse(JSON.stringify(groups.value)),
       tiles: stripTransientBlobUrls(tiles.value),
+      resources: JSON.parse(JSON.stringify(resources.value)),
       tombstones: JSON.parse(JSON.stringify(tombstones.value)),
       tempCredentials: JSON.parse(JSON.stringify(tempCredentials.value)),
       vaultConfig: JSON.parse(JSON.stringify(vaultConfig.value)),
-    };
+    });
   }
 
   /**
@@ -1141,9 +1141,11 @@ export const useTileStore = defineStore('tileBoard', () => {
     groups.value = manifest.groups && manifest.groups.length > 0
       ? JSON.parse(JSON.stringify(manifest.groups))
       : getDefaultGroups();
-    tiles.value = Array.isArray(manifest.tiles)
-      ? stripTransientBlobUrls(manifest.tiles)
+    const migrated = materializeResourceMirrors(migrateExploreManifestV2ToV3(manifest));
+    tiles.value = Array.isArray(migrated.tiles)
+      ? stripTransientBlobUrls(migrated.tiles)
       : [];
+    resources.value = migrated.resources ?? {};
     tombstones.value = manifest.tombstones ? { ...manifest.tombstones } : {};
     tempCredentials.value = Array.isArray(manifest.tempCredentials)
       ? JSON.parse(JSON.stringify(manifest.tempCredentials))
@@ -1168,10 +1170,17 @@ export const useTileStore = defineStore('tileBoard', () => {
   async function hydrateAllThumbnails(list: TileData[] = tiles.value): Promise<void> {
     for (const item of list) {
       if (item.thumb?.opfsPath && item.thumb.status === 'ready') {
-        const url = await opfsExploreStorage.readThumbnailObjectUrl(item.id);
-        if (url) {
-          item.thumb.objectUrl = url;
+        const resourceId = item.type === 'file' ? item.resourceId : undefined;
+        let url = await opfsExploreStorage.readThumbnailObjectUrl(resourceId ?? item.id);
+        if (!url && resourceId) {
+          const legacyBytes = await opfsExploreStorage.readThumbnailBytes(item.id);
+          if (legacyBytes) {
+            const migrated = await opfsExploreStorage.writeThumbnail(resourceId, legacyBytes);
+            url = migrated.objectUrl;
+            item.thumb = { ...item.thumb, opfsPath: migrated.opfsPath };
+          }
         }
+        if (url) item.thumb.objectUrl = url;
       }
       if (item.type === 'folder') {
         await hydrateAllThumbnails(item.children);
@@ -1182,6 +1191,18 @@ export const useTileStore = defineStore('tileBoard', () => {
   /**
    * 保存并写入磁贴高清缩略图至 OPFS `/thumbs/{tileId}.webp`
    */
+  function findTilesByResourceId(resourceId: string): FileTileData[] {
+    const found: FileTileData[] = [];
+    const walk = (list: TileData[]) => {
+      for (const item of list) {
+        if (item.type === 'folder') walk(item.children);
+        else if (item.resourceId === resourceId) found.push(item);
+      }
+    };
+    walk(tiles.value);
+    return found;
+  }
+
   async function saveTileThumbnail(
     tileId: string,
     bytes: Uint8Array,
@@ -1192,15 +1213,23 @@ export const useTileStore = defineStore('tileBoard', () => {
       logCover('tile_thumb_persist_error', 'WARN', { tileId, reason: 'TILE_NOT_FOUND' }, '磁贴不存在，缩略图未落盘');
       return;
     }
+    const resourceId = tile.type === 'file' ? tile.resourceId ?? tileId : tileId;
     try {
-      const { opfsPath, objectUrl } = await opfsExploreStorage.writeThumbnail(tileId, bytes);
-      tile.thumb = {
+      const { opfsPath, objectUrl } = await opfsExploreStorage.writeThumbnail(resourceId, bytes);
+      const thumb = {
         ...(tile.thumb ?? { retryCount: 0 }),
-        status: 'ready',
+        status: 'ready' as const,
         opfsPath,
         objectUrl,
         strippedDataUrl: strippedDataUrl ?? tile.thumb?.strippedDataUrl,
       };
+      tile.thumb = thumb;
+      for (const instance of findTilesByResourceId(resourceId)) instance.thumb = { ...thumb };
+      const resource = resources.value[resourceId];
+      if (resource) {
+        resource.thumb = { status: 'ready', strippedDataUrl: thumb.strippedDataUrl, retryCount: thumb.retryCount };
+        resource.updatedAtMs = Date.now();
+      }
       saveState();
     } catch (error) {
       const info = classifyTelegramError(error);
@@ -1284,8 +1313,10 @@ export const useTileStore = defineStore('tileBoard', () => {
       if (stored) {
         const parsed = JSON.parse(stored);
         if (parsed.groups && Array.isArray(parsed.tiles)) {
-          groups.value = parsed.groups;
-          tiles.value = parsed.tiles;
+          const migrated = materializeResourceMirrors(migrateExploreManifestV2ToV3(parsed as ExploreManifestV2));
+          groups.value = migrated.groups;
+          tiles.value = migrated.tiles;
+          resources.value = migrated.resources ?? {};
           if (parsed.tombstones) tombstones.value = parsed.tombstones;
           if (parsed.tempCredentials) tempCredentials.value = parsed.tempCredentials;
           if (parsed.vaultConfig) vaultConfig.value = parsed.vaultConfig;
@@ -1295,6 +1326,7 @@ export const useTileStore = defineStore('tileBoard', () => {
           normalizeGroupOrders();
           ensureSystemTiles();
           void hydrateAllThumbnails();
+          if ((parsed.schemaVersion ?? 2) < 3) saveState(false);
         }
       } else {
         // 首次启动：根据硬环境隔离策略初始化
@@ -1326,11 +1358,21 @@ export const useTileStore = defineStore('tileBoard', () => {
       } else {
         await opfsExploreStorage.writeManifest(buildExploreManifest());
       }
-      await storageQuotaEvictor.runMaintenanceAndEviction(collectAllTileIds());
+      await storageQuotaEvictor.runMaintenanceAndEviction(collectAllResourceIds());
     })();
   }
 
+  function pruneOrphanResources() {
+    const referenced = collectAllResourceIds();
+    for (const id of Object.keys(resources.value)) {
+      if (referenced.has(id)) continue;
+      tombstones.value[`resource:${id}`] = Math.max(tombstones.value[`resource:${id}`] ?? 0, Date.now());
+      delete resources.value[id];
+    }
+  }
+
   function saveState(bumpRevision = true) {
+    pruneOrphanResources();
     if (bumpRevision) {
       revision.value += 1;
       updatedAtMs.value = Date.now();
@@ -1342,8 +1384,10 @@ export const useTileStore = defineStore('tileBoard', () => {
         localStorage.setItem(
           STORAGE_KEY,
           JSON.stringify({
+            schemaVersion: 3,
             groups: groups.value,
-            tiles: tiles.value,
+            tiles: buildExploreManifest().tiles,
+            resources: resources.value,
             tombstones: tombstones.value,
             tempCredentials: tempCredentials.value,
             vaultConfig: vaultConfig.value,
@@ -1383,6 +1427,7 @@ export const useTileStore = defineStore('tileBoard', () => {
     groups.value = getDefaultGroups();
     tiles.value = isMockDev ? getDefaultTiles() : [];
     tombstones.value = {};
+    resources.value = {};
     ensureSystemTiles();
     saveState();
   }
@@ -1392,7 +1437,7 @@ export const useTileStore = defineStore('tileBoard', () => {
    */
   async function exportColdArchive(): Promise<void> {
     const manifest = buildExploreManifest();
-    const allIds = Array.from(collectAllTileIds());
+    const allIds = Array.from(collectAllResourceIds());
     const blob = await opfsExploreStorage.exportColdBackupArchive(manifest, allIds);
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -1493,6 +1538,43 @@ export const useTileStore = defineStore('tileBoard', () => {
     file.size = 'medium';
     file.customSpan = undefined;
     pendingFolderChildDrag.value = { file, folder, clientX, clientY };
+  }
+
+  async function openTelegramMedia(tile: FileTileData): Promise<boolean> {
+    const source = tile.sources?.[0] ?? resources.value[tile.resourceId ?? '']?.sources?.[0];
+    const resource = resources.value[tile.resourceId ?? ''];
+    const sourceRef = tile.thumb?.sourceRef;
+    const peerKey = (tile.peerKey ?? source?.peerKey ?? resource?.peerKey ?? (sourceRef ? `${sourceRef.peerType ?? 'channel'}-${sourceRef.peerId}` : undefined)) as TgPeerKey | undefined;
+    const messageId = source?.msgId ?? resource?.messageId ?? sourceRef?.msgId;
+    const accountId = tile.accountId ?? source?.accountId ?? resource?.accountId ?? sourceRef?.accountId;
+    if (!peerKey || !messageId || !accountId) {
+      openFile(tile);
+      return false;
+    }
+    try {
+      const chatStore = useChatStore();
+      await chatStore.openSessionFromTile({
+        peerKey,
+        peerType: tile.peerType ?? source?.peerType ?? resource?.peerType ?? sourceRef?.peerType,
+        accessHash: tile.accessHash ?? source?.accessHash ?? resource?.accessHash ?? sourceRef?.accessHash,
+        title: tile.sessionTitle || tile.title,
+        username: tile.username ?? resource?.username,
+        inviteHash: tile.inviteHash ?? resource?.inviteHash,
+        accountId,
+        messageId,
+      });
+      const message = chatStore.windows[peerKey]?.messages.find((item) => item.id === messageId);
+      if (!message?.media) {
+        openFile(tile);
+        return false;
+      }
+      useChatMediaStore().openViewer(mediaTarget(peerKey, messageId), true);
+      return true;
+    } catch (error) {
+      logCover('tile_media_open_error', 'WARN', { tileId: tile.id, resourceId: tile.resourceId }, error instanceof Error ? error.message : '媒体打开失败');
+      openFile(tile);
+      return false;
+    }
   }
 
   function openFile(file: FileTileData) {
@@ -2116,6 +2198,8 @@ export const useTileStore = defineStore('tileBoard', () => {
       updatedAt: today,
     };
 
+    if (newFile.fileType !== 'exec' && !newFile.systemApp) attachCanonicalResource(newFile, resources.value);
+
     if (targetFolderId) {
       const folder = getTileById(targetFolderId);
       if (folder && folder.type === 'folder') {
@@ -2210,7 +2294,7 @@ export const useTileStore = defineStore('tileBoard', () => {
       y: number,
       parentId?: string,
     ): FileTileData => {
-      const tileId = `${parentId ? 'sub' : 'tile'}-sr-${item.id}-${Date.now()}-${importedCount}`;
+      const tileId = `tile-sr-${crypto.randomUUID()}`;
       return {
         id: tileId,
         type: 'file',
@@ -2245,13 +2329,16 @@ export const useTileStore = defineStore('tileBoard', () => {
         videoInfo: item.videoInfo,
         fileInfo: item.fileInfo,
         sessionCredentialState:
-          item.category === 'session'
+          item.credentialState ?? (item.category === 'session'
             ? item.sessionKind === 'joined'
               ? 'joined'
               : 'temp_ephemeral'
-            : undefined,
-        thumb:
-          item.thumbnailUrl || item.peerRef
+            : undefined),
+        inviteHash: item.inviteHash,
+        peekExpiresAt: item.peekExpiresAt,
+        lastVerifiedAt: item.lastVerifiedAt,
+        autoRenew: item.autoRenew,
+        thumb: item.thumbnailUrl || item.peerRef
             ? {
                 // Telegram 来源的磁贴统一置为 pending，交给导入后的自动补图链路升级高清；
                 // 只有非 Telegram（无 peerRef）的演示数据才能直接视为 ready。
@@ -2300,13 +2387,9 @@ export const useTileStore = defineStore('tileBoard', () => {
       if (!group) return 0;
 
       for (const item of items) {
-        const alreadyInGroup = tiles.value.some(
-          (t) => t.groupId === group.id && t.type === 'file' && t.sourceResultId === item.id,
-        );
-        if (alreadyInGroup) continue;
-
         const slot = findNearestFreeSlot(group.id, { w: 2, h: 2 }, 0);
         const newFile = createTileFromSearchResult(item, group.id, 'medium', slot.x, slot.y);
+        attachCanonicalResource(newFile, resources.value);
         tiles.value.push(newFile);
         createdTiles.push(newFile);
         importedCount++;
@@ -2316,9 +2399,6 @@ export const useTileStore = defineStore('tileBoard', () => {
       if (!folder || folder.type !== 'folder') return 0;
 
       for (const item of items) {
-        const alreadyInFolder = folder.children.some((c) => c.sourceResultId === item.id);
-        if (alreadyInFolder) continue;
-
         const newChild = createTileFromSearchResult(
           item,
           folder.groupId,
@@ -2327,6 +2407,7 @@ export const useTileStore = defineStore('tileBoard', () => {
           0,
           folder.id,
         );
+        attachCanonicalResource(newChild, resources.value);
         folder.children.push(newChild);
         createdTiles.push(newChild);
         importedCount++;
@@ -2946,6 +3027,13 @@ export const useTileStore = defineStore('tileBoard', () => {
           tile.photoInfo = photoInfo;
           tile.videoInfo = videoInfo;
           tile.fileInfo = fileInfo;
+          const resource = resources.value[tile.resourceId ?? ''];
+          if (resource) {
+            resource.photoInfo = photoInfo;
+            resource.videoInfo = videoInfo;
+            resource.fileInfo = fileInfo;
+            resource.updatedAtMs = Date.now();
+          }
         }
         logCover(
           'tile_cover_history_refresh',
@@ -3062,9 +3150,12 @@ export const useTileStore = defineStore('tileBoard', () => {
   function scheduleTileCoverRefresh(rawTileIds: string[], reason: string): void {
     const ids = Array.from(new Set(rawTileIds));
     const targets: FileTileData[] = [];
+    const seenResources = new Set<string>();
     for (const id of ids) {
       const tile = getTileById(id);
       if (!tile || tile.type !== 'file') continue;
+      const resourceKey = tile.resourceId ?? tile.id;
+      if (seenResources.has(resourceKey)) continue;
       if (
         !tile.peerKey &&
         !tile.sessionId &&
@@ -3079,6 +3170,7 @@ export const useTileStore = defineStore('tileBoard', () => {
         continue;
       }
       targets.push(tile);
+      seenResources.add(resourceKey);
     }
     if (targets.length === 0) return;
 
@@ -3143,6 +3235,19 @@ export const useTileStore = defineStore('tileBoard', () => {
     });
   }
 
+  function findSessionTileIds(peerKeys: string[]): string[] {
+    const keys = new Set(peerKeys);
+    const ids: string[] = [];
+    const walk = (list: TileData[]) => {
+      for (const item of list) {
+        if (item.type === 'folder') walk(item.children);
+        else if ((item.isSessionLink || item.sessionCredentialState) && keys.has(item.peerKey || item.sessionId || '')) ids.push(item.id);
+      }
+    };
+    walk(tiles.value);
+    return ids;
+  }
+
   /**
    * 批量刷新指定磁贴（或文件夹内全部子磁贴）的封面缩略图
    */
@@ -3159,10 +3264,15 @@ export const useTileStore = defineStore('tileBoard', () => {
     if (rawIds.length === 0 || isRefreshingTileCovers.value) return 0;
 
     const targetFiles: FileTileData[] = [];
+    const seenResources = new Set<string>();
     const collectFiles = (item: TileData) => {
       if (item.systemApp || item.undeletable) return;
       if (item.type === 'file') {
-        targetFiles.push(item);
+        const resourceKey = item.resourceId ?? item.id;
+        if (!seenResources.has(resourceKey)) {
+          seenResources.add(resourceKey);
+          targetFiles.push(item);
+        }
       } else if (item.type === 'folder') {
         item.children.forEach(collectFiles);
       }
@@ -3310,6 +3420,7 @@ export const useTileStore = defineStore('tileBoard', () => {
     groups,
     tiles,
     tombstones,
+    resources,
     tempCredentials,
     vaultConfig,
     revision,
@@ -3362,6 +3473,7 @@ export const useTileStore = defineStore('tileBoard', () => {
     findParentFolderOfTile,
     isDescendantOfFolder,
     openFile,
+    openTelegramMedia,
     closeFile,
     openFolder,
     navigateToBreadcrumbFolder,
@@ -3407,6 +3519,7 @@ export const useTileStore = defineStore('tileBoard', () => {
     clearFolderSelectedTiles,
     applyUpdatedSearchResultThumb,
     refreshTileCoversByIds,
+    findSessionTileIds,
     reloadMissingOrFailedTileCovers,
     scheduleTileCoverRefresh,
     addNewFile,

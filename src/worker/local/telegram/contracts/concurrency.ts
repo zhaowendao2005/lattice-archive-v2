@@ -5,7 +5,8 @@
  * 纯数据与纯函数：local Worker 的 RequestScheduler 与主线程设置页共用同一份定义，
  * 保证「设置页看到的数字」与「调度器实际使用的上限」来源唯一。
  *
- * 注意：这些数值是工程压测起点与本地客户端保护上限，不是 Telegram 官方额度。
+ * 注意：预设数值是工程压测起点，不是 Telegram 官方额度。自定义模式没有固定数值上限，
+ * 只有最小值与层级依赖约束（见 TELEGRAM_CONCURRENCY_MINIMUMS / TELEGRAM_CONCURRENCY_PARENT）。
  * 运行时调度器可以在 FloodWait / 超时后临时降速，但不得突破用户配置值。
  *
  * 预设约束：组预算 ≥ 其任一子池（媒体组 ≥ 封面 + 头像，保证封面跑满时头像不被饿死），
@@ -109,23 +110,26 @@ export const TELEGRAM_CONCURRENCY_PRESETS: Record<Exclude<TelegramConcurrencyMod
   },
 };
 
-/** 本地保护范围：防止误配置造成任务爆发、内存暴涨或持续 FloodWait。 */
-export const TELEGRAM_CONCURRENCY_BOUNDS: Record<TelegramConcurrencyKey, { min: number; max: number }> = {
-  nonMediaRpc: { min: 1, max: 16 },
-  mediaRpc: { min: 1, max: 32 },
-  totalActiveTasks: { min: 2, max: 48 },
-  search: { min: 1, max: 12 },
-  chatRead: { min: 1, max: 8 },
-  chatCommand: { min: 1, max: 4 },
-  bot: { min: 1, max: 2 },
-  vault: { min: 1, max: 4 },
-  account: { min: 1, max: 2 },
-  cover: { min: 1, max: 32 },
-  searchCoverReserved: { min: 0, max: 16 },
-  avatar: { min: 1, max: 12 },
-  fullMedia: { min: 1, max: 12 },
-  mediaPart: { min: 1, max: 16 },
-  streamPart: { min: 1, max: 12 },
+/**
+ * 各字段最小值：0 并发会让队列永久卡死（保留槽位例外，0 表示不保留）。
+ * 不设数值上限；唯一的上界来自下方 TELEGRAM_CONCURRENCY_PARENT 的层级依赖。
+ */
+export const TELEGRAM_CONCURRENCY_MINIMUMS: Record<TelegramConcurrencyKey, number> = {
+  nonMediaRpc: 1,
+  mediaRpc: 1,
+  totalActiveTasks: 2,
+  search: 1,
+  chatRead: 1,
+  chatCommand: 1,
+  bot: 1,
+  vault: 1,
+  account: 1,
+  cover: 1,
+  searchCoverReserved: 0,
+  avatar: 1,
+  fullMedia: 1,
+  mediaPart: 1,
+  streamPart: 1,
 };
 
 export const DEFAULT_TELEGRAM_CONCURRENCY: TelegramConcurrencyConfig = {
@@ -139,11 +143,23 @@ export const NON_MEDIA_SUB_POOLS = ['search', 'chatRead', 'chatCommand', 'bot', 
 /** 计入媒体 RPC 组预算的子池。 */
 export const MEDIA_SUB_POOLS = ['cover', 'avatar', 'mediaPart', 'streamPart'] as const satisfies readonly TelegramConcurrencyKey[];
 
-export const TELEGRAM_CONCURRENCY_KEYS = Object.keys(TELEGRAM_CONCURRENCY_BOUNDS) as TelegramConcurrencyKey[];
+/**
+ * 层级依赖：子字段的值不得超过其上级字段（校验与归一化共用，唯一定义）。
+ * - 非媒体子池 ≤ nonMediaRpc；媒体子池 ≤ mediaRpc；searchCoverReserved ≤ cover；
+ * - 另有 totalActiveTasks ≥ max(nonMediaRpc, mediaRpc)（见 normalizeTelegramConcurrency）；
+ * - fullMedia 无上级：它是同时下载的文件数，其分片由 mediaPart 共享限流。
+ */
+export const TELEGRAM_CONCURRENCY_PARENT: Partial<Record<TelegramConcurrencyKey, TelegramConcurrencyKey>> = {
+  ...Object.fromEntries(NON_MEDIA_SUB_POOLS.map((key) => [key, 'nonMediaRpc'])),
+  ...Object.fromEntries(MEDIA_SUB_POOLS.map((key) => [key, 'mediaRpc'])),
+  searchCoverReserved: 'cover',
+};
 
-function clampInt(value: unknown, min: number, max: number, fallback: number): number {
+export const TELEGRAM_CONCURRENCY_KEYS = Object.keys(TELEGRAM_CONCURRENCY_MINIMUMS) as TelegramConcurrencyKey[];
+
+function clampMin(value: unknown, min: number, fallback: number): number {
   const num = typeof value === 'number' && Number.isFinite(value) ? Math.round(value) : fallback;
-  return Math.min(max, Math.max(min, num));
+  return Math.max(min, num);
 }
 
 function isMode(value: unknown): value is TelegramConcurrencyMode {
@@ -153,7 +169,7 @@ function isMode(value: unknown): value is TelegramConcurrencyMode {
 /**
  * 归一化任意来源（持久化 JSON / 跨线程消息）的配置：
  * - 非 custom 模式一律取预设，忽略残留的自定义数值；
- * - custom 模式逐项夹到保护范围内，并修正跨项约束（保留槽位 ≤ 封面池、子池 ≤ 组预算 ≤ 总预算）。
+ * - custom 模式逐项只夹下限（无数值上限），并按层级依赖修正跨项约束（保留槽位 ≤ 封面池、子池 ≤ 组预算 ≤ 总预算）。
  */
 export function normalizeTelegramConcurrency(input: unknown): TelegramConcurrencyConfig {
   const raw = (input && typeof input === 'object' ? input : {}) as { mode?: unknown; limits?: Record<string, unknown> };
@@ -164,10 +180,9 @@ export function normalizeTelegramConcurrency(input: unknown): TelegramConcurrenc
   const fallback = TELEGRAM_CONCURRENCY_PRESETS.balanced;
   const limits = {} as TelegramConcurrencyLimits;
   for (const key of TELEGRAM_CONCURRENCY_KEYS) {
-    const { min, max } = TELEGRAM_CONCURRENCY_BOUNDS[key];
-    limits[key] = clampInt(source[key], min, max, fallback[key]);
+    limits[key] = clampMin(source[key], TELEGRAM_CONCURRENCY_MINIMUMS[key], fallback[key]);
   }
-  // 子池不得超过所属组预算，否则配置值永远达不到、设置页显示会误导用户。
+  // 子项不得超过其上级，否则配置值永远达不到、设置页显示会误导用户。先压 cover（媒体子池），再压其下级保留槽位。
   for (const key of NON_MEDIA_SUB_POOLS) limits[key] = Math.min(limits[key], limits.nonMediaRpc);
   for (const key of MEDIA_SUB_POOLS) limits[key] = Math.min(limits[key], limits.mediaRpc);
   limits.searchCoverReserved = Math.min(limits.searchCoverReserved, limits.cover);

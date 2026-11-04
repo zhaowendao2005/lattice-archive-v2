@@ -10,6 +10,8 @@ import type {
   SessionCredentialState,
   TileData,
   TileGroupData,
+  TileMediaSource,
+  TileThumbMeta,
 } from '@/views/main/archive/types/tile';
 import type {
   TgFileInfo,
@@ -159,6 +161,12 @@ export interface AggregateSearchResultItem {
   hdThumbAttempted?: boolean;
   /** 最近一次高清缩略图失败的分桶代码（如 NO_MEDIA / REF_EXPIRED） */
   hdThumbError?: string;
+  /** 拖入磁贴的会话凭据专属补充引用。 */
+  inviteHash?: string;
+  credentialState?: 'joined' | 'temp_ephemeral' | 'temp_auto_renew';
+  peekExpiresAt?: number;
+  lastVerifiedAt?: number;
+  autoRenew?: boolean;
   /** 产出该结果的 Telegram 账号 ID */
   originAccountId?: string;
   /** 产出该结果的 Peer 引用 */
@@ -186,6 +194,11 @@ export interface StreamingSearchQuery {
   keyword: string;
   /** 搜索前选中的文件类型集合（为空表示不限文件类型） */
   preCategories: SearchPreFilterCategory[];
+  /** 搜索前文件扩展名筛选；逗号、空格或换行分隔，空值表示不限。 */
+  preExtensions?: string[];
+  /** 搜索前文件大小边界（字节）；仅对有可靠大小元数据的媒体生效。 */
+  minSizeBytes?: number;
+  maxSizeBytes?: number;
   /** 右栏选中的会话范围 ID 集合（为空表示检索全部会话范围） */
   scopeSessionIds: string[];
   /** 搜索前下推过滤：时间跨度档位 */
@@ -212,6 +225,17 @@ export interface StreamingSearchChunk {
   isFinalChunkOfPage: boolean;
   /** 标识该分块来自哪个检索层级：Tier 0(本地索引) / Tier 1(服务端全局) / Tier 2(定向会话) */
   sourceTier?: 0 | 1 | 2;
+  peerProgress?: SearchPeerProgress;
+}
+
+export interface SearchPeerProgress {
+  accountId: string;
+  peerKey: string;
+  status: 'queued' | 'searching' | 'completed' | 'error';
+  pages: number;
+  checked: number;
+  matched: number;
+  errorCode?: string;
 }
 
 /** 中栏搜索结果向左栏文件树（磁贴拓扑）拖拽的实时状态 */
@@ -269,14 +293,45 @@ export interface OpfsFileEntryMeta {
   tileId?: string;
 }
 
-/** Explore 根清单文件 (/explore-manifest.v2.json) 数据结构 */
+export interface ExploreResource {
+  id: string;
+  identityKey: string;
+  kind: 'telegram-message' | 'telegram-session' | 'local-file' | 'note' | 'legacy';
+  accountId?: string;
+  peerKey?: string;
+  peerType?: 'user' | 'chat' | 'channel';
+  accessHash?: string;
+  username?: string;
+  inviteHash?: string;
+  sessionCredentialState?: SessionCredentialState;
+  peekExpiresAt?: number;
+  lastVerifiedAt?: number;
+  autoRenew?: boolean;
+  participantsCount?: number;
+  messageId?: number;
+  mediaId?: string;
+  fileType?: string;
+  title: string;
+  description?: string;
+  photoInfo?: TgPhotoInfo;
+  videoInfo?: TgVideoInfo;
+  fileInfo?: TgFileInfo;
+  sources?: TileMediaSource[];
+  thumb?: Omit<TileThumbMeta, 'objectUrl'>;
+  createdAtMs: number;
+  updatedAtMs: number;
+  deletedAtMs?: number;
+}
+
+/** Explore 根清单文件 (/explore-manifest.v3.json) 数据结构 */
 export interface ExploreManifestV2 {
-  schemaVersion: 2;
+  schemaVersion: 3;
   revision: number;
   updatedAtMs: number;
   deviceId: string;
   groups: TileGroupData[];
   tiles: TileData[];
+  resources?: Record<string, ExploreResource>;
   tombstones: Record<string, number>;
   tempCredentials: TempSessionCredential[];
   vaultConfig?: SharedVaultGroupConfig;

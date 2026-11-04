@@ -23,6 +23,7 @@ Lattice Archive v2：Vue 3 + TypeScript + Vite + Pinia + Tailwind CSS v4 的归�
 | `pnpm build` | 架构检查 + 前端 + Worker 全量类型检查并构建到 `dist/` |
 | `pnpm arch:check` | 架构边界检查（GramJS 边界、视图零 ref、禁止硬编码并发等，见 `scripts/check-architecture.mjs`） |
 | `pnpm test:scheduler` | Telegram RequestScheduler 行为测试 |
+| `pnpm test:bus` | 业务总线契约 / 路由 / Client / 监控映射一致性测试 |
 | `pnpm worker:types` | 由 Wrangler 生成 `Env` 绑定类型（**禁止手写 Env**） |
 | `pnpm worker:migrate:local` | 本地 D1 迁移 |
 | `pnpm deploy` | 一键部署：自动构建 → 按 `deploy.config.json` 的 `d1Mode` 处理远端 D1 → 部署 Worker |
@@ -64,7 +65,8 @@ deploy.config.json  # 当前 D1 部署模式与库名
    - 严禁跨 Store 复制状态再手动同步；视图不得直接 `fetch`；接通远端后必须删除 `DEFAULT_USER` 等 Mock 兜底。
 3. **视觉令牌**：只用 `bg-card`、`text-foreground`、`border-border`、`text-destructive` 等语义类，禁止调色板色值与十六进制。
 4. **主按钮不置灰**：不使用 `disabled` 表达可提交性；提交时校验、聚焦缺失项、展示中文错误。
-5. **远端安全**：
+5. **Telegram 总线与并发**：Telegram 数据只能经 `TelegramBusClient → BusRouter → 9 条业务总线 → RequestScheduler`；GramJS/RPC 不得越界；并发唯一来源为 `src/worker/local/telegram/contracts/concurrency.ts`，禁止硬编码或自建池，详见 `.rules/telegram-bus-and-concurrency.md`。
+6. **远端安全**：
    - Turnstile 服务端校验 `success` + `action` + `hostname`，任何异常 fail-closed；
    - 密码使用 PBKDF2-HMAC-SHA256（25,000 次）+ 固定时间比较；账户不存在时也执行一次虚拟派生；
    - 会话只存 Token 的 SHA-256 摘要；普通用户与管理员凭证物理隔离，禁止公开管理员注册接口；
@@ -72,7 +74,7 @@ deploy.config.json  # 当前 D1 部署模式与库名
    - 用户管理只创建、列出、删除普通用户；响应不得包含密码哈希/盐或会话 Token，删除用户必须同时清理其远端会话；
    - 管理员账户由 `.dev.vars` 的 `ADMIN_EMAIL` / `ADMIN_PASSWORD` / `ADMIN_NAME` 定义，部署时自动 upsert（模板见 `.dev.vars.example`）；`ADMIN_*` 不得上传为 Worker Secret；
    - 密钥只放 `.dev.vars`（已忽略）或 `wrangler secret`，**不得写入源码、配置或日志**。
-6. **部署模式**：默认 `migrate` 会保留线上数据并只应用未执行迁移；只有明确需要清空数据库时才使用 `pnpm deploy:rebuild`。
+7. **部署模式**：默认 `migrate` 会保留线上数据并只应用未执行迁移；只有明确需要清空数据库时才使用 `pnpm deploy:rebuild`。
 
 ---
 
@@ -83,6 +85,8 @@ deploy.config.json  # 当前 D1 部署模式与库名
 - [ ] 改动 Telegram 调度 / 并发配置后 `pnpm test:scheduler` 通过
 - [ ] 修改 Worker 绑定后已运行 `pnpm worker:types`
 - [ ] 更换域名/子域时，同步 `TURNSTILE_HOSTNAMES`、`ALLOWED_ORIGINS`、Turnstile widget 域名与 README
+- [ ] 新增/修改 Telegram bus/op 时 contracts、BusRouter、TelegramBusClient、monitor、测试同步；`pnpm test:bus` 通过
+- [ ] 并发预算只从 concurrency.ts 读取，无业务硬编码或自建池
 - [ ] 未提交 `.dev.vars`、`.env.local`、`.wrangler/`、`dist/`
 
 ---
@@ -92,4 +96,6 @@ deploy.config.json  # 当前 D1 部署模式与库名
 - `.rules/frontend-architecture.md` —— 目录、路由、组件与零 ref 边界
 - `.rules/state-management.md` —— 三层架构、鉴权数据流、会话持久化
 - `.rules/design-system-and-tokens.md` —— 色彩令牌、圆角、登录页版式
+- `.rules/telegram-bus-and-concurrency.md` —— Telegram 业务总线边界、RequestScheduler 并发与准入检查清单
+- `.rules/telegram-bus-and-concurrency.md` —— Telegram 业务总线边界、并发预算与新增 bus/op 检查清单
 - `.rules/remote-worker.md` —— Worker / D1 / Turnstile / 部署模式

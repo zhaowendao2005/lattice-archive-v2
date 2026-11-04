@@ -7,7 +7,6 @@
 import { ArrowUpRight, Copy, Loader2 } from '@lucide/vue';
 import { useChatStore } from '@/stores/chat/stores/chatStore';
 import type { TgInlineButton } from '@/stores/chat/types';
-import BotHarvesterBanner from './BotHarvesterBanner.vue';
 
 const props = defineProps<{
   messageId: number;
@@ -51,7 +50,5 @@ const chatStore = useChatStore();
       </button>
     </div>
 
-    <!-- 搜索机器人 [startPage, endPage] 自动翻页收割控制条 -->
-    <BotHarvesterBanner :message-id="props.messageId" :rows="props.rows" />
   </div>
 </template>

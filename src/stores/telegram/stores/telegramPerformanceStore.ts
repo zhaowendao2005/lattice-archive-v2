@@ -9,10 +9,9 @@
 import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
 import {
-  MEDIA_SUB_POOLS,
-  NON_MEDIA_SUB_POOLS,
-  TELEGRAM_CONCURRENCY_BOUNDS,
   TELEGRAM_CONCURRENCY_KEYS,
+  TELEGRAM_CONCURRENCY_MINIMUMS,
+  TELEGRAM_CONCURRENCY_PARENT,
   TELEGRAM_CONCURRENCY_PRESETS,
   type TelegramConcurrencyConfig,
   type TelegramConcurrencyKey,
@@ -40,6 +39,34 @@ export const CONCURRENCY_FIELD_LABELS: Record<TelegramConcurrencyKey, string> = 
   streamPart: '视频流分片并发',
 };
 
+/** 每个字段控制什么（面板副标题）。 */
+export const CONCURRENCY_FIELD_HINTS: Record<TelegramConcurrencyKey, string> = {
+  nonMediaRpc: '搜索、Chat、机器人、保险库、账号会话等非媒体请求的总预算',
+  mediaRpc: '头像、封面、文件分片、视频流分片等媒体请求的总预算',
+  totalActiveTasks: '同一账号同时活跃的全部请求数，超出即排队',
+  search: '消息搜索请求的并发',
+  chatRead: '会话列表、历史消息、补差的并发',
+  chatCommand: '归档、加入、退出、发送等写操作的并发',
+  bot: '机器人 /start 与按钮回调的并发（需保持顺序，通常为 1）',
+  vault: '转存与 noforwards 中继的并发（后台低优先级）',
+  account: '健康探针与槽位派生的并发',
+  cover: '封面细图下载并发，聊天与搜索共用',
+  searchCoverReserved: '封面并发中专门留给搜索结果的槽位，避免被聊天封面占满',
+  avatar: '头像下载并发',
+  fullMedia: '同时进行的完整文件下载任务数',
+  mediaPart: '完整文件下载的分片并发，账号内所有文件共享',
+  streamPart: '视频流播放的分片并发',
+};
+
+/** 层级依赖约束的中文短句；与契约层 PARENT 表同源生成。 */
+function constraintOf(key: TelegramConcurrencyKey): string {
+  const parent = TELEGRAM_CONCURRENCY_PARENT[key];
+  if (parent) return `不得超过「${CONCURRENCY_FIELD_LABELS[parent]}」`;
+  if (key === 'totalActiveTasks') return '不得小于「非媒体 RPC」与「媒体 RPC」中的较大者';
+  if (key === 'fullMedia') return '无上级限制，每个文件的分片共用「文件分片并发」';
+  return '最上级预算之一，约束其下的子项';
+}
+
 export const useTelegramPerformanceStore = defineStore('telegramPerformance', () => {
   const initial = telegramPerformancePreferences.read();
   const mode = ref<TelegramConcurrencyMode>(initial.mode);
@@ -54,8 +81,9 @@ export const useTelegramPerformanceStore = defineStore('telegramPerformance', ()
   const fields = computed(() => TELEGRAM_CONCURRENCY_KEYS.map((key) => ({
     key,
     label: CONCURRENCY_FIELD_LABELS[key],
-    min: TELEGRAM_CONCURRENCY_BOUNDS[key].min,
-    max: TELEGRAM_CONCURRENCY_BOUNDS[key].max,
+    hint: CONCURRENCY_FIELD_HINTS[key],
+    min: TELEGRAM_CONCURRENCY_MINIMUMS[key],
+    constraint: constraintOf(key),
     value: draft.value[key],
     applied: applied.value[key],
     error: draftErrors.value[key] ?? '',
@@ -102,21 +130,18 @@ export const useTelegramPerformanceStore = defineStore('telegramPerformance', ()
     const errors: Partial<Record<TelegramConcurrencyKey, string>> = {};
     const limits = {} as TelegramConcurrencyLimits;
     for (const key of TELEGRAM_CONCURRENCY_KEYS) {
-      const { min, max } = TELEGRAM_CONCURRENCY_BOUNDS[key];
+      const min = TELEGRAM_CONCURRENCY_MINIMUMS[key];
       const raw = draft.value[key].trim();
       const num = Number(raw);
       if (!raw || !Number.isInteger(num)) errors[key] = '请输入整数';
-      else if (num < min || num > max) errors[key] = `范围 ${min}–${max}`;
+      else if (num < min) errors[key] = `不能小于 ${min}`;
       else limits[key] = num;
     }
-    if (!errors.searchCoverReserved && !errors.cover && limits.searchCoverReserved > limits.cover) {
-      errors.searchCoverReserved = '不能超过封面并发';
-    }
-    for (const key of MEDIA_SUB_POOLS) {
-      if (!errors[key] && !errors.mediaRpc && limits[key] > limits.mediaRpc) errors[key] = '不能超过账号级媒体 RPC';
-    }
-    for (const key of NON_MEDIA_SUB_POOLS) {
-      if (!errors[key] && !errors.nonMediaRpc && limits[key] > limits.nonMediaRpc) errors[key] = '不能超过账号级非媒体 RPC';
+    // 层级依赖：子项不得超过其上级（与契约层 PARENT 表同源）。
+    for (const key of TELEGRAM_CONCURRENCY_KEYS) {
+      const parent = TELEGRAM_CONCURRENCY_PARENT[key];
+      if (!parent || errors[key] || errors[parent]) continue;
+      if (limits[key] > limits[parent]) errors[key] = `不能超过「${CONCURRENCY_FIELD_LABELS[parent]}」`;
     }
     if (!errors.totalActiveTasks && !errors.mediaRpc && !errors.nonMediaRpc && limits.totalActiveTasks < Math.max(limits.mediaRpc, limits.nonMediaRpc)) {
       errors.totalActiveTasks = '不能小于媒体 / 非媒体 RPC 预算';

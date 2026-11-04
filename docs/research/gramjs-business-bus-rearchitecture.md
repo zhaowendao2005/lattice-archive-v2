@@ -1,5 +1,7 @@
 # GramJS 业务总线重构方案
 
+> 强制规则以 [`.rules/telegram-bus-and-concurrency.md`](../../.rules/telegram-bus-and-concurrency.md) 为准；本文保留设计背景与实施记录。
+
 > 状态：设计基线
 >
 > 范围：Telegram/GramJS 数据面、业务总线、并发调度、媒体/搜索/Chat 统一入口、日志边界

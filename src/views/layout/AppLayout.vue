@@ -18,6 +18,7 @@ import { useDebugLoggerStore } from '@/stores/app/stores/debugLoggerStore';
 import { useAuthStore } from '@/stores/auth/stores/authStore';
 import { useChatStore } from '@/stores/chat/stores/chatStore';
 import AppSidebar from './AppSidebar.vue';
+import MediaViewer from '@/views/main/chats/conversation/media/MediaViewer.vue';
 
 const appStore = useAppStore();
 const debugLogger = useDebugLoggerStore();
@@ -85,6 +86,7 @@ watch(isNarrowWidth, (narrow) => {
           <component :is="Component" />
         </KeepAlive>
       </RouterView>
+      <MediaViewer />
 
       <!--
         分区切换缓冲层（会话 / 归档 / 设置）：DOM 常驻，仅切换 opacity。

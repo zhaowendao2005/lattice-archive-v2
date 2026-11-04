@@ -17,6 +17,7 @@ import FileTile from '../tiles/FileTile.vue';
 import FolderTile from '../tiles/FolderTile.vue';
 import SearchAppTile from '../tiles/SearchAppTile.vue';
 import SessionManagerAppTile from '../tiles/SessionManagerAppTile.vue';
+import { isTelegramMediaTile } from '../../utils/tilePresentation';
 
 const props = defineProps<{
   group: TileGroupData;
@@ -133,7 +134,8 @@ function handleTileClick(tile: TileData) {
     return;
   }
   if (tile.type === 'file') {
-    tileStore.openFile(tile);
+    if (isTelegramMediaTile(tile, tileStore.resources)) void tileStore.openTelegramMedia(tile);
+    else tileStore.openFile(tile);
   } else if (tile.type === 'folder') {
     tileStore.openFolder(tile);
   }

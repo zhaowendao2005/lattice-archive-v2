@@ -3,10 +3,12 @@ import { computed } from 'vue';
 import { Layers, Lock, MessageSquare, ShieldCheck } from '@lucide/vue';
 import { useChatStore } from '@/stores/chat/stores/chatStore';
 import { useChatMediaStore } from '@/stores/chat/stores/chatMediaStore';
+import { useTileStore } from '@/stores/archive/stores/tileStore';
 import type { TgPeerKey } from '@/stores/chat/types';
 import type { FileTileData } from '../../types/tile';
 import BaseTile from './BaseTile.vue';
 import { getFileVisual } from './fileVisuals';
+import { isTelegramMediaTile } from '../../utils/tilePresentation';
 
 const props = defineProps<{
   file: FileTileData;
@@ -23,6 +25,7 @@ const emit = defineEmits<{
 
 const chatStore = useChatStore();
 const chatMediaStore = useChatMediaStore();
+const tileStore = useTileStore();
 
 const currentConfig = computed(() => getFileVisual(props.file.fileType));
 
@@ -38,6 +41,7 @@ const sessionPeerKey = computed(() => props.file.peerKey || props.file.sessionId
 
 const extBadge = computed(() => {
   if (isSessionTile.value) return 'SESSION';
+  if (isTelegramMediaTile(props.file, tileStore.resources)) return 'TG MEDIA';
   return props.file.extension ? props.file.extension.toUpperCase() : currentConfig.value.badge;
 });
 

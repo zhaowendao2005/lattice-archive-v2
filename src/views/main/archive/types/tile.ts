@@ -85,7 +85,7 @@ export interface BaseTileData {
   systemApp?: 'aggregate-search' | 'session-manager';
   /** 是否为常驻系统磁贴（禁止从磁贴板移除） */
   undeletable?: boolean;
-  /** 若由聚合搜索结果拖入生成，记录来源搜索条目 ID */
+  /** 若由聚合搜索结果导入，记录来源搜索条目 ID；不是资源身份键。 */
   sourceResultId?: string;
   /** 磁贴缩略图生命周期与双层引用 */
   thumb?: TileThumbMeta;
@@ -97,6 +97,8 @@ export interface BaseTileData {
 
 export interface FileTileData extends BaseTileData {
   type: 'file';
+  /** Stable reference to the canonical ExploreResource shared by multiple tile instances. */
+  resourceId?: string;
   fileType: FileCategory;
   extension?: string;
   fileSize?: string;

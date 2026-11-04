@@ -27,11 +27,9 @@ src/stores/
 ├── chat/                          # 核心业务域：Telegram 会话与消息（只读，已接线真实数据）
 │   ├── types.ts                   # Worker DTO 再导出、消息窗口、冷启动快照、视图模型、媒体与播放器状态
 │   ├── data-sources/
-│   │   ├── chatDataSource.ts     # 经 MTProto Bridge 调本地 Worker：会话分页 / 历史分页 / 补差 / 归档 / 加入退出 / 媒体下载与取消
-│   │   ├── chatCacheStore.ts     # 冷启动快照：设备密钥 AES-GCM 加密后写 IndexedDB，按「Lattice 用户:TG 账户」隔离
-│   │   ├── chatMediaCache.ts     # 媒体持久缓存：AES-GCM 加密 Cache Storage（单条 ≤ 20 MiB）
-│   │   ├── chatMediaLoader.ts    # 双车道下载器：图片（并发 = 封面 + 头像配额 / 400 条 LRU）+ 视频（并发 = 完整媒体配额 / 256 MB LRU + pin + abort）；附件文件保存后保留区（≤ 64 MB 单件 / 128 MB 总量）
-│   │   ├── chatPreferences.ts    # 自动下载策略、GIF/圆视频自动播放开关、播放器音量与倍速持久化
+│   │   ├── chatMediaCache.ts     # AES-GCM 加密媒体缓存与生命周期
+│   │   ├── chatMediaLoader.ts    # 图片/视频去重、优先级、并发与取消
+│   │   ├── chatPreferences.ts    # 自动下载策略、播放器偏好持久化
 │   │   ├── messageViewport.ts    # 消息流滚动容器句柄 + 预取（600px）、头像（240px）与自动播放（50% 可见）IntersectionObserver
 │   │   ├── progressiveStream.ts  # 大视频渐进式播放桥接：注册 /sw.js、512 KiB 对齐分片、24 块内存 LRU、前 2 MiB 加密缓存
 │   │   └── videoPlayback.ts      # HTMLVideoElement 槽位单例（viewer / gif / round）、全屏、画中画与编解码探测
@@ -43,8 +41,10 @@ src/stores/
 │       └── chatModel.ts          # 纯函数：窗口合并、相册聚合、画质选择、格式化、快照裁剪
 ├── telegram/                      # Telegram 账号、连接与性能配置域
 │   ├── data-sources/
-│   │   ├── mtprotoBridge.ts        # 主 / 从标签页 Worker 桥接（init 与 setConcurrency 下发并发配置）
-│   │   ├── telegramPerformancePreferences.ts # 并发配额持久化（localStorage），供 Bridge / 封面总线 / 媒体加载器读取
+│   │   ├── telegramBusClient.ts    # 主线程唯一 Telegram 业务总线入口（薄桥）
+│   │   ├── mtprotoBridge.ts        # 主 / 从标签页 Worker 桥接与并发配置下发
+│   │   ├── telegramPerformancePreferences.ts # 并发配额持久化与通知
+│   │   └── telegramMonitorDataSource.ts # 运行监控订阅、帧缓冲与 Canvas 句柄
 │   │   └── telegramMonitorDataSource.ts # 运行监控订阅租约、任务增量缓冲、环形时间序列、rAF 合并提交与 Canvas 句柄
 │   └── stores/
 │       ├── telegramStore.ts        # 账号、连接状态唯一来源
@@ -120,8 +120,10 @@ Admin View（零 ref）
 ```text
 Chats View（零 ref，路由参数 /workspace/chats/:chatKey 决定选中会话）
   → chatStore action（openChat / loadOlder / syncNow / handleFeedScroll）
-    → chatDataSource → mtprotoHub.bridge()（主标签页直连，从标签页经 BroadcastChannel 代理）
-      → 本地 tg.worker（GramJS，单连接）→ Telegram DC
+    → chat 域 Data Source（薄桥接）→ telegramBusClient
+      → mtprotoBridge → 本地 tg.worker
+        → BusRouter → ChatReadBus / ChatCommandBus / 其他对应总线
+          → RequestScheduler → TransportKernel → Telegram DC
   ← Worker 广播 chatUpdates → 各标签页 chatStore.applyUpdates
 ```
 
@@ -133,17 +135,14 @@ Chats View（零 ref，路由参数 /workspace/chats/:chatKey 决定选中会话
 * **消息只读与显式会话管理**：不发送消息、不调用已读 RPC，后台预载不得改变 Telegram 服务端状态；仅用户主动触发的归档/取消归档（`folders.EditPeerFolders`）、公开 `@username` 查找（`contacts.ResolveUsername`）、加入公开频道/群组（`channels.JoinChannel`，`INVITE_REQUEST_SENT` 必须标记为 `pending` 而非已加入）与二次确认退出（`channels.LeaveChannel` / `messages.DeleteChatUser`，创建者受角色保护拒绝直接退出，且仅在 RPC 成功后清理本地状态）允许变更会话列表状态；
 * **媒体与头像分级加载**：消息与会话 DTO 携带照片/视频定位信息、头像信息（`TgAvatarInfo`）与内联模糊缩略图；头像由 `v-avatar-visible` 指令按视口可见性请求（低优先级 `PRIORITY_AVATAR = 3` + Worker `RequestScheduler` 的 `avatar` 子池）；预览图与视频封面由 `v-media-visible` 指令按自动下载策略请求；查看器视频优先走 `progressiveStream`（Service Worker `/sw.js` 拦截 Range 请求 → 512 KiB 对齐分片 `getDocumentPart` → `206 Partial Content`），不支持或解码报错时自动降级为完整 Blob 下载，关闭查看器、翻页或切换会话时立即通过 `AbortSignal` → `chatCancel` 中止在途分片；GIF 与圆形视频由 `v-media-playing` 指令在 ≥ 50% 可见且允许自动播放（≤ 10 MB）时静音循环，点击圆形视频切换单实例有声播放；占位尺寸在下载前锁定，媒体加载不得改变气泡高度；
 * **媒体句柄与缓存**：Object URL 只由 `chatMediaLoader` 创建与回收（图片 400 条 LRU，视频 256 MB 字节预算 LRU 且活跃播放槽位 `pin` 保护，切换账户时全部 revoke），`HTMLVideoElement` 与全屏容器句柄只由 `videoPlayback` 单例持有，Store 中只存 URL 字符串与可序列化播放状态；持久缓存（含渐进式视频前 2 MiB 分片）只走 `chatMediaCache`（设备密钥加密的 Cache Storage，按 Lattice 用户 / Telegram 账户隔离，单条 ≤ 20 MiB，授权失效时整体清除），禁止写入未加密的媒体字节；
-* **MTProto Gateway 与 PTS / Bot 回调收口铁律**：
-  - 凡会推进账号 `pts` 的 MTProto RPC（如 `SendMessage` 返回的 `UpdateShortSentMessage`、`Updates`、`AffectedHistory`、`AffectedMessages`），必须统一通过 `src/worker/local/chat/mtprotoGateway.ts` 的 `advancePtsFromRpcResult` 推进 `engine.state.pts`，严禁漏更导致后续 `UpdateNewMessage` 误判 `pts gap` 进而触发全量覆盖冲掉刚发出的消息；
+* **MTProto 更新状态与 Bot 回调收口铁律**：
+  - 所有会推进账号 `pts` 的 RPC 结果必须由 `src/worker/local/telegram/runtime/updateEngine.ts` / `transportKernel.ts` 的 `advancePtsFromRpcResult` 统一推进；禁止业务总线各自维护 pts 或绕过更新状态机。
   - `BOT_RESPONSE_TIMEOUT` 是应用层业务状态（机器人在静默改写消息后未显式调用 `answerCallbackQuery`），**严禁将其归入 `tg.worker.ts` 的 `isTransient` / `isTimeout` 连接重连条件**，且在收到 `UpdateEditMessage` 时必须立即清理该消息名下的全部 `pendingCallbacks` 加载圈；
   - 多账号后台预热（`warmAllLocalAccounts`）必须在当前主账号完成首屏同步后延迟串行启动，禁止与前台首屏同步并发争抢 WebSocket 与 IndexedDB 锁。
 
 ### 2.4 Telegram 并发配额（强制）
 
-* **单一来源**：所有并发数字只在 `src/worker/local/telegram/contracts/concurrency.ts` 定义（预设 `stable` / `balanced` / `aggressive`、保护范围、归一化）；Worker 调度器、主线程封面总线、媒体加载器与设置页都从这里读取，**禁止在业务代码中硬编码并发常量或自建并发池**（`pnpm arch:check` 拦截）；
-* **用户配置 ≠ 运行时有效值**：设置页保存的是上限；Worker `RequestScheduler` 可在 FloodWait / 超时后临时降速并逐步恢复，但不得超过、也不得回写用户配置；
-* **数据流**：设置 View（零 ref）→ `telegramPerformanceStore` → `telegramPerformancePreferences`（落盘并通知主线程限流器）→ `mtprotoHub.bridge().setConcurrency`（Worker 调度器）；
-* **账号隔离**：每个 Telegram 账号一个调度器，账号断开 / 温池淘汰时关闭并拒绝其排队任务；所有请求仍共用该账号唯一的 `TelegramClient`，禁止通过新建连接扩容。
+完整准则、总线职责矩阵和新增 bus/op 准入清单以 [telegram-bus-and-concurrency.md](telegram-bus-and-concurrency.md) 为唯一规范来源；本节只保留状态管理的数据流提示。
 
 ### 2.5 Telegram 运行监控（强制）
 
@@ -192,7 +191,7 @@ Chats View（零 ref，路由参数 /workspace/chats/:chatKey 决定选中会话
 2. **统一 Grep 友好树状时间轴格式**：
    * 所有进入 `debugLoggerStore` 的日志条目（`LatticeLogEntry`）导出或展示时，必须遵循统一行格式：
      `[LATTICE][T:<traceId>][S:<spanId>][<ISO8601>][+<relMs>ms][dur:<durMs>ms][<LEVEL>][<SOURCE>:<domain>] <action> | key=val ...`
-   * 新增敏感业务（MTProto RPC、PTS 差量、机器人翻页、云端同步、鉴权）必须通过 `mtprotoGateway` 或 `debugLoggerDataSource` 记录结构化 Span，禁止裸写散乱的 `console.log`。
+   * 新增敏感业务（MTProto RPC、PTS 差量、机器人翻页、云端同步、鉴权）必须通过 `localSpans` / `debugLoggerDataSource` 记录结构化 Span，禁止裸写散乱的 `console.log`。
 3. **终端性能与零 `ref` 约束**：
    * 调试终端采用环形缓冲区（Ring Buffer，上限 5,000 条）+ `requestAnimationFrame`（16ms 批合并）写入 Pinia Store，防止高频消息阻塞渲染；
    * 终端视口使用固定行高（`ROW_HEIGHT = 24px`）虚拟列表，DOM 句柄与时间轴拖拽滑轨事件统一托管在 `debugLoggerDataSource`，视图组件严格保持零 `ref` / `reactive`。

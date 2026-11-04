@@ -16,6 +16,7 @@ import { useChatStore } from '@/stores/chat/stores/chatStore';
 import SessionListContainer from './session-list/SessionListContainer.vue';
 import ConversationContainer from './conversation/ConversationContainer.vue';
 import BotHarvestCandidateModal from './conversation/BotHarvestCandidateModal.vue';
+import BotHarvestDialog from './conversation/BotHarvestDialog.vue';
 
 const chatStore = useChatStore();
 const route = useRoute();
@@ -53,6 +54,7 @@ watch(() => chatStore.activeChatKey, (chatKey) => {
     />
     <SessionListContainer @keydown.esc="chatStore.collapseSessionList()" />
     <ConversationContainer />
+    <BotHarvestDialog />
     <BotHarvestCandidateModal />
   </main>
 </template>

@@ -36,6 +36,8 @@ export const useBotHarvesterStore = defineStore('botHarvester', {
     }) | null,
     candidates: [] as BotHarvestCandidateItem[],
     isCandidateModalOpen: false,
+    /** 「解析消息」设置弹窗当前对应的消息 ID；null 表示弹窗关闭。 */
+    dialogMessageId: null as number | null,
     candidateFilterKind: 'all' as 'all' | 'username' | 'invite_hash' | 'deep_link',
     targetExploreGroupId: 'group-default',
     placementMode: 'temp_auto_renew' as SessionCredentialState,
@@ -117,6 +119,33 @@ export const useBotHarvesterStore = defineStore('botHarvester', {
           this.candidates.push(item);
         }
       }
+    },
+
+    /**
+     * 消息右侧工具条的「解析」入口：任何消息都可打开设置弹窗。
+     * 分页元数据只在打开时向 Worker 请求一次（不再为每条机器人消息预取）；失败时弹窗仍可用，按单页解析。
+     */
+    async openHarvestDialog(messageId: number) {
+      this.dialogMessageId = messageId;
+      const chatStore = useChatStore();
+      const accountId = chatStore.accountId;
+      const windowMessages = chatStore.activeWindow?.messages ?? [];
+      const message = windowMessages.find((item) => item.id === messageId);
+      if (!accountId || !message) return;
+      try {
+        await this.refreshMessageMetadata(
+          accountId,
+          message,
+          windowMessages,
+          chatStore.activeChatKey ? chatStore.lastSentQueryByPeer[chatStore.activeChatKey] : undefined,
+        );
+      } catch {
+        // 元数据不可用时按「无翻页」处理，不阻断解析。
+      }
+    },
+
+    closeHarvestDialog() {
+      this.dialogMessageId = null;
     },
 
     /** 启动 [startPage, endPage] 事件驱动自动翻页收割任务 */
@@ -224,6 +253,7 @@ export const useBotHarvesterStore = defineStore('botHarvester', {
         if (this.activeTask && this.activeTask.status === 'running') {
           this.activeTask.status = 'completed';
           sessionStore.completeTask(taskId);
+          this.dialogMessageId = null;
           this.isCandidateModalOpen = true;
         }
       } catch (err) {

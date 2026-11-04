@@ -307,6 +307,28 @@ export const useChatMediaStore = defineStore('chatMedia', {
       return (key ? this.entries[key]?.url : undefined) ?? thumb;
     },
 
+    async refreshDialogAvatars(peerKeys: string[]): Promise<{ refreshed: number; skipped: number }> {
+      const chat = useChatStore();
+      const accountId = chat.accountId;
+      const ownerId = chat.ownerId;
+      if (!accountId || !ownerId) return { refreshed: 0, skipped: peerKeys.length };
+      let refreshed = 0;
+      let skipped = 0;
+      for (const peerKey of Array.from(new Set(peerKeys))) {
+        const dialog = chat.dialogs[peerKey as TgPeerKey];
+        if (!dialog?.avatar) { skipped += 1; continue; }
+        const key = avatarKey(dialog.key, dialog.avatar);
+        chatMediaLoader.abort(key);
+        delete this.entries[key];
+        await chatMediaCache.remove(chatMediaCache.scopeOf(ownerId, accountId), key);
+        const request = resolveAvatarRequest(dialog.key);
+        if (!request) { skipped += 1; continue; }
+        this.requestAvatar(request);
+        refreshed += 1;
+      }
+      return { refreshed, skipped };
+    },
+
     /** 根据会话 peerKey 获取会话头像 URL（若尚未加载 160×160 清晰头像则自动触发加载，并回退到 strippedThumb） */
     dialogAvatarUrl(peerKey?: string): string | undefined {
       if (!peerKey) return undefined;

@@ -11,9 +11,10 @@
  * 用法：node scripts/check-architecture.mjs
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { join, relative, sep } from 'node:path';
 
-const ROOT = new URL('..', import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SRC = join(ROOT, 'src');
 const CODE_EXT = /\.(ts|vue|mts|js|mjs)$/;
 
@@ -55,7 +56,7 @@ function lineOf(source, index) {
 
 const toPosix = (p) => p.split(sep).join('/');
 
-/** 每条规则：applies(file) 决定检查范围，find(code) 返回违规 [{ index, text }]。 */
+/** 每条规则：applies(file) 决定检查范围，find(code, file) 返回违规 [{ index, text }]。 */
 const RULES = [
   {
     id: 'no-services-layer',
@@ -85,7 +86,7 @@ const RULES = [
     id: 'views-no-network',
     message: '视图层禁止直接发起网络请求或调用 MTProto Bridge',
     applies: (f) => f.startsWith('src/views/'),
-    pattern: /\bfetch\s*\(|mtprotoHub|requestChat\s*\(/g,
+    pattern: /\bfetch\s*\(|mtprotoHub|requestChat\s*\(|telegramBusClient|mtprotoBridge/g,
   },
   {
     id: 'main-thread-worker-imports',
@@ -118,6 +119,30 @@ const RULES = [
     pattern: /\.requestBus\s*\(/g,
   },
   {
+    id: 'worker-no-main-stores',
+    message: 'local Telegram Worker 不得反向依赖主线程 Store',
+    applies: (f) => f.startsWith('src/worker/local/telegram/'),
+    pattern: /from\s+['"]@\/stores\//g,
+  },
+  {
+    id: 'telegram-client-construction',
+    message: 'TelegramClient 只能由 Telegram runtime 与 PendingSlot 会话总线创建',
+    applies: (f) => f.startsWith('src/worker/local/') && !['src/worker/local/telegram/runtime/telegramRuntime.ts', 'src/worker/local/telegram/buses/accountSessionBus.ts'].includes(f),
+    pattern: /new\s+TelegramClient\s*\(/g,
+  },
+  {
+    id: 'telegram-bus-implementation-routing',
+    message: '业务 bus 实现必须由 runtime/busRouter.ts 显式路由',
+    applies: (f) => f.startsWith('src/worker/local/telegram/buses/') && !/(Parser|parser)\.ts$/.test(f),
+    find: (_code, file) => {
+      const router = readFileSync(join(ROOT, 'src/worker/local/telegram/runtime/busRouter.ts'), 'utf8');
+      const name = file.split('/').pop()?.replace(/\.ts$/, '');
+      return name && !router.includes(`from '../buses/${name}'`)
+        ? [{ index: 0, text: `${name} is not routed` }]
+        : [];
+    },
+  },
+  {
     id: 'bus-api-types',
     message: '业务总线契约与主线程不得暴露 GramJS Api.* 类型',
     applies: (f) => f.startsWith('src/worker/local/telegram/contracts/') || f.startsWith('src/stores/') || f.startsWith('src/views/'),
@@ -136,7 +161,7 @@ for (const rule of RULES) {
     if (!rule.applies(rel)) continue;
     const code = stripComments(readFileSync(full, 'utf8'));
     const hits = rule.find
-      ? rule.find(code)
+      ? rule.find(code, rel)
       : [...code.matchAll(rule.pattern)].map((m) => ({ index: m.index, text: m[0] }));
     if (hits.length === 0) continue;
     if (legacy[rel]) { legacyHit.add(rel); continue; }

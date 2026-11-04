@@ -83,6 +83,14 @@ export const chatMediaCache = {
     }
   },
 
+  async remove(scope: string, key: string): Promise<void> {
+    if (!cacheAvailable()) return;
+    try {
+      const cache = await caches.open(CACHE_NAME);
+      await cache.delete(requestUrl(scope, key));
+    } catch { /* 缓存失效只影响下次加载速度 */ }
+  },
+
   /** 授权失效 / 移除账户时清除该账户的全部本机媒体。 */
   async removeScope(scope: string): Promise<void> {
     if (!cacheAvailable()) return;

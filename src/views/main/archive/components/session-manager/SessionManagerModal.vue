@@ -167,6 +167,44 @@ function onSessionCardPointerDown(dialog: TgDialogDto, event: PointerEvent) {
   window.addEventListener('pointercancel', onPointerUp);
 }
 
+function onCredentialCardClick(index: number, id: string, event: MouseEvent) {
+  if (suppressNextCardClick) { suppressNextCardClick = false; return; }
+  sessionStore.handleCredentialClick(index, id, event);
+}
+
+function onCredentialCardPointerDown(credentialId: string, event: PointerEvent) {
+  if (event.button !== 0) return;
+  const target = event.target as HTMLElement | null;
+  if (target?.closest('button, input, a')) return;
+  const startX = event.clientX;
+  const startY = event.clientY;
+  let dragStarted = false;
+  const onPointerMove = (moveEvent: PointerEvent) => {
+    if (!dragStarted && Math.abs(moveEvent.clientX - startX) < 5 && Math.abs(moveEvent.clientY - startY) < 5) return;
+    if (!dragStarted) {
+      dragStarted = true;
+      suppressNextCardClick = true;
+      sessionStore.startDragCredentialsToTree(
+        sessionStore.selectedCredentialIds.includes(credentialId)
+          ? sessionStore.selectedCredentialIds
+          : [credentialId],
+        moveEvent.clientX,
+        moveEvent.clientY,
+      );
+    }
+    searchStore.updateDragToTreePointer(moveEvent.clientX, moveEvent.clientY);
+  };
+  const onPointerUp = () => {
+    window.removeEventListener('pointermove', onPointerMove);
+    window.removeEventListener('pointerup', onPointerUp);
+    window.removeEventListener('pointercancel', onPointerUp);
+    if (dragStarted) searchStore.finishDragToTree();
+  };
+  window.addEventListener('pointermove', onPointerMove);
+  window.addEventListener('pointerup', onPointerUp);
+  window.addEventListener('pointercancel', onPointerUp);
+}
+
 function handleBatchFileSelect(event: Event) {
   const input = event.target as HTMLInputElement;
   if (input.files && input.files.length > 0) {
@@ -448,11 +486,19 @@ onUnmounted(() => {
                     </label>
                   </div>
 
-                  <button
-                    type="button"
-                    class="flex h-7 items-center gap-1.5 rounded-[2px] border border-sky-400/60 bg-sky-500/25 px-3 text-[11px] font-medium text-sky-100 shadow-[inset_0_1px_0_0_rgba(56,189,248,0.3)] transition-colors hover:bg-sky-500/35"
-                    @click="sessionStore.batchPlaceSelectedSessionsIntoExplore()"
-                  >
+                  <div class="flex items-center gap-2">
+                    <button
+                      type="button"
+                      class="flex h-7 items-center gap-1.5 border border-white/15 bg-white/[0.05] px-2.5 text-[11px] text-white/80 hover:bg-white/10"
+                      @click="sessionStore.refreshSelectedSessionCovers()"
+                    >
+                      <RefreshCw class="size-3.5" :class="sessionStore.isRefreshingSelectedCovers ? 'animate-spin' : ''" />刷新选中封面 ({{ sessionStore.selectedPeerKeys.length }})
+                    </button>
+                    <button
+                      type="button"
+                      class="flex h-7 items-center gap-1.5 rounded-[2px] border border-sky-400/60 bg-sky-500/25 px-3 text-[11px] font-medium text-sky-100 shadow-[inset_0_1px_0_0_rgba(56,189,248,0.3)] transition-colors hover:bg-sky-500/35"
+                      @click="sessionStore.batchPlaceSelectedSessionsIntoExplore()"
+                    >
                     <FolderPlus class="size-3.5 text-sky-300" />
                     <span>
                       {{
@@ -461,8 +507,10 @@ onUnmounted(() => {
                           : `一键收纳至目标路径 (${sessionStore.selectedPeerKeys.length})`
                       }}
                     </span>
-                  </button>
+                    </button>
+                  </div>
                 </div>
+                <p v-if="sessionStore.coverRefreshNotice" class="text-[11px] text-sky-300">{{ sessionStore.coverRefreshNotice }}</p>
               </div>
 
               <!-- 会话单列卡片流（与 SearchResultCard 保持完全一致的结构与手感） -->
@@ -682,15 +730,36 @@ onUnmounted(() => {
               </div>
 
               <div v-else class="space-y-1.5">
+                <div class="flex items-center justify-between gap-2 text-[11px] text-white/55">
+                  <span>已选 {{ sessionStore.selectedCredentialIds.length }} / {{ sessionStore.tempCredentials.length }}</span>
+                  <div class="flex gap-1.5">
+                    <button type="button" class="flex h-7 items-center gap-1 border border-white/15 px-2 text-white/75 hover:bg-white/10" @click="sessionStore.refreshSelectedSessionCovers()">
+                      <RefreshCw class="size-3" :class="sessionStore.isRefreshingSelectedCovers ? 'animate-spin' : ''" />刷新所选封面
+                    </button>
+                    <button type="button" class="flex h-7 items-center gap-1 border border-sky-400/40 px-2 text-sky-200 hover:bg-sky-500/15" @click="sessionStore.placeSelectedCredentialTiles()">
+                      <FolderPlus class="size-3.5" />生成选中磁贴
+                    </button>
+                    <button type="button" class="h-7 border border-white/15 px-2 text-white/75 hover:bg-white/10" @click="sessionStore.selectAllCredentials()">全选</button>
+                    <button type="button" class="h-7 border border-white/15 px-2 text-white/55 hover:bg-white/10" @click="sessionStore.clearSelectedCredentials()">清空</button>
+                  </div>
+                </div>
+                <p v-if="sessionStore.coverRefreshNotice" class="text-[11px] text-sky-300">{{ sessionStore.coverRefreshNotice }}</p>
                 <div
-                  v-for="cred in sessionStore.tempCredentials"
+                  v-for="(cred, credIndex) in sessionStore.tempCredentials"
                   :key="cred.id"
-                  class="flex flex-wrap items-center justify-between gap-3 rounded-[2px] border border-white/10 bg-white/[0.03] p-3 hover:border-white/25 hover:bg-white/[0.05]"
+                  class="flex flex-wrap items-center justify-between gap-3 rounded-[2px] border p-3 transition-colors"
+                  :class="sessionStore.selectedCredentialIds.includes(cred.id) ? 'border-sky-400/70 bg-sky-500/10' : 'border-white/10 bg-white/[0.03] hover:border-white/25 hover:bg-white/[0.05]'"
+                  @pointerdown="onCredentialCardPointerDown(cred.id, $event)"
+                  @click="onCredentialCardClick(credIndex, cred.id, $event)"
                 >
-                  <div class="min-w-0 space-y-1">
-                    <div class="flex items-center gap-2">
-                      <KeyRound class="size-3.5 shrink-0 text-amber-300" />
-                      <span class="truncate text-[13px] font-medium text-white/92">{{ cred.title }}</span>
+                  <div class="flex min-w-0 flex-1 items-center gap-3">
+                    <span class="flex size-4 shrink-0 items-center justify-center border" :class="sessionStore.selectedCredentialIds.includes(cred.id) ? 'border-sky-400 bg-sky-400 text-slate-950' : 'border-white/20 text-transparent'">
+                      <Check class="size-3" />
+                    </span>
+                    <div class="min-w-0 space-y-1">
+                      <div class="flex items-center gap-2">
+                        <KeyRound class="size-3.5 shrink-0 text-amber-300" />
+                        <span class="truncate text-[13px] font-medium text-white/92">{{ cred.title }}</span>
                       <span
                         class="rounded-[2px] border px-1.5 py-0.5 text-[10px]"
                         :class="
@@ -710,20 +779,21 @@ onUnmounted(() => {
                       <span v-if="cred.participantsCount"> · {{ cred.participantsCount }} 成员</span>
                       · 最近校准：{{ new Date(cred.lastVerifiedAt).toLocaleTimeString('zh-CN') }}
                     </p>
+                    </div>
                   </div>
 
                   <div class="flex items-center gap-1.5 text-[11px]">
                     <button
                       type="button"
                       class="h-7 rounded-[2px] border border-white/15 bg-white/[0.05] px-2.5 text-white/85 hover:border-white/30 hover:bg-white/10"
-                      @click="sessionStore.placeTempCredentialTile(cred, sessionStore.targetGroupId)"
+                      @click.stop="sessionStore.placeTempCredentialTile(cred, sessionStore.targetGroupId)"
                     >
                       生成磁贴
                     </button>
                     <button
                       type="button"
                       class="h-7 rounded-[2px] border border-emerald-400/45 bg-emerald-500/20 px-2.5 text-emerald-200 hover:bg-emerald-500/30"
-                      @click="sessionStore.upgradeTempCredentialToJoined(cred.id)"
+                      @click.stop="sessionStore.upgradeTempCredentialToJoined(cred.id)"
                     >
                       🟢 转正加入并归档
                     </button>
@@ -731,7 +801,7 @@ onUnmounted(() => {
                       type="button"
                       class="flex size-7 items-center justify-center rounded-[2px] border border-white/10 text-white/45 hover:border-rose-400/40 hover:bg-rose-500/15 hover:text-rose-300"
                       title="移除凭据"
-                      @click="sessionStore.removeTempCredential(cred.id)"
+                      @click.stop="sessionStore.removeTempCredential(cred.id)"
                     >
                       <Trash2 class="size-3.5" />
                     </button>

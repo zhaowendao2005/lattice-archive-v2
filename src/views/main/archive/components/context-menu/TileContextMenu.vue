@@ -29,6 +29,7 @@ import { useChatStore } from '@/stores/chat/stores/chatStore';
 import type { TgPeerKey } from '@/stores/chat/types';
 import { useTileStore } from '@/stores/archive/stores/tileStore';
 import { archiveDomRegistry } from '../../store/archiveDomRegistry';
+import { isTelegramMediaTile } from '../../utils/tilePresentation';
 
 const router = useRouter();
 const tileStore = useTileStore();
@@ -137,6 +138,12 @@ function handleRename() {
     tileStore.renameTile(activeTile.value.id, newName.trim());
   }
   tileStore.closeContextMenu();
+}
+
+function handleOpenMedia() {
+  const tile = activeTile.value;
+  tileStore.closeContextMenu();
+  if (tile?.type === 'file' && isTelegramMediaTile(tile, tileStore.resources)) void tileStore.openTelegramMedia(tile);
 }
 
 function handleOpen() {
@@ -447,6 +454,15 @@ onUnmounted(() => {
 
       <!-- Open / Preview -->
       <button
+        v-if="activeTile.type === 'file' && isTelegramMediaTile(activeTile, tileStore.resources)"
+        type="button"
+        class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sky-200 hover:bg-white/10 transition-colors"
+        @click="handleOpenMedia"
+      >
+        <ExternalLink class="size-3.5 text-sky-300" />
+        <span>打开</span>
+      </button>
+      <button
         type="button"
         class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-white/85 hover:bg-white/10 transition-colors"
         @click="handleOpen"
@@ -460,7 +476,7 @@ onUnmounted(() => {
                 ? '打开会话与配额管理器'
                 : activeTile.type === 'folder'
                   ? '展开文件夹'
-                  : '查看文件详情'
+                  : '详情'
           }}
         </span>
       </button>

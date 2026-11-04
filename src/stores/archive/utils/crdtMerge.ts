@@ -4,6 +4,7 @@
  * 统一使用基于 JSON 的深拷贝并剥离仅当前标签页有效的 blob: objectUrl。
  */
 import type { ExploreManifestV2, TempSessionCredential } from '../types';
+import { migrateExploreManifestV2ToV3 } from './resourceManifest';
 import type { FileTileData, FolderTileData, TileData, TileGroupData } from '@/views/main/archive/types/tile';
 
 function clonePlain<T>(val: T): T {
@@ -124,9 +125,11 @@ function mergeTopLevelTiles(
 }
 
 export function mergeExploreManifestsCrdt(
-  local: ExploreManifestV2,
-  remote: ExploreManifestV2,
+  localInput: ExploreManifestV2,
+  remoteInput: ExploreManifestV2,
 ): ExploreManifestV2 {
+  const local = migrateExploreManifestV2ToV3(localInput);
+  const remote = migrateExploreManifestV2ToV3(remoteInput);
   const mergedTombstones: Record<string, number> = { ...(remote.tombstones ?? {}) };
   for (const [id, ts] of Object.entries(local.tombstones ?? {})) {
     mergedTombstones[id] = Math.max(mergedTombstones[id] ?? 0, ts);
@@ -171,14 +174,26 @@ export function mergeExploreManifestsCrdt(
   }
 
   const localIsNewer = (local.updatedAtMs ?? 0) > (remote.updatedAtMs ?? 0);
+  const resourceMap = new Map(Object.entries(remote.resources ?? {}).filter(([id]) => !mergedTombstones[`resource:${id}`]));
+  for (const [id, resource] of Object.entries(local.resources ?? {})) {
+    if (mergedTombstones[`resource:${id}`]) continue;
+    const existing = resourceMap.get(id);
+    if (!existing || resource.updatedAtMs >= existing.updatedAtMs) {
+      resourceMap.set(id, clonePlain(resource));
+    } else if (resource.sources?.length && existing.sources?.length) {
+      const merged = new Map([...existing.sources, ...resource.sources].map((source) => [JSON.stringify(source), source]));
+      resourceMap.set(id, { ...existing, sources: Array.from(merged.values()) });
+    }
+  }
 
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     revision: Math.max(local.revision ?? 0, remote.revision ?? 0),
     updatedAtMs: Math.max(local.updatedAtMs ?? 0, remote.updatedAtMs ?? 0, Date.now()),
     deviceId: local.deviceId || remote.deviceId || 'unknown',
     groups: Array.from(groupMap.values()).sort((a, b) => a.column - b.column || a.order - b.order),
     tiles: mergedTiles,
+    resources: Object.fromEntries(resourceMap),
     tombstones: mergedTombstones,
     tempCredentials: Array.from(credMap.values()),
     quotaPolicy: localIsNewer

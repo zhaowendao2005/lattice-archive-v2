@@ -13,7 +13,8 @@ import { useAggregateSearchStore } from '@/stores/archive/stores/aggregateSearch
 const searchStore = useAggregateSearchStore();
 
 function handleTriggerSearch() {
-  void searchStore.executeStreamingSearch();
+  if (searchStore.isStreaming) searchStore.stopSearch();
+  else void searchStore.executeStreamingSearch();
 }
 
 function handleClearKeyword() {
@@ -61,7 +62,7 @@ function handleClearKeyword() {
           :stroke-width="2"
         />
         <Search v-else class="size-3.5" :stroke-width="2" />
-        <span>搜索</span>
+        <span>{{ searchStore.isStreaming ? '停止' : '搜索' }}</span>
       </button>
     </div>
 

@@ -1,34 +1,10 @@
 <script setup lang="ts">
-import type { ObjectDirective } from 'vue';
 import { CheckSquare, Loader2, SearchX, Sparkles, Square } from '@lucide/vue';
-import { aggregateSearchDataSource } from '@/stores/archive/data-sources/aggregateSearchDataSource';
 import { useAggregateSearchStore } from '@/stores/archive/stores/aggregateSearchStore';
 import SearchResultCard from './SearchResultCard.vue';
 
 const searchStore = useAggregateSearchStore();
 
-/**
- * 零本地 ref 的触底懒加载观察指令：将 DOM 句柄交由 Data Source 单例托管
- */
-const vLazySentinel: ObjectDirective<HTMLElement> = {
-  mounted(el) {
-    const scrollRoot = el.closest('.search-results-viewport') as HTMLElement | null;
-    aggregateSearchDataSource.bindLazyLoadSentinel(el, scrollRoot, () => {
-      void searchStore.loadNextPageLazy();
-    });
-  },
-  unmounted() {
-    aggregateSearchDataSource.unbindLazyLoadSentinel();
-  },
-};
-
-function handleViewportScroll(event: Event) {
-  const target = event.currentTarget as HTMLElement | null;
-  if (!target) return;
-  if (target.scrollHeight - target.scrollTop - target.clientHeight < 140) {
-    void searchStore.loadNextPageLazy();
-  }
-}
 </script>
 
 <template>
@@ -66,6 +42,10 @@ function handleViewportScroll(event: Event) {
           class="rounded-[2px] border border-amber-400/35 bg-amber-500/15 px-1.5 py-0.2 text-[10px] text-amber-200"
         >
           会话范围：{{ searchStore.selectedScopeSessionIds.length }} 个会话
+        </span>
+        <span v-if="Object.keys(searchStore.peerProgress).length > 0" class="text-white/45">
+          {{ Object.values(searchStore.peerProgress).filter(p => p.status === 'completed').length }} 个会话已完成
+          · {{ Object.values(searchStore.peerProgress).filter(p => p.status === 'error').length }} 个会话失败
         </span>
       </div>
 
@@ -109,7 +89,6 @@ function handleViewportScroll(event: Event) {
     <!-- 流式结果滚动容器 -->
     <div
       class="search-results-viewport search-modal-scroll min-h-0 flex-1 space-y-2 overflow-y-auto p-4"
-      @scroll.passive="handleViewportScroll"
     >
       <!-- 搜索结果卡片列表 -->
       <SearchResultCard
@@ -144,7 +123,6 @@ function handleViewportScroll(event: Event) {
 
       <!-- 底部懒加载哨兵与流式加载状态 -->
       <div
-        v-lazy-sentinel
         class="flex items-center justify-center py-3 text-[11px] text-white/40"
       >
         <div
@@ -154,14 +132,6 @@ function handleViewportScroll(event: Event) {
           <Loader2 class="size-3.5 animate-spin text-sky-400" />
           <span>正在流式接收分片数据...</span>
         </div>
-        <button
-          v-else-if="searchStore.hasMore"
-          type="button"
-          class="rounded-[2px] border border-white/12 bg-white/[0.04] px-3 py-1 text-[11px] text-white/65 transition-colors hover:border-sky-400/50 hover:text-sky-200"
-          @click="searchStore.loadNextPageLazy"
-        >
-          继续流式懒加载更多结果 ({{ searchStore.rawResults.length }} / {{ searchStore.totalMatched }})
-        </button>
         <span v-else-if="searchStore.displayedResults.length > 0" class="font-mono text-[10px]">
           — 已流式加载全部 {{ searchStore.displayedResults.length }} 条匹配结果 —
         </span>

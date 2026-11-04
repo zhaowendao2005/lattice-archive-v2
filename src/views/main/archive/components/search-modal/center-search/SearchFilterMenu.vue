@@ -222,6 +222,40 @@ const CATEGORY_ICON_MAP: Record<SearchPreFilterCategory, Component> = {
                   </span>
                 </button>
               </div>
+
+              <div class="mt-3 grid gap-2 sm:grid-cols-3">
+                <label class="flex min-w-0 flex-col gap-1 text-[11px] text-white/55">
+                  <span>文件扩展名</span>
+                  <input
+                    v-model="searchStore.preExtensions"
+                    type="text"
+                    placeholder="pdf, zip, mkv"
+                    class="h-7 rounded-[2px] border border-white/15 bg-black/40 px-2 text-xs text-white outline-none placeholder-white/30 focus:border-sky-400/70"
+                  />
+                </label>
+                <label class="flex min-w-0 flex-col gap-1 text-[11px] text-white/55">
+                  <span>最小体积（MB）</span>
+                  <input
+                    v-model="searchStore.preMinSizeMb"
+                    type="number"
+                    min="0"
+                    step="1"
+                    placeholder="不限"
+                    class="h-7 rounded-[2px] border border-white/15 bg-black/40 px-2 text-xs text-white outline-none placeholder-white/30 focus:border-sky-400/70"
+                  />
+                </label>
+                <label class="flex min-w-0 flex-col gap-1 text-[11px] text-white/55">
+                  <span>最大体积（MB）</span>
+                  <input
+                    v-model="searchStore.preMaxSizeMb"
+                    type="number"
+                    min="0"
+                    step="1"
+                    placeholder="不限"
+                    class="h-7 rounded-[2px] border border-white/15 bg-black/40 px-2 text-xs text-white outline-none placeholder-white/30 focus:border-sky-400/70"
+                  />
+                </label>
+              </div>
             </div>
           </div>
         </div>

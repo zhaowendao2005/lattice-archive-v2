@@ -51,8 +51,21 @@ function run(command, args, { capture = false, allowFailure = false } = {}) {
     cwd: root,
     encoding: 'utf8',
     stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
+    shell: process.platform === 'win32',
     env: { ...process.env, CI: process.env.CI ?? 'true' },
   });
+  if (result.error && !allowFailure) {
+    if (capture) process.stderr.write(result.stdout ?? '');
+    if (capture) process.stderr.write(result.stderr ?? '');
+    console.error(`\n✘ 命令启动失败: ${result.error.message}`);
+    process.exit(1);
+  }
+  if (result.signal && !allowFailure) {
+    if (capture) process.stderr.write(result.stdout ?? '');
+    if (capture) process.stderr.write(result.stderr ?? '');
+    console.error(`\n✘ 命令被信号终止: ${result.signal}`);
+    process.exit(1);
+  }
   if (result.status !== 0 && !allowFailure) {
     if (capture) process.stderr.write(result.stdout ?? '');
     if (capture) process.stderr.write(result.stderr ?? '');

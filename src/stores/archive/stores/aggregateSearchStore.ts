@@ -19,6 +19,7 @@ import type {
   SearchFilterStage,
   SearchPreFilterCategory,
   SearchScopeSessionKind,
+  SearchPeerProgress,
   SearchToTreeDragState,
   TreeContextMenuState,
   TreeEditingNodeState,
@@ -65,6 +66,9 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
   const isPreTypeOptionsListed = ref(false);
   /** 搜索前筛选步骤 2 & 3：多选选中的文件类型（视频、图片、会话、文本文件、其他） */
   const selectedPreCategories = ref<SearchPreFilterCategory[]>([]);
+  const preExtensions = ref('');
+  const preMinSizeMb = ref('');
+  const preMaxSizeMb = ref('');
   /** 搜索后筛选：对已流式返回的结果集进行客户端二次筛选 */
   const selectedPostCategories = ref<SearchPreFilterCategory[]>([]);
   const postKeyword = ref('');
@@ -86,6 +90,7 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
   const currentPage = ref(1);
   const totalMatched = ref(0);
   const hasMore = ref(false);
+  const peerProgress = ref<Record<string, SearchPeerProgress>>({});
   const searchEpoch = ref(0);
 
   // ── 6. 搜索结果卡片选择与 Shift 连续多选状态 ───────────────────────
@@ -267,7 +272,9 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
     () =>
       selectedPreCategories.value.length +
       selectedPostCategories.value.length +
-      (postKeyword.value.trim() ? 1 : 0),
+      (postKeyword.value.trim() ? 1 : 0) +
+      (preExtensions.value.trim() ? 1 : 0) +
+      (preMinSizeMb.value.trim() || preMaxSizeMb.value.trim() ? 1 : 0),
   );
 
   // ── Actions ────────────────────────────────────────────────────────
@@ -292,8 +299,7 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
   }
 
   function closeModal() {
-    aggregateSearchDataSource.abortActiveStream();
-    aggregateSearchDataSource.unbindLazyLoadSentinel();
+    stopSearch();
     aggregateSearchDataSource.clearTreeHoverExpand();
     isStreaming.value = false;
     isLoadingMore.value = false;
@@ -302,6 +308,14 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
     closeTreeContextMenu();
     cancelTreeInlineRename();
     isModalOpen.value = false;
+  }
+
+  function stopSearch() {
+    searchEpoch.value += 1;
+    aggregateSearchDataSource.abortActiveStream();
+    isStreaming.value = false;
+    isLoadingMore.value = false;
+    hasMore.value = false;
   }
 
   function toggleLeftPane() {
@@ -388,6 +402,9 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
 
   function clearPreCategories() {
     selectedPreCategories.value = [];
+    preExtensions.value = '';
+    preMinSizeMb.value = '';
+    preMaxSizeMb.value = '';
   }
 
   function togglePostCategory(category: SearchPreFilterCategory) {
@@ -706,18 +723,33 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
     loadingHighResIds.value = {};
     highResLoadedIds.value = {};
     brokenThumbIds.value = {};
+    peerProgress.value = {};
+
+    const toBytes = (raw: string) => {
+      const value = Number(raw.trim());
+      return Number.isFinite(value) && value >= 0 ? Math.round(value * 1024 * 1024) : undefined;
+    };
 
     const query = {
       keyword: keyword.value,
       preCategories: [...selectedPreCategories.value],
+      preExtensions: preExtensions.value.split(/[\s,;]+/).map((value) => value.trim().replace(/^\./, '').toLowerCase()).filter(Boolean),
+      minSizeBytes: toBytes(preMinSizeMb.value),
+      maxSizeBytes: toBytes(preMaxSizeMb.value),
       scopeSessionIds: [...selectedScopeSessionIds.value],
       page: 1,
       pageSize: PAGE_SIZE,
     };
 
     try {
-      for await (const chunk of aggregateSearchDataSource.streamSearchPage(query, signal)) {
+      for await (const chunk of aggregateSearchDataSource.streamFocusedSearch(query, signal)) {
         if (epoch !== searchEpoch.value || signal.aborted) return;
+        if (chunk.peerProgress) {
+          peerProgress.value = {
+            ...peerProgress.value,
+            [`${chunk.peerProgress.accountId}:${chunk.peerProgress.peerKey}`]: chunk.peerProgress,
+          };
+        }
         appendChunkItems(chunk.items, chunk.totalMatched, chunk.hasMore);
       }
       logSearch(
@@ -753,90 +785,6 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
     } finally {
       if (epoch === searchEpoch.value) {
         isStreaming.value = false;
-      }
-    }
-  }
-
-  async function loadNextPageLazy() {
-    if (isStreaming.value || isLoadingMore.value || !hasMore.value) {
-      logSearch(
-        'store_load_more_skipped',
-        'DEBUG',
-        {
-          reason: isStreaming.value
-            ? 'still_streaming'
-            : isLoadingMore.value
-              ? 'already_loading'
-              : 'no_more',
-          currentPage: currentPage.value,
-          totalMatched: totalMatched.value,
-        },
-        '本次触底懒加载被跳过',
-      );
-      return;
-    }
-
-    const epoch = searchEpoch.value;
-    const nextPage = currentPage.value + 1;
-    const signal = aggregateSearchDataSource.createStreamSignal();
-    const startedAt = Date.now();
-    const queryMeta = {
-      nextPage,
-      keywordLength: keyword.value.trim().length,
-      categories: selectedPreCategories.value.join(',') || 'all',
-      scopeCount: selectedScopeSessionIds.value.length,
-    };
-    logSearch('store_load_more_start', 'INFO', queryMeta, '触底加载下一页');
-
-    isLoadingMore.value = true;
-
-    const query = {
-      keyword: keyword.value,
-      preCategories: [...selectedPreCategories.value],
-      scopeSessionIds: [...selectedScopeSessionIds.value],
-      page: nextPage,
-      pageSize: PAGE_SIZE,
-    };
-
-    try {
-      for await (const chunk of aggregateSearchDataSource.streamSearchPage(query, signal)) {
-        if (epoch !== searchEpoch.value || signal.aborted) return;
-        appendChunkItems(chunk.items, chunk.totalMatched, chunk.hasMore);
-      }
-      // 只有成功完成一页才推进页码，失败时保持在原页以便重试
-      currentPage.value = nextPage;
-      logSearch(
-        'store_load_more_done',
-        'INFO',
-        {
-          ...queryMeta,
-          loaded: rawResults.value.length,
-          totalMatched: totalMatched.value,
-          hasMore: hasMore.value,
-        },
-        '下一页加载完成',
-        Date.now() - startedAt,
-      );
-    } catch (error) {
-      const info = classifyTelegramError(error);
-      if (epoch === searchEpoch.value) {
-        logSearch(
-          'store_load_more_error',
-          'ERROR',
-          {
-            ...queryMeta,
-            bucket: info.bucket,
-            code: info.code,
-            retryable: info.retryable,
-            loaded: rawResults.value.length,
-          },
-          info.description,
-          Date.now() - startedAt,
-        );
-      }
-    } finally {
-      if (epoch === searchEpoch.value) {
-        isLoadingMore.value = false;
       }
     }
   }
@@ -1169,6 +1117,9 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
     activeFilterStage,
     isPreTypeOptionsListed,
     selectedPreCategories,
+    preExtensions,
+    preMinSizeMb,
+    preMaxSizeMb,
     selectedPostCategories,
     postKeyword,
     postResolutionFilter,
@@ -1218,8 +1169,9 @@ export const useAggregateSearchStore = defineStore('aggregateSearch', () => {
     currentPage,
     totalMatched,
     hasMore,
+    peerProgress,
     executeStreamingSearch,
-    loadNextPageLazy,
+    stopSearch,
 
     // 多选与 Shift 区间选择
     selectedResultIds,

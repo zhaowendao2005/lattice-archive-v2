@@ -108,9 +108,11 @@ export function seedAdmin({
     const result = spawnSync(wrangler, args, {
       cwd: ROOT,
       stdio: 'inherit',
+      shell: process.platform === 'win32',
       env: { ...process.env, CI: process.env.CI ?? 'true' },
     });
-    if (result.status !== 0) throw new Error(`管理员种子写入${target}库失败`);
+    if (result.error) throw new Error(`管理员种子写入${target}库失败：${result.error.message}`);
+    if (result.status !== 0) throw new Error(`管理员种子写入${target}库失败（退出码 ${result.status ?? 'unknown'}）`);
     console.log(`▸ 管理员账户已更新：${vars.ADMIN_EMAIL}`);
     return true;
   } finally {

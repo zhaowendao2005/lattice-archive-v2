@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { Paperclip, Reply } from '@lucide/vue';
+import { computed } from 'vue';
+import { Paperclip } from '@lucide/vue';
 import { useChatMediaStore } from '@/stores/chat/stores/chatMediaStore';
 import { useChatStore } from '@/stores/chat/stores/chatStore';
 import type { FeedMessageItem } from '@/stores/chat/types';
 import { vAvatarVisible } from './media/mediaVisible';
 import MessageInlineKeyboard from './MessageInlineKeyboard.vue';
 import MessageMeta from './MessageMeta.vue';
+import MessageToolbar from './MessageToolbar.vue';
 import MessagePhotoGrid from './media/MessagePhotoGrid.vue';
 import MessageRichText from './MessageRichText.vue';
 import MessageRoundVideo from './media/MessageRoundVideo.vue';
@@ -18,6 +20,9 @@ const chatStore = useChatStore();
 const mediaStore = useChatMediaStore();
 /** 相册统一按最大宽度展示；单图使用模型计算好的宽度，窄屏时随列宽收缩。 */
 const ALBUM_WIDTH = 400;
+/** 群组入站消息左侧保留头像列；头像只对齐气泡底部，不受下方内联键盘影响。 */
+const hasAvatarColumn = computed(() => props.item.inGroup && !props.item.out);
+const contentColumn = computed(() => (hasAvatarColumn.value ? 'col-start-2' : 'col-start-1'));
 </script>
 
 <template>
@@ -26,44 +31,52 @@ const ALBUM_WIDTH = 400;
     :data-message-id="props.item.id"
     :data-album-ids="props.item.albumIds?.join(' ')"
     :class="[
-      'group flex gap-2.5 rounded-2xl transition-colors duration-300',
+      'group flex gap-1.5 rounded-2xl transition-colors duration-300',
       props.item.out ? 'flex-row-reverse' : '',
       props.item.showSender ? 'pt-2' : '',
       chatStore.highlightedMessageId === props.item.id ? 'bg-brand-soft/50 ring-1 ring-brand/40 p-1 -mx-1' : ''
     ]"
   >
-    <span
-      v-if="props.item.inGroup && !props.item.out"
-      v-avatar-visible="props.item.showSender && props.item.senderAvatarKey ? `msg:${props.item.id}` : undefined"
+    <!-- 网格：第 1 行 = 头像 + 气泡（头像贴气泡底部），第 2 行 = 内联键盘（始终在气泡正下方） -->
+    <div
       :class="[
-        'relative size-8 shrink-0 self-end overflow-hidden rounded-full text-[11px] font-semibold flex items-center justify-center',
-        props.item.showSender ? 'bg-brand-soft text-brand' : 'invisible'
+        'grid min-w-0 w-fit gap-x-2.5 gap-y-1',
+        hasAvatarColumn ? 'max-w-[calc(78%+2.625rem)] grid-cols-[2rem_auto]' : 'max-w-[78%] grid-cols-[auto]',
+        props.item.out ? 'justify-items-end' : 'justify-items-start'
       ]"
-      :aria-hidden="!props.item.showSender"
     >
-      <img
-        v-if="props.item.showSender && mediaStore.avatarUrl(props.item.senderAvatarKey, props.item.senderAvatarThumb)"
-        :src="mediaStore.avatarUrl(props.item.senderAvatarKey, props.item.senderAvatarThumb)"
-        :alt="props.item.senderName"
+      <span
+        v-if="hasAvatarColumn"
+        v-avatar-visible="props.item.showSender && props.item.senderAvatarKey ? `msg:${props.item.id}` : undefined"
         :class="[
-          'size-full object-cover',
-          !mediaStore.isAvatarLoaded(props.item.senderAvatarKey) && props.item.senderAvatarThumb ? 'scale-110 blur-[2px]' : ''
+          'relative col-start-1 row-start-1 size-8 shrink-0 self-end overflow-hidden rounded-full text-[11px] font-semibold flex items-center justify-center',
+          props.item.showSender ? 'bg-brand-soft text-brand' : 'invisible'
         ]"
-        loading="lazy"
-      />
-      <span v-else>{{ props.item.senderInitials }}</span>
-    </span>
+        :aria-hidden="!props.item.showSender"
+      >
+        <img
+          v-if="props.item.showSender && mediaStore.avatarUrl(props.item.senderAvatarKey, props.item.senderAvatarThumb)"
+          :src="mediaStore.avatarUrl(props.item.senderAvatarKey, props.item.senderAvatarThumb)"
+          :alt="props.item.senderName"
+          :class="[
+            'size-full object-cover',
+            !mediaStore.isAvatarLoaded(props.item.senderAvatarKey) && props.item.senderAvatarThumb ? 'scale-110 blur-[2px]' : ''
+          ]"
+          loading="lazy"
+        />
+        <span v-else>{{ props.item.senderInitials }}</span>
+      </span>
 
-    <div :class="['min-w-0 max-w-[78%] flex flex-col gap-1', props.item.out ? 'items-end' : 'items-start']">
       <!-- 圆形视频不使用气泡底色，时间叠加在右下角 -->
-      <div v-if="props.item.round" class="relative">
+      <div v-if="props.item.round" :class="['relative row-start-1', contentColumn]">
         <MessageRoundVideo :round="props.item.round" />
         <MessageMeta :item="props.item" overlay />
       </div>
       <div
         v-else
         :class="[
-          'relative text-sm leading-relaxed selectable-text break-words',
+          'relative row-start-1 min-w-0 max-w-full text-sm leading-relaxed selectable-text break-words',
+          contentColumn,
           props.item.photos ? 'max-w-full overflow-hidden p-0.5' : 'px-3.5 py-2',
           props.item.out ? 'radius-bubble-self bg-primary text-primary-foreground' : 'radius-bubble-peer bg-muted'
         ]"
@@ -135,24 +148,16 @@ const ALBUM_WIDTH = 400;
         </div>
       </div>
 
-      <!-- 消息下方的内联按键矩阵（ReplyInlineMarkup，如搜索筛选与翻页按钮） -->
+      <!-- 消息下方的内联按键矩阵（ReplyInlineMarkup，如搜索筛选与翻页按钮）：位于气泡正下方，与气泡同列 -->
       <MessageInlineKeyboard
         v-if="props.item.replyMarkup && props.item.replyMarkup.length > 0"
+        :class="['row-start-2 w-full', contentColumn]"
         :message-id="props.item.id"
         :rows="props.item.replyMarkup"
       />
     </div>
 
-    <!-- 悬停快捷回复按钮（仅在可发言会话中显示） -->
-    <button
-      v-if="chatStore.canSendInActiveChat"
-      type="button"
-      class="self-center rounded-full p-1.5 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:bg-accent hover:text-foreground"
-      title="回复此消息"
-      aria-label="回复此消息"
-      @click="chatStore.setReplyTarget(props.item.id, props.item.senderName, props.item.text || props.item.mediaLabel || props.item.document?.fileName)"
-    >
-      <Reply class="size-3.5" :stroke-width="1.75" />
-    </button>
+    <!-- 悬停工具条：回复 / 复制 / 解析，对任何消息可用 -->
+    <MessageToolbar :item="props.item" />
   </div>
 </template>

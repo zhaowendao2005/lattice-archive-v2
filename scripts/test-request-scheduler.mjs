@@ -12,9 +12,9 @@ import { createRequire } from 'node:module';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 
-const ROOT = new URL('..', import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const ts = createRequire(import.meta.url)('typescript');
 const out = mkdtempSync(join(tmpdir(), 'lattice-scheduler-'));
 
@@ -101,9 +101,14 @@ try {
 
   // 7. normalization: custom clamps and cross-field constraints
   const cfg = applyConcurrencyConfig({ mode: 'custom', limits: { cover: 999, searchCoverReserved: 50, search: 12, nonMediaRpc: 2, totalActiveTasks: 1 } });
-  assert.equal(cfg.limits.cover, 12, 'clamped to bound then to mediaRpc'); assert.equal(cfg.limits.searchCoverReserved, 12);
+  assert.equal(cfg.limits.cover, 12, 'cover limited by parent mediaRpc (balanced fallback 12)'); assert.equal(cfg.limits.searchCoverReserved, 12);
   assert.equal(cfg.limits.search, 2); assert.ok(cfg.limits.totalActiveTasks >= cfg.limits.mediaRpc);
   assert.deepEqual(applyConcurrencyConfig({ mode: 'aggressive', limits: { cover: 1 } }).limits.cover, 14);
+  // 无固定数值上限：父级放开后子项可远超旧上限；下限仍生效
+  const big = applyConcurrencyConfig({ mode: 'custom', limits: { mediaRpc: 500, cover: 300, searchCoverReserved: 100, nonMediaRpc: 200, search: 150, totalActiveTasks: 10 } });
+  assert.equal(big.limits.cover, 300); assert.equal(big.limits.searchCoverReserved, 100); assert.equal(big.limits.search, 150);
+  assert.equal(big.limits.totalActiveTasks, 500, 'total raised to max(nonMedia, media)');
+  assert.equal(applyConcurrencyConfig({ mode: 'custom', limits: { search: 0, totalActiveTasks: 0 } }).limits.search, 1, 'minimum still enforced');
 
   // 8. 监控埋点：成功 / 失败计数、字节、最近任务环、事件
   applyConcurrencyConfig({ mode: 'balanced' });

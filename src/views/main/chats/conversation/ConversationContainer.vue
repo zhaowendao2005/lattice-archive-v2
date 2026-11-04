@@ -16,7 +16,6 @@ import InviteLinkDialog from './InviteLinkDialog.vue';
 import LeaveChatDialog from './LeaveChatDialog.vue';
 import MessageFeed from './MessageFeed.vue';
 import ReadOnlyNotice from './ReadOnlyNotice.vue';
-import MediaViewer from './media/MediaViewer.vue';
 
 const chatStore = useChatStore();
 </script>
@@ -30,8 +29,6 @@ const chatStore = useChatStore();
       <!-- 可发言会话（搜索群 / 机器人 / 私聊 / 普通群组）展示底部输入栏；只读频道与未加入会话展示底部提示条 -->
       <ChatComposer v-if="chatStore.canSendInActiveChat" />
       <ReadOnlyNotice v-else />
-      <!-- 沉浸式查看器是浮层，挂在这里以便复用当前会话上下文 -->
-      <MediaViewer />
     </template>
     <div v-else class="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center text-muted-foreground">
       <MessagesSquare class="size-8" :stroke-width="1.5" />

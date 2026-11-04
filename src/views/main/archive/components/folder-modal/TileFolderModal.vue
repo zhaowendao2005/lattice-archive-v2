@@ -17,6 +17,7 @@ import type { TgPeerKey } from '@/stores/chat/types';
 import type { FileTileData, FolderTileData, TileData } from '../../types/tile';
 import { countFolderItemsRecursive, useTileStore } from '@/stores/archive/stores/tileStore';
 import { getFileVisual } from '../tiles/fileVisuals';
+import { isTelegramMediaTile } from '../../utils/tilePresentation';
 
 const props = defineProps<{
   folder: FolderTileData;
@@ -173,7 +174,9 @@ function handleOpenChild(event: MouseEvent, item: TileData) {
   if (item.type === 'folder') {
     tileStore.openFolder(item);
   } else {
-    tileStore.openFile(item as FileTileData);
+    const file = item as FileTileData;
+    if (isTelegramMediaTile(file, tileStore.resources)) void tileStore.openTelegramMedia(file);
+    else tileStore.openFile(file);
   }
 }
 

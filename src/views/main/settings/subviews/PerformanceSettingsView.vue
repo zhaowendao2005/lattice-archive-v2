@@ -26,7 +26,7 @@ const MODES: { key: TelegramConcurrencyMode; label: string; hint: string }[] = [
         <div class="rounded-xl border border-border bg-card divide-y divide-border overflow-hidden">
           <p class="flex items-start gap-2 px-4 py-3 text-xs text-muted-foreground">
             <Gauge class="mt-0.5 size-4 shrink-0" :stroke-width="1.75" />
-            并发越高，搜索、封面与下载越快，但会增加网络、内存和 Telegram 限流风险。遇到限流或超时时，系统会临时降低实际并发，恢复后逐步回到这里设置的上限；所有请求仍共用每个账号的同一条连接。
+            并发越高，搜索、封面与下载越快，但会增加网络、内存和 Telegram 限流风险。遇到限流或超时时，系统会临时降低实际并发，恢复后逐步回到这里设置的上限；所有请求仍共用每个账号的同一条连接。自定义模式没有固定数值上限，请自行评估限流风险。
           </p>
           <button
             v-for="option in MODES"

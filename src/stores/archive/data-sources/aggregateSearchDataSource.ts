@@ -5,14 +5,10 @@
  * 定位：归档与聚合搜索业务域唯一的全局单例连接器。
  * 职责：
  * 1. 三级混合检索管线（L0 本地磁贴与临时凭据索引 + L1 跨账号 MTProto messages.Search/SearchGlobal + 开发态 Mock 隔离）；
- * 2. 提供支持 `AbortSignal` 的分块流式检索异步生成器 (`streamSearchPage`)；
+ * 2. 提供支持 `AbortSignal` 的逐会话持续检索异步生成器 (`streamFocusedSearch`)；
  * 3. 统一托管触底懒加载的 `IntersectionObserver` 句柄与拖拽悬停展开定时器，保证视图层零本地 `ref`。
  */
-import {
-  MOCK_SCOPE_SESSIONS,
-  MOCK_SEARCH_RESULTS_POOL,
-  SEARCH_CATEGORY_OPTIONS,
-} from '../mocks/aggregateSearchMock';
+import { MOCK_SCOPE_SESSIONS, MOCK_SEARCH_RESULTS_POOL, SEARCH_CATEGORY_OPTIONS } from '../mocks/aggregateSearchMock';
 import type {
   AggregateSearchResultItem,
   SearchCategoryOption,
@@ -33,35 +29,9 @@ import {
 } from '@/worker/local/chat/telegramErrors';
 import type { TgMediaFile, TgMessageDto, TgPeerKey, TgPeerRef } from '@/stores/chat/types';
 import { useSessionManagerStore } from '../stores/sessionManagerStore';
+import { aggregateSearchIndex, type SearchIndexCoverage } from './aggregateSearchIndex';
 
-const STREAM_CHUNK_SIZE = 4;
-const STREAM_STEP_DELAY_MS = 60;
-const isMockDev =
-  Boolean(import.meta.env.DEV) && import.meta.env.VITE_ENABLE_MOCK_DATA === 'true';
-
-/** 跨分页检索游标：同一查询签名下复用 Telegram 的 offset 游标，避免每页都从头发起请求。 */
-interface SearchCursorState {
-  signature: string;
-  offsetId?: number;
-  offsetPeer?: TgPeerRef;
-  offsetRate?: number;
-  totalCount: number;
-  deliveredIds: Set<string>;
-  pagesFetched: number;
-}
-
-function buildSearchSignature(accountId: string, query: StreamingSearchQuery): string {
-  return JSON.stringify({
-    accountId,
-    keyword: query.keyword.trim(),
-    categories: [...query.preCategories].sort(),
-    scopes: [...query.scopeSessionIds].sort(),
-    minDate: query.minDate ?? 0,
-    maxDate: query.maxDate ?? 0,
-    fromPeerKey: query.fromPeerKey ?? '',
-    topMsgId: query.topMsgId ?? 0,
-  });
-}
+const isMockDev = Boolean(import.meta.env.DEV) && import.meta.env.VITE_ENABLE_MOCK_DATA === 'true';
 
 function peerRefFromKey(key: TgPeerKey): TgPeerRef | undefined {
   const match = /^(user|chat|channel)-(\d+)$/.exec(key);
@@ -76,21 +46,6 @@ function arrayBufferToDataUrl(bytes: ArrayBuffer, mimeType = 'image/jpeg'): stri
     binary += String.fromCharCode(...u8.subarray(i, i + chunkSize));
   }
   return `data:${mimeType || 'image/jpeg'};base64,${btoa(binary)}`;
-}
-
-function sleepWithAbort(ms: number, signal: AbortSignal): Promise<boolean> {
-  if (signal.aborted) return Promise.resolve(false);
-  return new Promise((resolve) => {
-    const timer = window.setTimeout(() => {
-      signal.removeEventListener('abort', onAbort);
-      resolve(true);
-    }, ms);
-    const onAbort = () => {
-      window.clearTimeout(timer);
-      resolve(false);
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
 }
 
 function formatBytesHuman(bytes: number): string {
@@ -208,9 +163,8 @@ function mapTgMessageToSearchResult(
 
 class AggregateSearchDataSource {
   private activeAbortController: AbortController | null = null;
-  private sentinelObserver: IntersectionObserver | null = null;
   private treeExpandTimer: number | null = null;
-  private searchCursor: SearchCursorState | null = null;
+
 
   private logSearch(
     action: string,
@@ -363,360 +317,234 @@ class AggregateSearchDataSource {
   }
 
   /**
-   * 按查询条件过滤匹配结果全集（搜索前筛选在此阶段直接参与检索）
+   * 按会话持续扫描。每个会话只推进自己的游标；请求完成后立即把该会话重新放回队列，
+   * 不等待其他会话，因此慢会话不会成为整批任务的栅栏。
    */
-  private filterPool(pool: AggregateSearchResultItem[], query: StreamingSearchQuery): AggregateSearchResultItem[] {
-    const kw = query.keyword.trim().toLowerCase();
-    const hasCategoryFilter = query.preCategories.length > 0;
-    const categorySet = new Set(query.preCategories);
-    const hasScopeFilter = query.scopeSessionIds.length > 0;
-    const scopeSet = new Set(query.scopeSessionIds);
-
-    return pool.filter((item) => {
-      if (hasCategoryFilter && !categorySet.has(item.category)) {
-        return false;
-      }
-      if (hasScopeFilter && !scopeSet.has(item.sessionId)) {
-        return false;
-      }
-      if (kw) {
-        const hit =
-          item.title.toLowerCase().includes(kw) ||
-          item.snippet.toLowerCase().includes(kw) ||
-          item.extension.toLowerCase().includes(kw) ||
-          item.sessionTitle.toLowerCase().includes(kw) ||
-          item.categoryLabel.toLowerCase().includes(kw);
-        if (!hit) return false;
-      }
-      return true;
-    });
-  }
-
-  /**
-   * 流式分页检索生成器：融合 MTProto 实时检索与本地缓存池
-   *
-   * 分页策略（修复「永远只有 15 条」）：
-   * - 第 1 页：从服务端取一页，记录 nextOffsetId / nextOffsetPeer / nextRate；
-   * - 第 N 页：携带上一页返回的 offset 游标继续请求，而不是从 offset 0 重来；
-   * - 查询签名（关键词/类型/范围/时间）变化时自动重置游标。
-   */
-  async *streamSearchPage(
+  async *streamFocusedSearch(
     query: StreamingSearchQuery,
     signal: AbortSignal,
   ): AsyncGenerator<StreamingSearchChunk, void, unknown> {
-    const pageStartedAt = Date.now();
+    type FocusedPeer = {
+      key: TgPeerKey;
+      peer: TgPeerRef;
+      title: string;
+      kind: 'joined' | 'credential_only';
+      accountId: string;
+    };
     const chatStore = useChatStore();
     const accountId = chatStore.accountId;
-    const signature = buildSearchSignature(accountId ?? '', query);
-    const isFirstPage =
-      query.page <= 1 || !this.searchCursor || this.searchCursor.signature !== signature;
-    if (isFirstPage) {
-      this.searchCursor = {
-        signature,
-        totalCount: 0,
-        deliveredIds: new Set(),
-        pagesFetched: 0,
+    if ((!accountId || !chatStore.isOnline) && isMockDev) {
+      const keyword = query.keyword.trim().toLowerCase();
+      const items = MOCK_SEARCH_RESULTS_POOL.filter((item) =>
+        (!keyword || `${item.title}\n${item.snippet}`.toLowerCase().includes(keyword)) &&
+        (query.preCategories.length === 0 || query.preCategories.includes(item.category)) &&
+        (!query.preExtensions?.length || query.preExtensions.includes(item.extension.toLowerCase())) &&
+        (query.minSizeBytes === undefined || (item.sizeBytes ?? 0) >= query.minSizeBytes) &&
+        (query.maxSizeBytes === undefined || (item.sizeBytes ?? 0) <= query.maxSizeBytes),
+      );
+      for (const item of items) {
+        if (signal.aborted) return;
+        yield { items: [item], totalMatched: items.length, hasMore: true, isFinalChunkOfPage: true, sourceTier: 0 };
+      }
+      if (!signal.aborted) yield { items: [], totalMatched: items.length, hasMore: false, isFinalChunkOfPage: true, sourceTier: 0 };
+      return;
+    }
+    if (!accountId || !chatStore.isOnline) return;
+    const sessionManagerStore = useSessionManagerStore();
+
+    const selected = query.scopeSessionIds.length > 0
+      ? query.scopeSessionIds
+      : [...Object.keys(chatStore.dialogs), ...sessionManagerStore.tempCredentials.map((item) => item.peerKey)];
+    const peers: FocusedPeer[] = selected
+      .map((key) => {
+        const dialog = chatStore.dialogs[key];
+        if (dialog) return { key: key as TgPeerKey, peer: dialog.peer, title: dialog.title, kind: 'joined' as const, accountId };
+        const credential = sessionManagerStore.tempCredentials.find((item) => item.peerKey === key);
+        if (!credential || credential.accountId !== accountId) return null;
+        return {
+          key: key as TgPeerKey,
+          peer: { type: credential.peerType, id: credential.peerId, accessHash: credential.accessHash } as TgPeerRef,
+          title: credential.title,
+          kind: 'credential_only' as const,
+          accountId: credential.accountId,
+        };
+      })
+      .filter((item): item is FocusedPeer => item !== null);
+    if (peers.length === 0) return;
+
+    const queryKey = JSON.stringify({
+      keyword: query.keyword.trim(),
+      minDate: query.minDate ?? 0,
+      maxDate: query.maxDate ?? 0,
+      categories: [...query.preCategories].sort(),
+    });
+    const broadQueryKey = JSON.stringify({
+      keyword: query.keyword.trim(),
+      minDate: query.minDate ?? 0,
+      maxDate: query.maxDate ?? 0,
+      categories: [],
+    });
+    const indexSnapshot = await aggregateSearchIndex.read(accountId);
+    const cursors = new Map<TgPeerKey, { offsetId?: number; done: boolean; pages: number; checked: number; matched: number }>();
+    for (const item of peers) {
+      const exactCoverage = aggregateSearchIndex.findCoverage(indexSnapshot, accountId, item.key, queryKey);
+      const broadCoverage = query.preCategories.length > 0
+        ? aggregateSearchIndex.findCoverage(indexSnapshot, accountId, item.key, broadQueryKey)
+        : undefined;
+      const coverage = exactCoverage ?? (broadCoverage?.complete ? broadCoverage : undefined);
+      cursors.set(item.key, {
+        offsetId: coverage?.nextOffsetId,
+        done: coverage?.complete ?? false,
+        pages: 0,
+        checked: 0,
+        matched: 0,
+      });
+    }
+
+    for (const item of peers) {
+      const cursor = cursors.get(item.key)!;
+      yield {
+        items: [],
+        totalMatched: 0,
+        hasMore: true,
+        isFinalChunkOfPage: true,
+        sourceTier: 0,
+        peerProgress: {
+          accountId,
+          peerKey: item.key,
+          status: cursor.done ? 'completed' : 'queued',
+          pages: cursor.pages,
+          checked: cursor.checked,
+          matched: cursor.matched,
+        },
       };
     }
-    const cursor = this.searchCursor!;
-    cursor.pagesFetched += 1;
 
-    const queryMeta = {
-      page: query.page,
-      pageSize: query.pageSize,
-      keywordLength: query.keyword.trim().length,
-      categories: query.preCategories.join(',') || 'all',
-      scopeCount: query.scopeSessionIds.length,
-      accountId: accountId ?? 'none',
-      cursorOffsetId: isFirstPage ? 0 : (cursor.offsetId ?? 0),
-    };
-    this.logSearch('stream_page_start', 'INFO', queryMeta, '开始检索一页搜索结果');
+    const matchesLocalFilters = (item: AggregateSearchResultItem) =>
+      peers.some((peer) => peer.key === item.sessionId) &&
+      (!query.minDate || (item.dateSeconds ?? 0) >= query.minDate) &&
+      (!query.maxDate || (item.dateSeconds ?? 0) <= query.maxDate) &&
+      (!query.keyword.trim() || `${item.title}\n${item.snippet}`.toLowerCase().includes(query.keyword.trim().toLowerCase())) &&
+      (query.preCategories.length === 0 || query.preCategories.includes(item.category)) &&
+      (query.preExtensions?.length === 0 || !query.preExtensions || query.preExtensions.includes(item.extension.toLowerCase())) &&
+      (query.minSizeBytes === undefined || (item.sizeBytes !== undefined && item.sizeBytes >= query.minSizeBytes)) &&
+      (query.maxSizeBytes === undefined || (item.sizeBytes !== undefined && item.sizeBytes <= query.maxSizeBytes));
+    const cached = indexSnapshot.records.filter(matchesLocalFilters);
+    let cachedTotal = 0;
+    const emittedIds = new Set<string>();
+    for (const item of cached) {
+      if (signal.aborted) return;
+      emittedIds.add(item.id);
+      cachedTotal += 1;
+      yield { items: [item], totalMatched: cachedTotal, hasMore: true, isFinalChunkOfPage: true, sourceTier: 0 };
+    }
 
-    let pageItems: AggregateSearchResultItem[] = [];
-    let totalMatched = cursor.totalCount;
-    let hasMore = false;
-    let source: 'mtproto' | 'mock' | 'none' = 'none';
-    let rawCount = 0;
-
-    // 1. 若已连接真实 Telegram 账号，发起 MTProto messages.Search / SearchGlobal
-    if (accountId && chatStore.isOnline) {
-      let filterType: 'all' | 'video' | 'Photo' | 'document' = 'all';
-      if (query.preCategories.length === 1) {
-        if (query.preCategories[0] === 'video') filterType = 'video';
-        else if (query.preCategories[0] === 'image') filterType = 'Photo';
-        else if (query.preCategories[0] === 'text') filterType = 'document';
-      }
-
-      const offsetId = isFirstPage ? undefined : cursor.offsetId;
-      const offsetPeer = isFirstPage ? undefined : cursor.offsetPeer;
-      const offsetRate = isFirstPage ? undefined : cursor.offsetRate;
-
-      try {
-        let res: {
-          messages: TgMessageDto[];
-          dialogs?: Record<TgPeerKey, { title: string; peer: TgPeerRef }>;
-          totalCount?: number;
-          nextOffsetId?: number;
-          nextOffsetPeer?: TgPeerRef;
-          nextRate?: number;
-          hasMore?: boolean;
+    const pending = new Map<TgPeerKey, Promise<{ key: TgPeerKey; items: AggregateSearchResultItem[]; next?: { offsetId?: number; done: boolean }; total: number; error?: unknown }>>();
+    const schedule = (item: FocusedPeer) => {
+      const cursor = cursors.get(item.key)!;
+      pending.set(item.key, (async () => {
+        try {
+        const response = await telegramBusClient.search.searchMessages(accountId, {
+          peer: item.peer,
+          query: query.keyword,
+          filterType: query.preCategories.length === 1
+            ? query.preCategories[0] === 'video' ? 'video'
+              : query.preCategories[0] === 'image' ? 'photo'
+                : query.preCategories[0] === 'text' ? 'document' : 'all'
+            : 'all',
+          minDate: query.minDate,
+          maxDate: query.maxDate,
+          offsetId: cursor.offsetId,
+          limit: query.pageSize,
+        }, { signal, source: 'archive.focused-search' });
+        const items = response.messages.map((message) => mapTgMessageToSearchResult(
+          message,
+          item.title,
+          item.kind,
+          { accountId: item.accountId, peerRef: item.peer },
+        ));
+        const last = response.messages[response.messages.length - 1];
+        return {
+          key: item.key,
+          items,
+          total: response.totalCount ?? items.length,
+          next: { offsetId: response.nextOffsetId ?? last?.id, done: !response.hasMore || response.messages.length === 0 },
         };
-
-        if (query.scopeSessionIds.length === 1) {
-          const targetKey = query.scopeSessionIds[0] as TgPeerKey;
-          const dialog = chatStore.dialogs[targetKey];
-          if (!dialog) {
-            this.logSearch(
-              'stream_scope_missing',
-              'WARN',
-              { ...queryMeta, scopePeer: targetKey },
-              '选中会话不在本地会话表中，无法发起单会话检索（可能仅为凭据会话）',
-            );
-            res = { messages: [], totalCount: 0, hasMore: false };
-          } else {
-            res = await telegramBusClient.search.searchMessages(accountId, {
-              peer: dialog.peer,
-              query: query.keyword,
-              filterType,
-              minDate: query.minDate,
-              maxDate: query.maxDate,
-              offsetId,
-              limit: query.pageSize,
-            });
-          }
-        } else {
-          res = await telegramBusClient.search.searchMessages(accountId, {
-            query: query.keyword,
-            filterType,
-            minDate: query.minDate,
-            maxDate: query.maxDate,
-            offsetId,
-            offsetRate,
-            offsetPeer,
-            limit: query.pageSize,
-          });
+        } catch (error) {
+          return { key: item.key, items: [], total: 0, error };
         }
+      })());
+    };
 
-        rawCount = res.messages.length;
-        const mapped: AggregateSearchResultItem[] = [];
-        for (const msg of res.messages) {
-          if (query.scopeSessionIds.length === 1) {
-            const targetKey = query.scopeSessionIds[0] as TgPeerKey;
-            const dialog = chatStore.dialogs[targetKey];
-            const peerDto = res.dialogs?.[msg.peerKey] ?? dialog;
-            if (!peerDto) continue;
-            mapped.push(
-              mapTgMessageToSearchResult(msg, peerDto.title, 'joined', {
-                accountId,
-                peerRef: peerDto.peer,
-              }),
-            );
-          } else {
-            const dialog = chatStore.dialogs[msg.peerKey] ?? res.dialogs?.[msg.peerKey];
-            mapped.push(
-              mapTgMessageToSearchResult(
-                msg,
-                dialog?.title ?? msg.peerKey,
-                chatStore.dialogs[msg.peerKey] ? 'joined' : 'credential_only',
-                {
-                  accountId,
-                  peerRef: dialog?.peer,
-                },
-              ),
-            );
-          }
-        }
-
-        // 跨页去重：Telegram offset 在极端情况下可能返回重复消息
-        const beforeDedupe = mapped.length;
-        pageItems = mapped.filter((item) => {
-          if (cursor.deliveredIds.has(item.id)) return false;
-          cursor.deliveredIds.add(item.id);
-          return true;
-        });
-        const dedupedCount = beforeDedupe - pageItems.length;
-
-        totalMatched = Math.max(res.totalCount ?? 0, cursor.totalCount, cursor.deliveredIds.size);
-        cursor.totalCount = totalMatched;
-        cursor.offsetId = res.nextOffsetId;
-        cursor.offsetPeer = res.nextOffsetPeer;
-        cursor.offsetRate = res.nextRate;
-        hasMore = Boolean(res.hasMore) && pageItems.length > 0;
-        source = 'mtproto';
-
-        this.logSearch(
-          'stream_page_ok',
-          pageItems.length > 0 ? 'INFO' : 'WARN',
-          {
-            ...queryMeta,
-            source,
-            rawCount,
-            mappedCount: mapped.length,
-            dedupedCount,
-            itemCount: pageItems.length,
-            totalCount: totalMatched,
-            hasMore,
-            nextOffsetId: cursor.offsetId ?? 0,
-            nextRate: cursor.offsetRate ?? 0,
-            nextHasPeer: Boolean(cursor.offsetPeer),
-            withThumb: pageItems.filter((item) => Boolean(item.thumbnailUrl)).length,
-            withoutThumb: pageItems.filter((item) => !item.thumbnailUrl).length,
-            imageCount: pageItems.filter((item) => item.category === 'image').length,
-            videoCount: pageItems.filter((item) => item.category === 'video').length,
-            textCount: pageItems.filter((item) => item.category === 'text').length,
-            otherCount: pageItems.filter((item) => item.category === 'other').length,
-            errorBucket: '',
-          },
-          pageItems.length > 0
-            ? 'MTProto 检索返回一页结果'
-            : 'MTProto 检索返回空页（可能已到末页或过滤条件过严）',
-          Date.now() - pageStartedAt,
-        );
-      } catch (error) {
-        const info = classifyTelegramError(error);
-        this.logSearch(
-          'stream_page_error',
-          'ERROR',
-          {
-            ...queryMeta,
-            source: 'mtproto',
-            bucket: info.bucket,
-            code: info.code,
-            retryable: info.retryable,
-            errorBucket: info.bucket,
-          },
-          info.description,
-          Date.now() - pageStartedAt,
-        );
-        // 交给 Store 决定回滚页码 / 展示错误；游标保持上一页状态不被污染
-        throw error;
-      }
-    } else {
-      const reason: CoverUnavailableReason = !accountId ? 'NO_ACCOUNT' : 'OFFLINE';
-      const info = describeCoverUnavailable(reason);
-      this.logSearch(
-        'stream_page_skipped',
-        'WARN',
-        {
-          ...queryMeta,
-          source: 'none',
-          bucket: info.bucket,
-          code: info.code,
-          errorBucket: info.bucket,
-        },
-        info.description,
-      );
+    for (const item of peers) {
+      if (!cursors.get(item.key)?.done) schedule(item);
     }
-
-    // 2. 开发态且开启 Mock 开关时，合并 Mock 样本池（仅用于无真实账号的本地演示）
-    if (isMockDev) {
-      const mockPool = this.filterPool(MOCK_SEARCH_RESULTS_POOL, query);
-      const mockStart = (query.page - 1) * query.pageSize;
-      const mockPage = mockPool.slice(mockStart, mockStart + query.pageSize);
-      if (mockPage.length > 0) {
-        pageItems.push(...mockPage);
-        source = source === 'mtproto' ? 'mtproto' : 'mock';
-        totalMatched = Math.max(totalMatched, cursor.deliveredIds.size + mockPool.length);
-        hasMore = hasMore || mockStart + mockPage.length < mockPool.length;
+    let totalMatched = cachedTotal;
+    while (pending.size > 0 && !signal.aborted) {
+      const result = await Promise.race(pending.values());
+      pending.delete(result.key);
+      const cursor = cursors.get(result.key)!;
+      cursor.pages += 1;
+      if (result.error) {
+        yield {
+          items: [],
+          totalMatched,
+          hasMore: true,
+          isFinalChunkOfPage: true,
+          sourceTier: 2,
+          peerProgress: { accountId, peerKey: result.key, status: 'error', pages: cursor.pages, checked: 0, matched: 0, errorCode: 'SEARCH_PAGE_FAILED' },
+        };
+        this.logSearch('focused_peer_error', 'WARN', { peerKey: result.key }, '单会话搜索失败，其他会话继续');
+        continue;
       }
-    }
+      cursor.offsetId = result.next?.offsetId;
+      cursor.done = result.next?.done ?? true;
+      const visibleItems = result.items.filter(matchesLocalFilters);
+      cursor.checked += result.items.length;
+      const freshVisibleItems = visibleItems.filter((item) => !emittedIds.has(item.id));
+      for (const item of freshVisibleItems) emittedIds.add(item.id);
+      cursor.matched += freshVisibleItems.length;
+      totalMatched += freshVisibleItems.length;
 
-    if (pageItems.length === 0) {
-      const ok = await sleepWithAbort(40, signal);
-      if (!ok) return;
-      this.logSearch(
-        'stream_page_empty',
-        hasMore ? 'WARN' : 'DEBUG',
-        { ...queryMeta, source, totalCount: totalMatched, hasMore },
-        '本页没有可展示结果',
-        Date.now() - pageStartedAt,
-      );
+      const coverage: SearchIndexCoverage = {
+          accountId,
+          peerKey: result.key,
+          queryKey,
+          minDate: query.minDate,
+          maxDate: query.maxDate,
+          oldestDate: result.items[result.items.length - 1]?.dateSeconds,
+          oldestMessageId: result.items[result.items.length - 1]?.msgId,
+          nextOffsetId: result.next?.offsetId,
+          complete: cursor.done,
+          updatedAt: Date.now(),
+      };
+      try {
+        await aggregateSearchIndex.commit(accountId, result.items, [coverage]);
+      } catch {
+        this.logSearch('focused_index_write_failed', 'WARN', { peerKey: result.key }, '搜索索引写入失败，本次结果仍继续返回');
+      }
       yield {
         items: [],
         totalMatched,
-        hasMore: false,
+        hasMore: true,
         isFinalChunkOfPage: true,
+        sourceTier: 2,
+        peerProgress: { accountId, peerKey: result.key, status: cursor.done ? 'completed' : 'searching', pages: cursor.pages, checked: cursor.checked, matched: cursor.matched },
       };
-      return;
-    }
-
-    for (let offset = 0; offset < pageItems.length; offset += STREAM_CHUNK_SIZE) {
-      const ok = await sleepWithAbort(STREAM_STEP_DELAY_MS, signal);
-      if (!ok || signal.aborted) return;
-
-      const chunkItems = pageItems.slice(offset, offset + STREAM_CHUNK_SIZE);
-      const isFinalChunkOfPage = offset + STREAM_CHUNK_SIZE >= pageItems.length;
-
-      this.logSearch(
-        'stream_chunk',
-        'DEBUG',
-        {
-          ...queryMeta,
-          source,
-          offset,
-          chunkSize: chunkItems.length,
-          totalCount: totalMatched,
-          hasMore,
-          isFinalChunkOfPage,
-        },
-        '推送一个结果分片',
-      );
-
-      yield {
-        items: chunkItems,
-        totalMatched,
-        hasMore,
-        isFinalChunkOfPage,
-      };
-    }
-
-    this.logSearch(
-      'stream_page_done',
-      'INFO',
-      {
-        ...queryMeta,
-        source,
-        itemCount: pageItems.length,
-        totalCount: totalMatched,
-        hasMore,
-      },
-      '本页结果推送完成',
-      Date.now() - pageStartedAt,
-    );
-  }
-
-  /**
-   * 绑定底部懒加载哨兵 DOM 节点（由自定义指令或挂载回调委托，视图层零 ref）
-   */
-  bindLazyLoadSentinel(
-    el: HTMLElement | null,
-    scrollRoot: HTMLElement | null,
-    onReachBottom: () => void,
-  ): void {
-    this.unbindLazyLoadSentinel();
-    if (!el || typeof IntersectionObserver === 'undefined') return;
-
-    this.sentinelObserver = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          if (entry.isIntersecting) {
-            onReachBottom();
-          }
+      if (freshVisibleItems.length > 0) {
+        for (const item of freshVisibleItems) {
+          if (signal.aborted) return;
+          yield { items: [item], totalMatched, hasMore: true, isFinalChunkOfPage: true, sourceTier: 2 };
         }
-      },
-      {
-        root: scrollRoot,
-        rootMargin: '0px 0px 180px 0px',
-        threshold: 0.01,
-      },
-    );
-    this.sentinelObserver.observe(el);
-  }
+      }
 
-  unbindLazyLoadSentinel(): void {
-    if (this.sentinelObserver) {
-      this.sentinelObserver.disconnect();
-      this.sentinelObserver = null;
+      if (!cursor.done) {
+        const peer = peers.find((item) => item.key === result.key)!;
+        schedule(peer);
+      }
+    }
+    if (!signal.aborted) {
+      yield { items: [], totalMatched, hasMore: false, isFinalChunkOfPage: true, sourceTier: 2 };
     }
   }
 

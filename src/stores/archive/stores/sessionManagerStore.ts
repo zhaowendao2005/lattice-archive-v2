@@ -143,6 +143,10 @@ export const useSessionManagerStore = defineStore('sessionManager', {
       // Tab 1: 全部会话与批量收纳
       selectedPeerKeys: [] as string[],
       lastClickedPeerIndex: null as number | null,
+      selectedCredentialIds: [] as string[],
+      lastClickedCredentialIndex: null as number | null,
+      isRefreshingSelectedCovers: false,
+      coverRefreshNotice: null as string | null,
       sessionFilterKeyword: '',
       sessionFilterMode: 'all' as 'all' | 'joined' | 'archived' | 'temp',
       targetGroupId: 'group-common',
@@ -435,6 +439,93 @@ export const useSessionManagerStore = defineStore('sessionManager', {
       };
     },
 
+    toggleSelectCredential(id: string) {
+      const index = this.selectedCredentialIds.indexOf(id);
+      if (index >= 0) this.selectedCredentialIds.splice(index, 1);
+      else this.selectedCredentialIds.push(id);
+    },
+
+    handleCredentialClick(index: number, id: string, event: MouseEvent) {
+      if (event.shiftKey && this.lastClickedCredentialIndex !== null) {
+        const start = Math.max(0, Math.min(index, this.lastClickedCredentialIndex));
+        const end = Math.min(this.tempCredentials.length - 1, Math.max(index, this.lastClickedCredentialIndex));
+        this.selectedCredentialIds = Array.from(new Set([
+          ...this.selectedCredentialIds,
+          ...this.tempCredentials.slice(start, end + 1).map((credential) => credential.id),
+        ]));
+      } else {
+        this.toggleSelectCredential(id);
+        this.lastClickedCredentialIndex = index;
+      }
+    },
+
+    selectAllCredentials() {
+      this.selectedCredentialIds = this.tempCredentials.map((credential) => credential.id);
+    },
+
+    clearSelectedCredentials() {
+      this.selectedCredentialIds = [];
+      this.lastClickedCredentialIndex = null;
+    },
+
+    startDragCredentialsToTree(credentialIds: string[], clientX: number, clientY: number) {
+      const searchStore = useAggregateSearchStore();
+      const chatStore = useChatStore();
+      const credentials = this.tempCredentials.filter((credential) => credentialIds.includes(credential.id));
+      if (!credentials.length) return;
+      const items: AggregateSearchResultItem[] = credentials.map((credential) => ({
+        id: credential.peerKey,
+        title: credential.title,
+        snippet: credential.about || credential.username || '临时 Telegram 会话凭据',
+        category: 'session',
+        categoryLabel: credential.peerType === 'channel' ? '频道' : '群组',
+        fileType: 'generic',
+        extension: 'TG',
+        fileSize: credential.participantsCount ? `${credential.participantsCount} 成员` : '临时会话',
+        sessionId: credential.peerKey,
+        sessionTitle: credential.title,
+        sessionKind: 'credential_only',
+        credentialState: credential.state,
+        inviteHash: credential.inviteHash,
+        peekExpiresAt: credential.peekExpiresAt,
+        lastVerifiedAt: credential.lastVerifiedAt,
+        autoRenew: credential.autoRenew,
+        updatedAt: new Date(credential.lastVerifiedAt).toISOString().slice(0, 10),
+        badgeMeta: '临时凭据',
+        thumbnailUrl: '',
+        peerRef: { type: credential.peerType, id: credential.peerId, accessHash: credential.accessHash },
+        originAccountId: credential.accountId || chatStore.accountId || undefined,
+      }));
+      this.selectedCredentialIds = credentials.map((credential) => credential.id);
+      searchStore.dragToTree = {
+        isDragging: true, items, pointerX: clientX, pointerY: clientY,
+        hoverTargetType: null, hoverTargetId: null, hoverTargetTitle: null,
+      };
+      if (!this.isLeftTreeOpen) this.isLeftTreeOpen = true;
+    },
+
+    async refreshSelectedSessionCovers() {
+      const keys = Array.from(new Set([
+        ...this.selectedPeerKeys,
+        ...this.tempCredentials.filter((credential) => this.selectedCredentialIds.includes(credential.id)).map((credential) => credential.peerKey),
+      ]));
+      if (!keys.length) { this.coverRefreshNotice = '请先选择要刷新的会话'; return; }
+      this.isRefreshingSelectedCovers = true;
+      this.coverRefreshNotice = null;
+      try {
+        const chatMediaStore = useChatMediaStore();
+        const tileStore = useTileStore();
+        const avatarResult = await chatMediaStore.refreshDialogAvatars(keys);
+        const tileIds = tileStore.findSessionTileIds(keys);
+        const tileCount = tileIds.length ? await tileStore.refreshTileCoversByIds(tileIds) : 0;
+        this.coverRefreshNotice = `已请求刷新 ${avatarResult.refreshed} 个会话头像及 ${tileCount} 个已收纳封面`;
+      } catch (error) {
+        this.coverRefreshNotice = error instanceof Error ? error.message : '刷新会话封面失败';
+      } finally {
+        this.isRefreshingSelectedCovers = false;
+      }
+    },
+
     async batchPlaceSelectedSessionsIntoExplore() {
       if (this.selectedPeerKeys.length === 0) {
         this.batchPlaceNotice = '请先勾选至少一个要收纳的会话';
@@ -652,6 +743,14 @@ export const useSessionManagerStore = defineStore('sessionManager', {
       const idx = this.tempCredentials.findIndex((c) => c.id === cred.id);
       if (idx >= 0) this.tempCredentials[idx] = cred;
       else this.tempCredentials.unshift(cred);
+    },
+
+    placeSelectedCredentialTiles() {
+      const selected = new Set(this.selectedCredentialIds);
+      const credentials = this.tempCredentials.filter((credential) => selected.has(credential.id));
+      if (!credentials.length) { this.patrolNotice = '请先选择临时会话凭据'; return; }
+      for (const credential of credentials) this.placeTempCredentialTile(credential, this.targetGroupId);
+      this.patrolNotice = `已生成 ${credentials.length} 个临时会话磁贴`;
     },
 
     placeTempCredentialTile(cred: TempSessionCredential, groupId: string) {

@@ -6,6 +6,7 @@ import type { FileTileData } from '../../types/tile';
 import { getTileSpan, useTileStore } from '@/stores/archive/stores/tileStore';
 import { getFileVisual } from '../tiles/fileVisuals';
 import { useChatStore } from '@/stores/chat/stores/chatStore';
+import { isTelegramMediaTile } from '../../utils/tilePresentation';
 import type { TgPeerKey } from '@/stores/chat/types';
 
 const props = defineProps<{
@@ -236,7 +237,7 @@ function handleAddToFolder() {
             <dl class="mt-2 divide-y divide-white/[0.06] text-[11px]">
               <div class="flex items-center justify-between gap-3 py-2">
                 <dt class="text-white/40">类型</dt>
-                <dd class="truncate text-white/75">{{ file.fileType.toUpperCase() }}</dd>
+                <dd class="truncate text-white/75">{{ isTelegramMediaTile(file, tileStore.resources) ? 'Telegram 媒体链接' : file.fileType.toUpperCase() }}</dd>
               </div>
               <div class="flex items-center justify-between gap-3 py-2">
                 <dt class="text-white/40">扩展名</dt>
