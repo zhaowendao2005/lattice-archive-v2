@@ -24,6 +24,7 @@ Lattice Archive v2：Vue 3 + TypeScript + Vite + Pinia + Tailwind CSS v4 的归�
 | `pnpm arch:check` | 架构边界检查（GramJS 边界、视图零 ref、禁止硬编码并发等，见 `scripts/check-architecture.mjs`） |
 | `pnpm test:search` | 聚焦搜索筛选 / 流式恢复 / 虚拟窗口 / 加密分页索引回归测试（纳入 build） |
 | `pnpm test:monitor` | 运行监控内存序列 / 总线聚合 / min-max 降采样回归测试（纳入 build） |
+| `pnpm test:bot-parser` | 搜索机器人链接提取与自身深链排除回归测试（纳入 build） |
 | `pnpm test:scheduler` | Telegram RequestScheduler 行为测试 |
 | `pnpm test:bus` | 业务总线契约 / 路由 / Client / 监控映射一致性测试 |
 | `pnpm worker:types` | 由 Wrangler 生成 `Env` 绑定类型（**禁止手写 Env**） |

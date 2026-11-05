@@ -298,6 +298,8 @@ function baseOption(metric: SeriesMetric, colors: Record<string, string>) {
     animation: false,
     backgroundColor: 'transparent',
     textStyle: { fontSize: 11, fontFamily: 'ui-sans-serif, system-ui, sans-serif' },
+    // ECharts reads triggerEmphasis from the global axisPointer model, not tooltip.axisPointer.
+    axisPointer: { triggerEmphasis: false },
     grid: { left: 52, right: 14, top: 34, bottom: 56 },
     legend: {
       type: 'scroll',
@@ -314,6 +316,7 @@ function baseOption(metric: SeriesMetric, colors: Record<string, string>) {
     tooltip: {
       trigger: 'axis',
       confine: true,
+      // Keep axis tooltip/crosshair; disable the emphasis action through the global axisPointer option below.
       axisPointer: { type: 'line', lineStyle: { color: colors.muted, opacity: 0.4 } },
       valueFormatter: (value: number) => formatMetric(metric, Number(value)),
     },
@@ -354,7 +357,6 @@ function baseOption(metric: SeriesMetric, colors: Record<string, string>) {
       sampling: 'minmax',
       lineStyle: { width: 1.5, color: colors[bus] },
       itemStyle: { color: colors[bus] },
-      emphasis: { focus: 'series' },
       data: [] as Array<[number, number]>,
     })),
   };

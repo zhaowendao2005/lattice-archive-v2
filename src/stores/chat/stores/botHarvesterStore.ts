@@ -15,6 +15,7 @@ import type { SessionCredentialState } from '@/views/main/archive/types/tile';
 import { useChatStore } from './chatStore';
 import { telegramBusClient } from '@/stores/telegram/data-sources/telegramBusClient';
 import type { TgInlineButton, TgMessageDto } from '../types';
+import { debugLoggerDataSource } from '@/stores/app/data-sources/debugLoggerDataSource';
 
 const wait = (ms: number) => new Promise<void>((resolve) => { window.setTimeout(resolve, ms); });
 /** 同一消息元数据只保留一个在途 Worker 解析；过期响应不得覆盖新版本。 */
@@ -44,6 +45,7 @@ export const useBotHarvesterStore = defineStore('botHarvester', {
     archiveOnJoin: true,
     isCommitting: false,
     harvestNotice: null as string | null,
+    metadataFailedByMsg: {} as Record<number, boolean>,
   }),
 
   getters: {
@@ -127,6 +129,7 @@ export const useBotHarvesterStore = defineStore('botHarvester', {
      */
     async openHarvestDialog(messageId: number) {
       this.dialogMessageId = messageId;
+      this.metadataFailedByMsg[messageId] = false;
       const chatStore = useChatStore();
       const accountId = chatStore.accountId;
       const windowMessages = chatStore.activeWindow?.messages ?? [];
@@ -139,8 +142,16 @@ export const useBotHarvesterStore = defineStore('botHarvester', {
           windowMessages,
           chatStore.activeChatKey ? chatStore.lastSentQueryByPeer[chatStore.activeChatKey] : undefined,
         );
-      } catch {
-        // 元数据不可用时按「无翻页」处理，不阻断解析。
+      } catch (err) {
+        this.metadataFailedByMsg[messageId] = true;
+        debugLoggerDataSource.emitFrontendLog({
+          domain: 'bot.callback',
+          action: 'harvest_metadata_failed',
+          level: 'WARN',
+          message: err instanceof Error ? err.name : 'UnknownError',
+          tags: { messageId },
+        });
+        // 失败与「确实没有翻页按钮」分开呈现；仍允许单页解析。
       }
     },
 

@@ -20,7 +20,7 @@ const chatStore = useChatStore();
 const mediaStore = useChatMediaStore();
 /** 相册统一按最大宽度展示；单图使用模型计算好的宽度，窄屏时随列宽收缩。 */
 const ALBUM_WIDTH = 400;
-/** 群组入站消息左侧保留头像列；头像只对齐气泡底部，不受下方内联键盘影响。 */
+/** 群组入站消息左侧保留头像列；首条消息头像与气泡顶部对齐，不受下方内联键盘影响。 */
 const hasAvatarColumn = computed(() => props.item.inGroup && !props.item.out);
 const contentColumn = computed(() => (hasAvatarColumn.value ? 'col-start-2' : 'col-start-1'));
 </script>
@@ -49,7 +49,7 @@ const contentColumn = computed(() => (hasAvatarColumn.value ? 'col-start-2' : 'c
         v-if="hasAvatarColumn"
         v-avatar-visible="props.item.showSender && props.item.senderAvatarKey ? `msg:${props.item.id}` : undefined"
         :class="[
-          'relative col-start-1 row-start-1 size-8 shrink-0 self-end overflow-hidden rounded-full text-[11px] font-semibold flex items-center justify-center',
+          'relative col-start-1 row-start-1 size-8 shrink-0 self-start overflow-hidden rounded-full text-[11px] font-semibold flex items-center justify-center',
           props.item.showSender ? 'bg-brand-soft text-brand' : 'invisible'
         ]"
         :aria-hidden="!props.item.showSender"

@@ -5,6 +5,7 @@ import type { TelegramBusContext, TelegramBusError } from '@/worker/local/telegr
 import type { TelegramConcurrencyConfig } from '@/worker/local/telegram/contracts/concurrency';
 import type { MonitorFrame } from '@/worker/local/telegram/contracts/monitor';
 import type { ParsedImportedSessionItem, SessionBatchParseRequest } from '@/types/sessionBatch';
+import { toRaw } from 'vue';
 import { tgSessionVault } from './tgSessionVault';
 import { telegramPerformancePreferences } from './telegramPerformancePreferences';
 
@@ -73,6 +74,39 @@ const VALIDATE_TIMEOUT_MS = 25_000;
 /** 补差可能连续拉取多个分片、调度器可能排队，给总线请求更宽的超时。 */
 const BUS_REQUEST_TIMEOUT_MS = 45_000;
 const DEBUG_KEY = 'lattice.telegram.debug';
+
+/** Remove Vue proxies recursively before structured-clone boundaries without JSON-roundtripping binary DTOs. */
+function toTransferable<T>(value: T, seen = new WeakMap<object, unknown>()): T {
+  const raw = value && typeof value === 'object' ? toRaw(value as object) : value;
+  if (!raw || typeof raw !== 'object') return raw as T;
+  const previous = seen.get(raw);
+  if (previous) return previous as T;
+  if (raw instanceof Date || raw instanceof RegExp || raw instanceof ArrayBuffer || ArrayBuffer.isView(raw) || raw instanceof Blob) return raw as T;
+  if (Array.isArray(raw)) {
+    const result: unknown[] = [];
+    seen.set(raw, result);
+    for (const item of raw) result.push(toTransferable(item, seen));
+    return result as T;
+  }
+  if (raw instanceof Map) {
+    const result = new Map();
+    seen.set(raw, result);
+    for (const [key, item] of raw) result.set(toTransferable(key, seen), toTransferable(item, seen));
+    return result as T;
+  }
+  if (raw instanceof Set) {
+    const result = new Set();
+    seen.set(raw, result);
+    for (const item of raw) result.add(toTransferable(item, seen));
+    return result as T;
+  }
+  const prototype = Object.getPrototypeOf(raw);
+  if (prototype !== Object.prototype && prototype !== null) return raw as T;
+  const result: Record<string, unknown> = Object.create(prototype);
+  seen.set(raw, result);
+  for (const key of Object.keys(raw)) result[key] = toTransferable((raw as Record<string, unknown>)[key], seen);
+  return result as T;
+}
 
 /**
  * 每个标签页只有一个 Bridge 实例，但只有主标签页创建 local Worker。
@@ -248,7 +282,7 @@ export class MtprotoBridge {
         restartTimeout: options.idleTimeoutMs ? expire : undefined,
         cleanup: () => options.signal?.removeEventListener('abort', handleAbort),
       });
-      this.sendCommand({ t: 'busRequest', context, bus, op, input }, requestId).catch((error: unknown) => {
+      this.sendCommand({ t: 'busRequest', context, bus, op, input: toTransferable(input) }, requestId).catch((error: unknown) => {
         this.finishBusRequest(requestId);
         reject(error instanceof Error ? error : new Error('Telegram 请求失败'));
       });

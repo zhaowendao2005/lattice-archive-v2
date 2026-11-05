@@ -74,7 +74,7 @@ const harvesterStore = useBotHarvesterStore();
               />
               <span>页</span>
             </div>
-            <p v-else class="text-muted-foreground">该消息没有翻页按钮，将只解析当前消息。</p>
+            <p v-else class="text-muted-foreground">{{ harvesterStore.metadataFailedByMsg[harvesterStore.dialogMessageId ?? -1] ? '分页信息获取失败，将只解析当前消息。' : '该消息没有翻页按钮，将只解析当前消息。' }}</p>
 
             <p
               v-if="harvesterStore.activeTask?.messageId === harvesterStore.dialogMessageId && harvesterStore.activeTask.errorMessage"

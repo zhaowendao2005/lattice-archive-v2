@@ -158,6 +158,8 @@ export function extractBotCandidatesFromMessage(
 
   const addRawUrl = (url: string, labelHint: string) => {
     const cleanUrl = url.trim();
+    // Bot deep links such as t.me/kuai?start=query_* are navigation controls, not harvest targets.
+    if (/(?:https?:\/\/)?(?:t\.me|telegram\.me)\/[a-zA-Z][a-zA-Z0-9_]{3,31}\?start=/i.test(cleanUrl)) return;
     const inviteMatch = /(?:https?:\/\/)?(?:t\.me|telegram\.me)\/(?:\+|joinchat\/)([a-zA-Z0-9_-]+)/i.exec(cleanUrl);
     if (inviteMatch) {
       const hash = inviteMatch[1]!;
