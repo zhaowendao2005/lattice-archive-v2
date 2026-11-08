@@ -234,7 +234,11 @@ export interface TempSessionCredential {
   peerKey: string;
   peerId: string;
   peerType: 'user' | 'chat' | 'channel';
+  peerKind?: 'group' | 'supergroup' | 'channel';
   accessHash?: string;
+  avatarPhotoId?: string;
+  avatarDcId?: number;
+  avatarThumb?: string;
   title: string;
   username?: string;
   inviteHash?: string;

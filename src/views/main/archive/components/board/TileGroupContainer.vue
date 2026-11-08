@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, type ComponentPublicInstance } from 'vue';
-import { GripVertical, Pencil, Plus } from '@lucide/vue';
+import { GripVertical, LayoutGrid, Pencil, Plus } from '@lucide/vue';
 import { useAggregateSearchStore } from '@/stores/archive/stores/aggregateSearchStore';
 import { useSessionManagerStore } from '@/stores/archive/stores/sessionManagerStore';
 import type { TileData, TileGroupData } from '../../types/tile';
@@ -89,10 +89,6 @@ const canvasHeight = computed(() => {
   }
 
   return maxUnits * (UNIT_SIZE + GRID_GAP) + 12;
-});
-
-const totalRows = computed(() => {
-  return Math.max(4, Math.ceil(canvasHeight.value / (UNIT_SIZE + GRID_GAP)));
 });
 
 const canvasWidth = computed(() => {
@@ -268,6 +264,11 @@ defineExpose({
       <!-- Title & Rename -->
       <div v-if="!isEditingTitle" class="flex items-center gap-1.5 min-w-0">
         <GripVertical class="size-3.5 text-white/30 opacity-0 group-hover/hdr:opacity-100 transition-opacity shrink-0" />
+        <span
+          class="flex size-[18px] shrink-0 items-center justify-center rounded-[2px] border border-sky-400/25 bg-sky-500/15 text-sky-300"
+        >
+          <LayoutGrid class="size-3" :stroke-width="1.9" />
+        </span>
         <h3
           class="text-sm font-medium tracking-wide text-white/80 hover:text-white truncate transition-colors cursor-pointer"
           title="点击重命名分组，拖动整组重排"
@@ -330,27 +331,19 @@ defineExpose({
       :data-group-id="group.id"
       @contextmenu.self="handleGroupContextMenu"
     >
-      <!-- Faint Underlying Base Unit Grid (若隐若现底层网格) -->
+      <!-- CSS 背景网格：仅在拖拽时显示，单节点取代数千个空 div -->
       <div
         class="pointer-events-none absolute inset-0 z-0 transition-opacity duration-300"
         :class="tileStore.dragState.isDragging ? 'opacity-100' : 'opacity-0'"
-      >
-        <div
-          class="grid"
-          :style="{
-            gridTemplateColumns: `repeat(${currentCols}, ${UNIT_SIZE}px)`,
-            gridAutoRows: `${UNIT_SIZE}px`,
-            gap: `${GRID_GAP}px`,
-            width: `${canvasWidth}px`,
-          }"
-        >
-          <div
-            v-for="i in currentCols * totalRows"
-            :key="i"
-            class="rounded-[2px] border border-white/[0.08] bg-white/[0.02] shadow-[inset_0_0_8px_rgba(255,255,255,0.01)]"
-          />
-        </div>
-      </div>
+        :style="{
+          backgroundImage: `
+            linear-gradient(to right, rgba(255,255,255,0.08) 1px, transparent 1px),
+            linear-gradient(to bottom, rgba(255,255,255,0.08) 1px, transparent 1px)
+          `,
+          backgroundSize: `${UNIT_SIZE + GRID_GAP}px ${UNIT_SIZE + GRID_GAP}px`,
+          backgroundPosition: '0 0',
+        }"
+      />
 
       <!-- Ghost placeholder slot when dragging tile -->
       <div

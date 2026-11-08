@@ -32,7 +32,7 @@ const harvesterStore = useBotHarvesterStore();
               </div>
               <div>
                 <h2 class="text-base font-bold text-foreground">解析消息</h2>
-                <p class="text-xs text-muted-foreground">提取消息中的群 / 频道链接，可自动翻页</p>
+                <p class="text-xs text-muted-foreground">从消息链接定位所属会话，只保留已验证的群组 / 频道</p>
               </div>
             </div>
             <button
@@ -91,7 +91,7 @@ const harvesterStore = useBotHarvesterStore();
                 @click="harvesterStore.openCandidateModal()"
               >
                 <Eye class="size-3.5 text-primary" />
-                <span>收割池 ({{ harvesterStore.candidates.length }})</span>
+                <span>已确认会话 ({{ harvesterStore.candidates.length }})</span>
               </button>
               <span v-else />
 

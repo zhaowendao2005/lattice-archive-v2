@@ -36,18 +36,18 @@ const emit = defineEmits<{
     <!-- 1x1 Small Tile -->
     <div
       v-if="tile.size === 'small'"
-      class="relative flex h-full w-full items-center justify-center bg-gradient-to-br from-teal-500/25 via-emerald-600/15 to-slate-900/25 p-1"
+      class="relative flex h-full w-full items-center justify-center bg-gradient-to-br from-teal-500/25 via-emerald-600/15 to-slate-900/25 p-1.5"
     >
       <Database
-        class="size-6 text-teal-300 drop-shadow-[0_0_8px_rgba(45,212,191,0.45)] transition-transform duration-150 group-hover:scale-110"
+        class="size-7 text-teal-300 drop-shadow-[0_0_8px_rgba(45,212,191,0.45)] transition-transform duration-150 group-hover:scale-110"
         :stroke-width="2"
       />
     </div>
 
-    <!-- 2x2 Medium Tile -->
+    <!-- 3x3 Medium / Wide Tile -->
     <div
-      v-else-if="tile.size === 'medium'"
-      class="relative flex h-full w-full flex-col justify-between bg-gradient-to-br from-teal-500/20 via-emerald-600/10 to-slate-950/35 p-2"
+      v-else-if="tile.size === 'medium' || tile.size === 'wide'"
+      class="relative flex h-full w-full flex-col justify-between bg-gradient-to-br from-teal-500/20 via-emerald-600/10 to-slate-950/35 p-2.5"
     >
       <div class="flex items-center justify-between">
         <span class="h-1.5 w-1.5 rounded-full bg-teal-400 shadow-[0_0_6px_rgba(45,212,191,0.9)]" />
@@ -60,7 +60,7 @@ const emit = defineEmits<{
 
       <div class="flex flex-1 items-center justify-center">
         <div
-          class="flex size-11 items-center justify-center rounded-[2px] border border-teal-400/30 bg-teal-500/15 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.2)] transition-transform duration-150 group-hover:scale-105 group-hover:border-teal-400/50"
+          class="flex size-12 items-center justify-center rounded-[2px] border border-teal-400/30 bg-teal-500/15 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.2)] transition-transform duration-150 group-hover:scale-105 group-hover:border-teal-400/50"
         >
           <Database class="size-6 text-teal-300" :stroke-width="2" />
         </div>
@@ -73,38 +73,10 @@ const emit = defineEmits<{
       </div>
     </div>
 
-    <!-- 4x2 Wide Tile -->
-    <div
-      v-else-if="tile.size === 'wide'"
-      class="relative flex h-full w-full items-center gap-3 bg-gradient-to-r from-teal-500/20 via-emerald-600/10 to-slate-950/35 p-3"
-    >
-      <div
-        class="flex size-12 shrink-0 items-center justify-center rounded-[2px] border border-teal-400/35 bg-teal-500/15 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.2)]"
-      >
-        <Database class="size-6 text-teal-300" :stroke-width="2" />
-      </div>
-
-      <div class="flex min-w-0 flex-1 flex-col justify-center">
-        <div class="flex items-center gap-1.5">
-          <span
-            class="rounded-[2px] border border-teal-400/30 bg-teal-500/15 px-1 py-0.5 font-mono text-[9px] text-teal-300"
-          >
-            SESSIONS
-          </span>
-          <p class="truncate text-xs font-medium text-white/95">
-            {{ tile.title }}
-          </p>
-        </div>
-        <p class="mt-1 line-clamp-2 text-[11px] leading-relaxed text-white/65">
-          {{ tile.description || '已加入/临时会话凭据池、多账号矩阵与存储配额治理工作台' }}
-        </p>
-      </div>
-    </div>
-
     <!-- 4x4 Large Tile -->
     <div
       v-else
-      class="relative flex h-full w-full flex-col justify-between bg-gradient-to-br from-teal-500/20 via-emerald-900/15 to-slate-950/40 p-4"
+      class="relative flex h-full w-full flex-col justify-between bg-gradient-to-br from-teal-500/20 via-emerald-900/15 to-slate-950/40 p-3.5"
     >
       <div class="flex items-center justify-between">
         <span

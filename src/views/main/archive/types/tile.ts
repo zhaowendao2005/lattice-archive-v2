@@ -218,3 +218,26 @@ export interface GroupDragState {
   pointerY: number;
 }
 
+/**
+ * 文件夹弹窗内部的拖拽会话：
+ * - 指针仍在弹窗卡片内 → 内部重排（改变 folder.children 顺序）
+ * - 指针离开弹窗卡片 → isOutside=true，交由磁贴板接管（拖出）
+ */
+export interface FolderDragState {
+  isDragging: boolean;
+  folderId: string | null;
+  /** 被拖拽的磁贴 ID；多选时为整组 */
+  ids: string[];
+  pointerX: number;
+  pointerY: number;
+  /** 拖拽残影尺寸（像素），用于跟随光标的预览块 */
+  width: number;
+  height: number;
+  /** 插入目标：以「移除被拖拽项后的数组」为基准的下标 */
+  insertIndex: number;
+  /** 插入指示线（视口坐标，供 Teleport 的 fixed 元素直接使用） */
+  insertRect: { left: number; top: number; height: number } | null;
+  /** 指针是否已离开弹窗卡片（离开即移交磁贴板） */
+  isOutside: boolean;
+}
+

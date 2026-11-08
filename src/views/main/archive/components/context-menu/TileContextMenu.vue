@@ -4,10 +4,11 @@ import { useRouter } from 'vue-router';
 import {
   CheckSquare,
   ExternalLink,
+  Folder,
   FolderInput,
   FolderOpen,
-  FolderPlus,
   FolderTree,
+  LayoutGrid,
   Maximize2,
   MessageSquare,
   Minimize2,
@@ -21,6 +22,7 @@ import {
   Square,
   Trash2,
   UnfoldHorizontal,
+  X,
 } from '@lucide/vue';
 import type { TileSize } from '../../types/tile';
 import { useAggregateSearchStore } from '@/stores/archive/stores/aggregateSearchStore';
@@ -80,7 +82,7 @@ const activeGroup = computed(() => {
 
 const menuStyle = computed(() => {
   const x = Math.min(tileStore.contextMenu.x, window.innerWidth - 220);
-  const y = Math.min(tileStore.contextMenu.y, window.innerHeight - 360);
+  const y = Math.min(tileStore.contextMenu.y, window.innerHeight - 420);
   return {
     left: `${Math.max(10, x)}px`,
     top: `${Math.max(10, y)}px`,
@@ -124,11 +126,57 @@ function handleReloadMissingCovers() {
   void tileStore.reloadMissingOrFailedTileCovers(folderId);
 }
 
-function handleResize(size: TileSize) {
-  if (tileStore.contextMenu.tileId) {
-    tileStore.resizeTile(tileStore.contextMenu.tileId, size);
-  }
+function handleBatchDeduplicate() {
+  const ids = [...batchTargetIds.value];
   tileStore.closeContextMenu();
+  if (ids.length < 2) return;
+  tileStore.deduplicateTiles({ scope: 'selection', tileIds: ids });
+}
+
+function handleDeduplicateActiveFolderTile() {
+  if (!activeTile.value || activeTile.value.type !== 'folder') return;
+  const folderId = activeTile.value.id;
+  tileStore.closeContextMenu();
+  tileStore.deduplicateTiles({ scope: 'folder', folderId });
+}
+
+function handleDeduplicateGroup() {
+  if (!activeGroup.value) return;
+  const groupId = activeGroup.value.id;
+  tileStore.closeContextMenu();
+  tileStore.deduplicateTiles({ scope: 'group', groupId });
+}
+
+function handleDeduplicateScope() {
+  const folderId = tileStore.contextMenu.folderId;
+  tileStore.closeContextMenu();
+  if (folderId) {
+    tileStore.deduplicateTiles({ scope: 'folder', folderId });
+  } else {
+    tileStore.deduplicateTiles({ scope: 'board' });
+  }
+}
+
+function handleResize(size: TileSize) {
+  const ids = batchTargetIds.value;
+  tileStore.closeContextMenu();
+  if (ids.length === 0) return;
+  tileStore.batchResizeTiles(ids, size);
+}
+
+function handleBatchMoveOutOfFolder() {
+  const folderId = tileStore.contextMenu.folderId;
+  const ids = [...batchTargetIds.value];
+  tileStore.closeContextMenu();
+  if (!folderId || ids.length === 0) return;
+  tileStore.batchRemoveFilesFromFolder(folderId, ids);
+  tileStore.clearFolderSelectedTiles();
+}
+
+function handleClearSelection() {
+  tileStore.closeContextMenu();
+  tileStore.clearSelectedTiles();
+  tileStore.clearFolderSelectedTiles();
 }
 
 function handleRename() {
@@ -386,11 +434,41 @@ onUnmounted(() => {
       <button
         v-if="batchTargetIds.length > 1"
         type="button"
+        class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sky-300 transition-colors hover:bg-sky-500/20"
+        @click="handleBatchDeduplicate"
+      >
+        <Sparkles class="size-3.5 shrink-0 text-sky-400" />
+        <span>清理已选中的重复磁贴 ({{ batchTargetIds.length }} 项)</span>
+      </button>
+
+      <button
+        v-if="batchTargetIds.length > 1"
+        type="button"
         class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-rose-400 transition-colors hover:bg-rose-500/20"
         @click="handleBatchDelete"
       >
         <Trash2 class="size-3.5 shrink-0 text-rose-400" />
         <span>批量删除已选 ({{ batchTargetIds.length }} 项)</span>
+      </button>
+
+      <button
+        v-if="tileStore.contextMenu.folderId"
+        type="button"
+        class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sky-300 transition-colors hover:bg-sky-500/20"
+        @click="handleBatchMoveOutOfFolder"
+      >
+        <UnfoldHorizontal class="size-3.5 shrink-0 text-sky-400" />
+        <span>移出到磁贴板{{ batchTargetIds.length > 1 ? ` (${batchTargetIds.length} 项)` : '' }}</span>
+      </button>
+
+      <button
+        v-if="batchTargetIds.length > 1"
+        type="button"
+        class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-white/70 transition-colors hover:bg-white/10"
+        @click="handleClearSelection"
+      >
+        <X class="size-3.5 shrink-0 text-white/50" />
+        <span>取消选择</span>
       </button>
 
       <div class="my-1 border-t border-white/10" />
@@ -405,13 +483,15 @@ onUnmounted(() => {
 
       <!-- Resize Submenu -->
       <div class="px-1 py-1">
-        <div class="px-2 py-1 text-[10px] uppercase tracking-wider text-white/40">调整大小</div>
-        <div class="grid grid-cols-4 gap-1 px-1">
+        <div class="px-2 py-1 text-[10px] uppercase tracking-wider text-white/40">
+          {{ batchTargetIds.length > 1 ? `批量调整大小 (${batchTargetIds.length} 项)` : '调整大小' }}
+        </div>
+        <div class="grid grid-cols-3 gap-1 px-1">
           <button
             type="button"
             class="flex flex-col items-center justify-center rounded p-1 text-[10px] hover:bg-white/10 transition-colors"
             :class="activeTile.size === 'small' ? 'bg-sky-500/30 text-sky-300 font-semibold' : 'text-white/70'"
-            title="小 (1×1)"
+            title="小 (2×2)"
             @click="handleResize('small')"
           >
             <Minimize2 class="size-3" />
@@ -420,22 +500,12 @@ onUnmounted(() => {
           <button
             type="button"
             class="flex flex-col items-center justify-center rounded p-1 text-[10px] hover:bg-white/10 transition-colors"
-            :class="activeTile.size === 'medium' ? 'bg-sky-500/30 text-sky-300 font-semibold' : 'text-white/70'"
-            title="中 (2×2)"
+            :class="activeTile.size === 'medium' || activeTile.size === 'wide' ? 'bg-sky-500/30 text-sky-300 font-semibold' : 'text-white/70'"
+            title="中 (3×3)"
             @click="handleResize('medium')"
           >
             <Square class="size-3" />
             <span class="mt-0.5">中</span>
-          </button>
-          <button
-            type="button"
-            class="flex flex-col items-center justify-center rounded p-1 text-[10px] hover:bg-white/10 transition-colors"
-            :class="activeTile.size === 'wide' ? 'bg-sky-500/30 text-sky-300 font-semibold' : 'text-white/70'"
-            title="宽 (4×2)"
-            @click="handleResize('wide')"
-          >
-            <UnfoldHorizontal class="size-3" />
-            <span class="mt-0.5">宽</span>
           </button>
           <button
             type="button"
@@ -535,6 +605,17 @@ onUnmounted(() => {
         <span>重命名</span>
       </button>
 
+      <!-- Deduplicate Folder (for folder tile) -->
+      <button
+        v-if="activeTile.type === 'folder'"
+        type="button"
+        class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sky-300 hover:bg-sky-500/20 transition-colors"
+        @click="handleDeduplicateActiveFolderTile"
+      >
+        <Sparkles class="size-3.5 text-sky-400" />
+        <span>清理文件夹内重复磁贴 (按 TG ID)</span>
+      </button>
+
       <!-- Dissolve (for folder) -->
       <button
         v-if="activeTile.type === 'folder'"
@@ -568,8 +649,9 @@ onUnmounted(() => {
 
     <!-- 2. Group Header Context Actions -->
     <template v-else-if="activeGroup">
-      <div class="px-3 py-1.5 text-[11px] font-semibold text-white/50 truncate border-b border-white/10">
-        分组：{{ activeGroup.title }}
+      <div class="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold text-sky-200 truncate border-b border-white/10 bg-sky-500/10">
+        <LayoutGrid class="size-3.5 shrink-0 text-sky-400" />
+        <span class="truncate">分组：{{ activeGroup.title }}</span>
       </div>
 
       <button
@@ -579,6 +661,15 @@ onUnmounted(() => {
       >
         <Pencil class="size-3.5 text-white/60" />
         <span>重命名分组</span>
+      </button>
+
+      <button
+        type="button"
+        class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sky-300 hover:bg-sky-500/20 transition-colors"
+        @click="handleDeduplicateGroup"
+      >
+        <Sparkles class="size-3.5 text-sky-400" />
+        <span>清理此分组重复磁贴 (按 TG ID)</span>
       </button>
 
       <button
@@ -595,7 +686,7 @@ onUnmounted(() => {
         class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-white/85 hover:bg-white/10 transition-colors"
         @click="handleCreateFolder"
       >
-        <FolderOpen class="size-3.5 text-sky-400" />
+        <FolderOpen class="size-3.5 text-amber-400" />
         <span>在此组新建文件夹</span>
       </button>
 
@@ -631,9 +722,10 @@ onUnmounted(() => {
     <template v-else>
       <div
         v-if="activeBlankFolder"
-        class="border-b border-white/10 bg-amber-500/10 px-3 py-1.5 text-[11px] font-semibold text-amber-200 truncate"
+        class="flex items-center gap-1.5 border-b border-white/10 bg-amber-500/10 px-3 py-1.5 text-[11px] font-semibold text-amber-200 truncate"
       >
-        📁 文件夹：{{ activeBlankFolder.title }}
+        <Folder class="size-3.5 shrink-0 text-amber-400" />
+        <span class="truncate">文件夹：{{ activeBlankFolder.title }}</span>
       </div>
 
       <button
@@ -642,13 +734,22 @@ onUnmounted(() => {
         class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-white/95 hover:bg-white/10 transition-colors"
         @click="handleCreateGroup"
       >
-        <FolderPlus class="size-3.5 text-sky-400" />
+        <LayoutGrid class="size-3.5 text-sky-400" />
         <span class="font-medium text-sky-300">新建分组（栏）</span>
       </button>
 
       <div v-if="!activeBlankFolder" class="my-1 border-t border-white/10" />
 
       <div class="px-3 py-1 text-[10px] uppercase tracking-wider text-white/40">新增与贴图维护</div>
+
+      <button
+        type="button"
+        class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sky-300 hover:bg-sky-500/20 transition-colors"
+        @click="handleDeduplicateScope"
+      >
+        <Sparkles class="size-3.5 shrink-0 text-sky-400" />
+        <span>{{ activeBlankFolder ? '清理此文件夹重复磁贴 (按 TG ID)' : '清理全板重复磁贴 (按 TG ID)' }}</span>
+      </button>
 
       <button
         type="button"

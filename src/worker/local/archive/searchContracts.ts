@@ -60,11 +60,15 @@ export interface AggregateSearchResultItem {
   /** 最近一次高清缩略图失败的分桶代码（如 NO_MEDIA / REF_EXPIRED） */
   hdThumbError?: string;
   /** 拖入磁贴的会话凭据专属补充引用。 */
+  username?: string;
   inviteHash?: string;
+  avatarPhotoId?: string;
+  avatarDcId?: number;
   credentialState?: 'joined' | 'temp_ephemeral' | 'temp_auto_renew';
   peekExpiresAt?: number;
   lastVerifiedAt?: number;
   autoRenew?: boolean;
+  participantsCount?: number;
   /** 产出该结果的 Telegram 账号 ID */
   originAccountId?: string;
   /** 产出该结果的 Peer 引用 */

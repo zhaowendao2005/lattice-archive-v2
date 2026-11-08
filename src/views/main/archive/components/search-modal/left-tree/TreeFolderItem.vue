@@ -3,6 +3,7 @@ import { computed } from 'vue';
 import { Check, ChevronRight, Folder, FolderOpen, FolderPlus, MessageSquare } from '@lucide/vue';
 import { useAggregateSearchStore } from '@/stores/archive/stores/aggregateSearchStore';
 import { countFolderItemsRecursive } from '@/stores/archive/stores/tileStore';
+import { isSessionTile } from '@/stores/archive/utils/resourceManifest';
 import type { FileTileData, FolderTileData } from '../../../types/tile';
 import { getFileVisual } from '../../tiles/fileVisuals';
 
@@ -15,6 +16,7 @@ const props = defineProps<{
   selectableTarget?: boolean;
   selectedTargetType?: 'group' | 'folder';
   selectedTargetId?: string;
+  sessionOnly?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -46,15 +48,27 @@ const isDropHover = computed(
     searchStore.dragToTree.hoverTargetId === props.folder.id,
 );
 
-const totalCount = computed(() => countFolderItemsRecursive(props.folder));
+const totalCount = computed(() => {
+  if (props.sessionOnly) {
+    return countFolderItemsRecursive(
+      props.folder,
+      (item) => item.type === 'file' && isSessionTile(item as FileTileData) && !item.systemApp,
+    );
+  }
+  return countFolderItemsRecursive(props.folder);
+});
 
 const subFolders = computed(
   () => props.folder.children.filter((c): c is FolderTileData => c.type === 'folder'),
 );
 
-const subFiles = computed(
-  () => props.folder.children.filter((c): c is FileTileData => c.type === 'file'),
-);
+const subFiles = computed(() => {
+  const all = props.folder.children.filter((c): c is FileTileData => c.type === 'file');
+  if (props.sessionOnly) {
+    return all.filter((c) => !c.systemApp && isSessionTile(c));
+  }
+  return all;
+});
 
 function handleFolderClick() {
   searchStore.toggleFolderExpand(props.folder.id);
@@ -241,6 +255,7 @@ function onSubFileContextMenu(event: MouseEvent, subFile: FileTileData) {
             :selectable-target="selectableTarget"
             :selected-target-type="selectedTargetType"
             :selected-target-id="selectedTargetId"
+            :session-only="sessionOnly"
             @select-target="emit('select-target', $event)"
           />
 

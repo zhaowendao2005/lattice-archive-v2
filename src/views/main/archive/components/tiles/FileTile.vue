@@ -8,13 +8,14 @@ import type { TgPeerKey } from '@/stores/chat/types';
 import type { FileTileData } from '../../types/tile';
 import BaseTile from './BaseTile.vue';
 import { getFileVisual } from './fileVisuals';
-import { isTelegramMediaTile } from '../../utils/tilePresentation';
+import { resolveTileFormatBadge } from '../../utils/tilePresentation';
 
 const props = defineProps<{
   file: FileTileData;
   isDragging?: boolean;
   isDropTarget?: boolean;
   isPreview?: boolean;
+  inFolderGrid?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -27,23 +28,13 @@ const chatStore = useChatStore();
 const chatMediaStore = useChatMediaStore();
 const tileStore = useTileStore();
 
-const currentConfig = computed(() => getFileVisual(props.file.fileType));
+const formatBadge = computed(() => resolveTileFormatBadge(props.file, tileStore.resources));
 
-const isSessionTile = computed(() =>
-  Boolean(
-    props.file.isSessionLink ||
-      props.file.sessionCredentialState ||
-      props.file.extension?.toLowerCase() === 'tg',
-  ),
-);
+const currentConfig = computed(() => getFileVisual(formatBadge.value.fileType));
+
+const isSessionTile = computed(() => formatBadge.value.isSession);
 
 const sessionPeerKey = computed(() => props.file.peerKey || props.file.sessionId || '');
-
-const extBadge = computed(() => {
-  if (isSessionTile.value) return 'SESSION';
-  if (isTelegramMediaTile(props.file, tileStore.resources)) return 'TG MEDIA';
-  return props.file.extension ? props.file.extension.toUpperCase() : currentConfig.value.badge;
-});
 
 const thumbSrc = computed(() => {
   // 只有当磁贴本身是「会话磁贴」（isSessionTile）时，才优先使用会话头像；
@@ -54,7 +45,8 @@ const thumbSrc = computed(() => {
     const persisted = props.file.thumb?.objectUrl;
     if (persisted) return persisted;
     if (key) {
-      const liveAvatar = chatMediaStore.dialogAvatarUrl(key);
+      // 使用纯读取方法，避免在渲染期触发 handleAvatarVisibility 状态写入
+      const liveAvatar = chatMediaStore.peekDialogAvatarUrl(key);
       if (liveAvatar) return liveAvatar;
       const dialog = chatStore.dialogs[key as TgPeerKey];
       if (dialog?.avatar?.thumb) {
@@ -68,7 +60,7 @@ const thumbSrc = computed(() => {
 const isHighResThumb = computed(() => {
   if (isSessionTile.value) {
     const key = sessionPeerKey.value;
-    if (key && chatMediaStore.dialogAvatarUrl(key)) return true;
+    if (key && chatMediaStore.peekDialogAvatarUrl(key)) return true;
   }
   return Boolean(props.file.thumb?.objectUrl);
 });
@@ -118,6 +110,8 @@ const sessionStateBadge = computed(() => {
     :is-dragging="isDragging"
     :is-drop-target="isDropTarget"
     :is-preview="isPreview"
+    :in-folder-grid="inFolderGrid"
+    :has-cover="Boolean(thumbSrc)"
     :title="file.title"
     @click="emit('click', file)"
     @contextmenu="emit('contextmenu', $event, file)"
@@ -128,6 +122,8 @@ const sessionStateBadge = computed(() => {
       v-if="thumbSrc"
       :src="thumbSrc"
       alt=""
+      decoding="async"
+      loading="lazy"
       class="pointer-events-none absolute inset-0 size-full object-cover opacity-90 transition-opacity duration-200 group-hover:opacity-100"
       :class="isHighResThumb ? 'blur-0' : 'blur-[0.5px] scale-102'"
     />
@@ -136,42 +132,90 @@ const sessionStateBadge = computed(() => {
       class="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/90 via-black/35 to-black/20"
     />
 
-    <!-- 1x1 Small Tile -->
+    <!-- 2x2 Small Tile (106px) -->
     <div
       v-if="file.size === 'small'"
-      class="relative z-10 flex h-full w-full items-center justify-center p-1"
+      class="relative z-10 flex h-full w-full flex-col justify-between p-2"
       :class="[thumbSrc ? '' : isSessionTile ? 'bg-sky-500/20' : currentConfig.tint, sessionStateBadge?.borderOverlay]"
     >
-      <span
-        v-if="sessionStateBadge"
-        class="absolute left-1 top-1 z-20 size-2 rounded-full"
-        :class="sessionStateBadge.dotClass"
-        :title="sessionStateBadge.label"
-      />
-      <!-- 若无单层封面，才展示占位图标；有封面时全画幅呈现 -->
-      <template v-if="!thumbSrc">
-        <MessageSquare
-          v-if="isSessionTile"
-          class="size-5 text-sky-300 transition-transform duration-150 group-hover:scale-110"
-          :stroke-width="1.9"
+      <!-- 左上角：会话三态小圆点 / 保险库 / 防转发 / 套图角标 -->
+      <div class="flex items-center gap-1">
+        <span
+          v-if="sessionStateBadge"
+          class="size-2.5 shrink-0 rounded-full"
+          :class="sessionStateBadge.dotClass"
+          :title="sessionStateBadge.label"
         />
+        <span
+          v-if="file.hasVaultCopy"
+          class="inline-flex items-center rounded-[2px] bg-emerald-500/25 text-emerald-300"
+          title="已备份至共享私密保险库群"
+        >
+          <ShieldCheck class="size-2.5" />
+        </span>
+        <span
+          v-if="file.noforwards"
+          class="inline-flex items-center rounded-[2px] bg-amber-500/25 text-amber-300"
+          title="限制转发保护 (noforwards)"
+        >
+          <Lock class="size-2.5" />
+        </span>
+        <span
+          v-if="file.groupedId && (file.albumCount || 0) > 1"
+          class="inline-flex items-center gap-0.5 rounded-[2px] bg-sky-500/25 font-mono text-[8px] text-sky-200"
+          title="原子相册套图"
+        >
+          <Layers class="size-2.5" />
+          <span>{{ file.albumCount }}</span>
+        </span>
+      </div>
+
+      <!-- 若无单层封面，才展示占位图标；有封面时全画幅呈现 -->
+      <div class="flex flex-1 items-center justify-center">
+        <template v-if="!thumbSrc">
+          <MessageSquare
+            v-if="isSessionTile"
+            class="size-6 text-sky-300 transition-transform duration-150 group-hover:scale-110"
+            :stroke-width="1.9"
+          />
+          <component
+            v-else
+            :is="currentConfig.icon"
+            class="size-6 transition-transform duration-150 group-hover:scale-110"
+            :class="currentConfig.color"
+            :stroke-width="1.8"
+          />
+        </template>
+      </div>
+
+      <!-- 底部单行标题 -->
+      <p class="truncate pr-8 text-[10px] font-medium leading-none text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.85)]">
+        {{ file.title }}
+      </p>
+
+      <!-- 右下角精简格式角标 -->
+      <span
+        class="pointer-events-none absolute right-1 bottom-1 z-20 inline-flex items-center gap-0.5 rounded-[2px] border border-white/15 bg-black/75 px-1 py-0.5 font-mono text-[8px] leading-none text-white/95 shadow-xs transition-all duration-150 group-hover:right-3"
+      >
+        <MessageSquare v-if="isSessionTile" class="size-2 shrink-0 text-sky-300" :stroke-width="2.2" />
         <component
           v-else
           :is="currentConfig.icon"
-          class="size-6 transition-transform duration-150 group-hover:scale-110"
+          class="size-2 shrink-0"
           :class="currentConfig.color"
-          :stroke-width="1.8"
+          :stroke-width="2.2"
         />
-      </template>
+        <span>{{ formatBadge.label }}</span>
+      </span>
     </div>
 
-    <!-- 2x2 Medium Tile -->
+    <!-- 3x3 Medium Tile (162px) —— wide 并入此档 -->
     <div
-      v-else-if="file.size === 'medium'"
-      class="relative z-10 flex h-full w-full flex-col justify-between p-2"
+      v-else-if="file.size === 'medium' || file.size === 'wide'"
+      class="relative z-10 flex h-full w-full flex-col justify-between p-2.5"
       :class="[thumbSrc ? '' : isSessionTile ? 'bg-sky-500/15' : currentConfig.tint, sessionStateBadge?.borderOverlay]"
     >
-      <div class="flex items-start justify-between gap-1">
+      <div class="flex items-start justify-between gap-1 pr-5">
         <!-- 左上角：会话三态徽标 或 保险库/防转发/套图角标 -->
         <div class="flex items-center gap-1">
           <span
@@ -205,10 +249,6 @@ const sessionStateBadge = computed(() => {
             <span>{{ file.albumCount }}</span>
           </span>
         </div>
-
-        <span class="rounded-sm bg-black/55 px-1 py-0.5 text-[9px] font-mono tracking-wider text-white/90 shadow-xs">
-          {{ extBadge }}
-        </span>
       </div>
 
       <!-- 中间区域：若已有单层封面背景，则不重复放置缩小版图片 -->
@@ -223,62 +263,21 @@ const sessionStateBadge = computed(() => {
           <component
             v-else
             :is="currentConfig.icon"
-            class="size-8 transition-transform duration-150 group-hover:scale-105"
+            class="size-9 transition-transform duration-150 group-hover:scale-105"
             :class="currentConfig.color"
             :stroke-width="1.8"
           />
         </template>
       </div>
 
-      <div class="min-w-0">
-        <p class="truncate text-[11px] font-medium leading-tight text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.85)]">
+      <div class="min-w-0 pr-12">
+        <p class="line-clamp-2 text-[11px] font-medium leading-tight text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.85)]">
           {{ file.title }}
         </p>
-      </div>
-    </div>
-
-    <!-- 4x2 Wide Tile -->
-    <div
-      v-else-if="file.size === 'wide'"
-      class="relative z-10 flex h-full w-full items-center gap-3 p-3"
-      :class="[thumbSrc ? '' : isSessionTile ? 'bg-sky-500/15' : currentConfig.tint, sessionStateBadge?.borderOverlay]"
-    >
-      <div
-        v-if="!thumbSrc"
-        class="flex size-12 shrink-0 items-center justify-center overflow-hidden rounded-[3px] border border-white/15 bg-white/10"
-      >
-        <MessageSquare
-          v-if="isSessionTile"
-          class="size-6 text-sky-300"
-          :stroke-width="1.9"
-        />
-        <component
-          v-else
-          :is="currentConfig.icon"
-          class="size-7"
-          :class="currentConfig.color"
-          :stroke-width="1.8"
-        />
-      </div>
-
-      <div class="flex min-w-0 flex-1 flex-col justify-center">
-        <div class="flex items-center gap-1.5">
-          <span
-            v-if="sessionStateBadge"
-            class="inline-flex shrink-0 items-center gap-1 rounded-[2px] border px-1 py-0.5 text-[9px]"
-            :class="sessionStateBadge.pillClass"
-          >
-            <span class="size-1.5 rounded-full" :class="sessionStateBadge.dotClass" />
-            <span>{{ sessionStateBadge.label }}</span>
-          </span>
-          <span class="rounded-sm bg-black/55 px-1 py-0.5 text-[9px] font-mono text-white/90 shadow-xs">
-            {{ extBadge }}
-          </span>
-          <p class="truncate text-xs font-semibold text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.85)]">
-            {{ file.title }}
-          </p>
-        </div>
-        <p v-if="file.description" class="mt-1 line-clamp-2 text-[11px] leading-relaxed text-white/80 drop-shadow-[0_1px_1px_rgba(0,0,0,0.8)]">
+        <p
+          v-if="file.description"
+          class="mt-0.5 line-clamp-1 text-[10px] leading-tight text-white/75 drop-shadow-[0_1px_1px_rgba(0,0,0,0.8)]"
+        >
           {{ file.description }}
         </p>
       </div>
@@ -287,10 +286,10 @@ const sessionStateBadge = computed(() => {
     <!-- 4x4 Large Tile -->
     <div
       v-else
-      class="relative z-10 flex h-full w-full flex-col justify-between p-4"
+      class="relative z-10 flex h-full w-full flex-col justify-between p-3.5"
       :class="[thumbSrc ? '' : isSessionTile ? 'bg-sky-500/15' : currentConfig.tint, sessionStateBadge?.borderOverlay]"
     >
-      <div class="flex items-center justify-between">
+      <div class="flex items-center justify-between pr-5">
         <div class="flex items-center gap-1.5">
           <span
             v-if="sessionStateBadge"
@@ -299,9 +298,6 @@ const sessionStateBadge = computed(() => {
           >
             <span class="size-1.5 rounded-full" :class="sessionStateBadge.dotClass" />
             <span>{{ sessionStateBadge.label }}</span>
-          </span>
-          <span class="rounded-sm bg-black/55 px-1.5 py-0.5 text-[10px] font-mono font-medium text-white/90 shadow-xs">
-            {{ extBadge }}
           </span>
         </div>
         <span class="text-[10px] text-white/70 drop-shadow-[0_1px_1px_rgba(0,0,0,0.8)]">{{ file.updatedAt }}</span>
@@ -324,9 +320,25 @@ const sessionStateBadge = computed(() => {
         </p>
       </div>
 
-      <div class="text-[11px] text-white/60">
+      <div class="pr-14 text-[11px] text-white/60 truncate">
         {{ file.tags?.join(' · ') || '已归档' }}
       </div>
     </div>
+
+    <!-- 2x2 / 4x2 / 4x4 统一右下角格式角标（类型图标 + 格式文字） -->
+    <span
+      v-if="file.size !== 'small'"
+      class="pointer-events-none absolute right-1.5 bottom-1.5 z-20 inline-flex items-center gap-1 rounded-[2px] border border-white/15 bg-black/75 px-1.5 py-0.5 font-mono text-[9px] font-medium leading-none tracking-wider text-white/95 shadow-xs transition-all duration-150 group-hover:right-4"
+    >
+      <MessageSquare v-if="isSessionTile" class="size-2.5 shrink-0 text-sky-300" :stroke-width="2" />
+      <component
+        v-else
+        :is="currentConfig.icon"
+        class="size-2.5 shrink-0"
+        :class="currentConfig.color"
+        :stroke-width="2"
+      />
+      <span>{{ formatBadge.label }}</span>
+    </span>
   </BaseTile>
 </template>

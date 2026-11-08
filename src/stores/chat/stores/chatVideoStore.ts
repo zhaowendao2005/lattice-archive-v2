@@ -59,7 +59,14 @@ function isRetryable(error: unknown) {
 function resolveVideo(target: string): VideoRef | null {
   const parsed = parseMediaTarget(target);
   if (!parsed) return null;
-  const message = useChatStore().windows[parsed.peerKey]?.messages.find((item) => item.id === parsed.messageId);
+  let message = useChatStore().windows[parsed.peerKey]?.messages.find((item) => item.id === parsed.messageId);
+  if (!message) {
+    // 后台补差 / 频道校准可能整体替换消息窗口：查看器打开时的快照兜底，避免播放器被卸载。
+    const media = useChatMediaStore();
+    const viewer = media.viewer;
+    const snapshot = media.viewerMessage;
+    if (snapshot && viewer && viewer.peerKey === parsed.peerKey && snapshot.id === parsed.messageId) message = snapshot;
+  }
   const media = message?.media;
   if (!message || !media?.video) return null;
   const kind = media.video.asFile ? 'file' : media.kind === 'gif' ? 'gif' : media.kind === 'round' ? 'round' : 'video';

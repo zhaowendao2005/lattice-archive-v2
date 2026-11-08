@@ -503,7 +503,7 @@ export const useChatStore = defineStore('chat', {
 
     /** 批量加入并可选在 Telegram 侧静默归档（folder_id = 1） */
     async batchJoinAndArchive(
-      items: { peer?: TgPeerRef; inviteHash?: string; username?: string }[],
+      items: { peer?: TgPeerRef; inviteHash?: string; username?: string; alreadyJoined?: boolean }[],
       archiveInTg = true,
     ): Promise<TgDialogDto[]> {
       const accountId = this.accountId;
@@ -514,17 +514,52 @@ export const useChatStore = defineStore('chat', {
       for (const item of items) {
         try {
           let dialog: TgDialogDto | null = null;
-          if (item.inviteHash) {
+          if (item.alreadyJoined) {
+            if (item.peer) {
+              const existing = this.dialogs[`${item.peer.type}-${item.peer.id}`];
+              if (existing && !existing.left) dialog = existing;
+            }
+            if (!dialog && item.username) {
+              const resolved = await telegramBusClient.chatCommand.resolveUsername(accountId, item.username);
+              if (resolved) {
+                if (!resolved.left) {
+                  dialog = resolved;
+                } else {
+                  const res = await telegramBusClient.chatCommand.joinChat(accountId, resolved.peer);
+                  dialog = res.dialog ?? null;
+                }
+              }
+            }
+            if (!dialog && item.inviteHash) {
+              const preview = await telegramBusClient.chatCommand.checkChatInvite(accountId, item.inviteHash);
+              if (preview.status === 'already') {
+                dialog = preview.dialog ?? null;
+              } else {
+                const res = await telegramBusClient.chatCommand.importChatInvite(accountId, item.inviteHash);
+                dialog = res.dialog ?? null;
+              }
+            }
+          } else if (item.inviteHash) {
             const res = await telegramBusClient.chatCommand.importChatInvite(accountId, item.inviteHash);
             dialog = res.dialog ?? null;
           } else if (item.peer) {
-            const res = await telegramBusClient.chatCommand.joinChat(accountId, item.peer);
-            dialog = res.dialog ?? null;
+            const existing = this.dialogs[`${item.peer.type}-${item.peer.id}`];
+            if (existing && !existing.left) {
+              dialog = existing;
+            } else {
+              const res = await telegramBusClient.chatCommand.joinChat(accountId, item.peer);
+              dialog = res.dialog ?? null;
+            }
           } else if (item.username) {
             const resolved = await telegramBusClient.chatCommand.resolveUsername(accountId, item.username);
             if (resolved) {
-              const res = await telegramBusClient.chatCommand.joinChat(accountId, resolved.peer);
-              dialog = res.dialog ?? null;
+              const existing = this.dialogs[resolved.key];
+              if (existing && !existing.left) {
+                dialog = existing;
+              } else {
+                const res = await telegramBusClient.chatCommand.joinChat(accountId, resolved.peer);
+                dialog = res.dialog ?? null;
+              }
             }
           }
           if (dialog) {

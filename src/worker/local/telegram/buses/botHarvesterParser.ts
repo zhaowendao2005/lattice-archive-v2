@@ -8,7 +8,7 @@
  * 3. 建立「我方发出的查询消息 (Outbox Query) ↔ 机器人回复的分页消息 (Inbox Bot Reply)」因果绑定；
  * 4. 从单页富文本 Entities、裸链接与按钮中提取 t.me 候选群组/频道/深链。
  */
-import type { BotHarvestCandidateItem } from '../../../../stores/archive/types';
+import type { BotHarvestCandidateItem } from '@/types/botHarvest';
 import type { TgInlineButton, TgMessageDto } from '../../chatProtocol';
 
 const NEXT_BUTTON_REGEX = /(?:下[一]?页|next|▶|➡|➡️|👉|»|>|›)/i;
@@ -154,18 +154,30 @@ export function extractBotCandidatesFromMessage(
   pageNum: number,
 ): BotHarvestCandidateItem[] {
   const found: BotHarvestCandidateItem[] = [];
+  const seen = new Set<string>();
   const lines = (msg.text || '').split(/\r?\n/);
+  const telegramUrlPrefix = '(?:https?:\\/\\/)?(?:www\\.)?(?:t\\.me|telegram\\.me)';
+  const nonSessionPath = /^(?:joinchat|c|addstickers|proxy|share|s|iv|login|setlanguage|faq|terms|privacy|emoji|boost|stories|a)(?:\/|$)/i;
 
-  const addRawUrl = (url: string, labelHint: string) => {
-    const cleanUrl = url.trim();
-    // Bot deep links such as t.me/kuai?start=query_* are navigation controls, not harvest targets.
-    if (/(?:https?:\/\/)?(?:t\.me|telegram\.me)\/[a-zA-Z][a-zA-Z0-9_]{3,31}\?start=/i.test(cleanUrl)) return;
-    const inviteMatch = /(?:https?:\/\/)?(?:t\.me|telegram\.me)\/(?:\+|joinchat\/)([a-zA-Z0-9_-]+)/i.exec(cleanUrl);
+  const addCandidate = (candidate: BotHarvestCandidateItem, semanticKey: string) => {
+    if (!seen.has(semanticKey)) {
+      seen.add(semanticKey);
+      found.push(candidate);
+    }
+  };
+
+  const addRawUrl = (url: string, _labelHint: string) => {
+    const cleanUrl = url.trim().replace(/[.,!?;:'",”’。！？；：、)\]}>]+$/gu, '');
+    // Bot deep links are navigation controls, not harvest targets.
+    if (new RegExp(`^${telegramUrlPrefix}/[a-zA-Z][a-zA-Z0-9_]{3,31}(?:[/?#]|$)`, 'i').test(cleanUrl)
+      && /[?&]start(?:=|%3d)/i.test(cleanUrl)) return;
+
+    const inviteMatch = new RegExp(`^${telegramUrlPrefix}/(?:\\+|joinchat/)([a-zA-Z0-9_-]+)(?:[/?#]|$)`, 'i').exec(cleanUrl);
     if (inviteMatch) {
       const hash = inviteMatch[1]!;
-      found.push({
+      addCandidate({
         key: `invite-${hash}`,
-        title: labelHint || `私有群组/频道 (+${hash.slice(0, 6)})`,
+        title: `私有群组 / 频道 (+${hash.slice(0, 6)})`,
         inviteHash: hash,
         kind: 'invite_hash',
         sourcePage: pageNum,
@@ -173,53 +185,57 @@ export function extractBotCandidatesFromMessage(
         alreadyInExplore: false,
         alreadyJoined: false,
         selected: true,
-      });
+      }, `invite-${hash}`);
       return;
     }
 
-    const msgMatch = /(?:https?:\/\/)?(?:t\.me|telegram\.me)\/([a-zA-Z][a-zA-Z0-9_]{3,31})\/(\d+)/i.exec(cleanUrl);
-    if (msgMatch) {
-      const username = msgMatch[1]!;
-      const messageId = Number(msgMatch[2]);
-      found.push({
-        key: `msg-${username}-${messageId}`,
-        title: labelHint || `@${username} #${messageId}`,
-        username,
-        startParam: String(messageId),
-        kind: 'deep_link',
+    // Internal message links do not expose a username. The store may resolve this only
+    // against a locally known channel peer; the message id is intentionally discarded.
+    const internalMatch = new RegExp(`^${telegramUrlPrefix}/c/(\\d+)/(\\d+)(?:/\\d+)?/?(?:[?#].*)?$`, 'i').exec(cleanUrl);
+    if (internalMatch) {
+      const channelId = internalMatch[1]!;
+      const messageId = internalMatch[2]!;
+      addCandidate({
+        key: `internal-${channelId}`,
+        title: `待确认的 Telegram 会话 (${channelId})`,
+        internalChannelId: channelId,
+        kind: 'internal_peer',
         sourcePage: pageNum,
-        sourceTextSnippet: `https://t.me/${username}/${messageId}`,
+        sourceTextSnippet: `https://t.me/c/${channelId}/${messageId}`,
         alreadyInExplore: false,
         alreadyJoined: false,
         selected: true,
-      });
+      }, `internal-${channelId}`);
       return;
     }
 
-    const userMatch =
-      /(?:https?:\/\/)?(?:t\.me|telegram\.me)\/(?!joinchat\/|\+|c\/|addstickers\/|proxy\b|share\/)([a-zA-Z][a-zA-Z0-9_]{3,31})/i.exec(
-        cleanUrl,
-      );
-    if (userMatch) {
-      const username = userMatch[1]!;
-      found.push({
-        key: `peer-${username.toLowerCase()}`,
-        title: labelHint || `@${username}`,
-        username,
-        kind: 'username',
-        sourcePage: pageNum,
-        sourceTextSnippet: `https://t.me/${username}`,
-        alreadyInExplore: false,
-        alreadyJoined: false,
-        selected: true,
-      });
-    }
+    const usernameMatch = new RegExp(`^${telegramUrlPrefix}/([a-zA-Z][a-zA-Z0-9_]{3,31})(?:/(\\d+))?/?(?:[?#].*)?$`, 'i').exec(cleanUrl);
+    if (!usernameMatch || nonSessionPath.test(usernameMatch[1]!)) return;
+
+    // A /username/messageId link identifies the containing peer, not a message/media
+    // resource. Keep the message URL only as provenance and use username as identity.
+    const username = usernameMatch[1]!;
+    const messageId = usernameMatch[2];
+    const semanticKey = `peer-${username.toLowerCase()}`;
+    addCandidate({
+      key: semanticKey,
+      title: `@${username}`,
+      username,
+      kind: 'username',
+      sourcePage: pageNum,
+      sourceTextSnippet: messageId
+        ? `https://t.me/${username}/${messageId}`
+        : `https://t.me/${username}`,
+      alreadyInExplore: false,
+      alreadyJoined: false,
+      selected: true,
+    }, semanticKey);
   };
 
   if (msg.entities) {
     for (const ent of msg.entities) {
       const snippet = msg.text.slice(ent.offset, ent.offset + ent.length).trim();
-      const line = lines.find((l) => l.includes(snippet))?.replace(/https?:\/\/\S+/g, '').trim() || snippet;
+      const line = lines.find((l) => l.includes(snippet))?.replace(/(?:https?:\/\/)?(?:www\.)?(?:t\.me|telegram\.me)\/[^\s<>\")]+/gi, '').trim() || snippet;
       if (ent.type === 'textUrl' && ent.url) {
         addRawUrl(ent.url, line || snippet);
       } else if (ent.type === 'url') {
@@ -230,7 +246,7 @@ export function extractBotCandidatesFromMessage(
     }
   }
 
-  const rawUrlRegex = /https?:\/\/(?:t\.me|telegram\.me)\/[^\s<>")]+/gi;
+  const rawUrlRegex = /https?:\/\/(?:www\.)?(?:t\.me|telegram\.me)\/[^\s<>")]+/gi;
   let match: RegExpExecArray | null;
   while ((match = rawUrlRegex.exec(msg.text || '')) !== null) {
     const url = match[0];

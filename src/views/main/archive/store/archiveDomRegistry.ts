@@ -8,6 +8,8 @@
 class ArchiveDomRegistry {
   private boardEl: HTMLElement | null = null;
   private menuEl: HTMLElement | null = null;
+  private folderModalEl: HTMLElement | null = null;
+  private folderGridEl: HTMLElement | null = null;
   private groupGridEls = new Map<string, HTMLElement>();
 
   public setBoardEl(el: unknown): void {
@@ -16,6 +18,24 @@ class ArchiveDomRegistry {
 
   public getBoardEl(): HTMLElement | null {
     return this.boardEl;
+  }
+
+  /** 文件夹弹窗卡片容器（用于判断指针是否已拖出弹窗范围） */
+  public setFolderModalEl(el: unknown): void {
+    this.folderModalEl = el instanceof HTMLElement ? el : null;
+  }
+
+  public getFolderModalEl(): HTMLElement | null {
+    return this.folderModalEl;
+  }
+
+  /** 文件夹弹窗内部的像素网格容器（用于计算插入位置） */
+  public setFolderGridEl(el: unknown): void {
+    this.folderGridEl = el instanceof HTMLElement ? el : null;
+  }
+
+  public getFolderGridEl(): HTMLElement | null {
+    return this.folderGridEl;
   }
 
   public setMenuEl(el: unknown): void {

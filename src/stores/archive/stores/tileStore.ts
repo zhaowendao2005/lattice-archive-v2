@@ -11,7 +11,15 @@ import { useChatStore } from '@/stores/chat/stores/chatStore';
 import { useChatMediaStore } from '@/stores/chat/stores/chatMediaStore';
 import { mediaTarget } from '@/stores/chat/stores/chatModel';
 import { classifyTelegramError } from '@/worker/local/chat/telegramErrors';
-import { attachCanonicalResource, materializeResourceMirrors, migrateExploreManifestV2ToV3, stripResourceMirrors } from '../utils/resourceManifest';
+import {
+  attachCanonicalResource,
+  cloneTilesForManifest,
+  extractSessionLinkPrefix,
+  getTileTelegramDedupKey,
+  isSessionTile,
+  materializeResourceMirrors,
+  migrateExploreManifestV2ToV3,
+} from '../utils/resourceManifest';
 import type { TgMediaFile, TgPeerKey, TgPeerRef } from '@/stores/chat/types';
 import type {
   AggregateSearchResultItem,
@@ -23,8 +31,10 @@ import type {
   ContextMenuState,
   DragState,
   FileTileData,
+  FolderDragState,
   FolderTileData,
   GroupDragState,
+  SessionCredentialState,
   TileData,
   TileGroupData,
   TileSize,
@@ -87,11 +97,11 @@ export function getTileSpan(size: TileSize, customSpan?: { w: number; h: number 
   }
   switch (size) {
     case 'small':
-      return { w: 1, h: 1 };
-    case 'medium':
       return { w: 2, h: 2 };
+    case 'medium':
+      return { w: 3, h: 3 };
     case 'wide':
-      return { w: 4, h: 2 };
+      return { w: 3, h: 3 };
     case 'large':
       return { w: 4, h: 4 };
   }
@@ -829,14 +839,23 @@ function getDefaultTiles(): TileData[] {
 }
 
 /**
- * 递归统计文件夹内包含的所有文件与子文件夹总数
+ * 递归统计文件夹内包含的所有文件与子文件夹总数（支持传入 filter 进行类型过滤统计）
  */
-export function countFolderItemsRecursive(folder: FolderTileData): number {
+export function countFolderItemsRecursive(
+  folder: FolderTileData,
+  filter?: (item: TileData) => boolean,
+): number {
   let count = 0;
   for (const child of folder.children) {
-    count += 1;
     if (child.type === 'folder') {
-      count += countFolderItemsRecursive(child);
+      const subCount = countFolderItemsRecursive(child, filter);
+      if (!filter) {
+        count += 1 + subCount;
+      } else {
+        count += subCount;
+      }
+    } else if (!filter || filter(child)) {
+      count += 1;
     }
   }
   return count;
@@ -904,12 +923,17 @@ export const useTileStore = defineStore('tileBoard', () => {
 
   /** 文件夹弹窗内部选中与框选状态 */
   const folderSelectedTileIds = ref<string[]>([]);
+  const lastSelectedFolderTileId = ref<string | null>(null);
   const folderMarqueeState = ref<{
     isSelecting: boolean;
     startX: number;
     startY: number;
     currentX: number;
     currentY: number;
+    startScrollLeft: number;
+    startScrollTop: number;
+    currentScrollLeft: number;
+    currentScrollTop: number;
     additive: boolean;
     baseSelectedIds: string[];
   }>({
@@ -918,6 +942,10 @@ export const useTileStore = defineStore('tileBoard', () => {
     startY: 0,
     currentX: 0,
     currentY: 0,
+    startScrollLeft: 0,
+    startScrollTop: 0,
+    currentScrollLeft: 0,
+    currentScrollTop: 0,
     additive: false,
     baseSelectedIds: [],
   });
@@ -927,12 +955,17 @@ export const useTileStore = defineStore('tileBoard', () => {
   const coverRefreshBannerText = ref<string | null>(null);
 
   /** Windows 风格框选 (Rubber-band Marquee Selection) 状态 */
+  const lastSelectedTileId = ref<string | null>(null);
   const marqueeState = ref<{
     isSelecting: boolean;
     startX: number;
     startY: number;
     currentX: number;
     currentY: number;
+    startScrollLeft: number;
+    startScrollTop: number;
+    currentScrollLeft: number;
+    currentScrollTop: number;
     additive: boolean;
     baseSelectedIds: string[];
   }>({
@@ -941,6 +974,10 @@ export const useTileStore = defineStore('tileBoard', () => {
     startY: 0,
     currentX: 0,
     currentY: 0,
+    startScrollLeft: 0,
+    startScrollTop: 0,
+    currentScrollLeft: 0,
+    currentScrollTop: 0,
     additive: false,
     baseSelectedIds: [],
   });
@@ -994,6 +1031,8 @@ export const useTileStore = defineStore('tileBoard', () => {
   });
 
   let opfsPersistTimer: ReturnType<typeof setTimeout> | null = null;
+  let persistTimer: ReturnType<typeof setTimeout> | null = null;
+  const PERSIST_DEBOUNCE_MS = 120;
 
   /**
    * 递归在树中查找任意深度的磁贴（顶层或任意嵌套文件夹内）
@@ -1120,18 +1159,18 @@ export const useTileStore = defineStore('tileBoard', () => {
    * 构造当前 Explore VFS 完整 Manifest 快照（深拷贝为纯 JSON，剥离响应式 Proxy 与临时 blob: URL）
    */
   function buildExploreManifest(): ExploreManifestV2 {
-    return stripResourceMirrors({
+    return {
       schemaVersion: 3,
       revision: revision.value,
       updatedAtMs: updatedAtMs.value,
       deviceId: opfsExploreStorage.getOrCreateDeviceId(),
-      groups: JSON.parse(JSON.stringify(groups.value)),
-      tiles: stripTransientBlobUrls(tiles.value),
-      resources: JSON.parse(JSON.stringify(resources.value)),
-      tombstones: JSON.parse(JSON.stringify(tombstones.value)),
-      tempCredentials: JSON.parse(JSON.stringify(tempCredentials.value)),
-      vaultConfig: JSON.parse(JSON.stringify(vaultConfig.value)),
-    });
+      groups: groups.value.map((g) => ({ ...g })),
+      tiles: cloneTilesForManifest(tiles.value),
+      resources: resources.value,
+      tombstones: tombstones.value,
+      tempCredentials: tempCredentials.value,
+      vaultConfig: vaultConfig.value,
+    };
   }
 
   /**
@@ -1157,7 +1196,7 @@ export const useTileStore = defineStore('tileBoard', () => {
     updatedAtMs.value = manifest.updatedAtMs || Date.now();
     normalizeGroupOrders();
     ensureSystemTiles();
-    saveState(false);
+    saveState(false, { pruneResources: true });
     if (markClean) {
       isDirty.value = false;
     }
@@ -1227,7 +1266,12 @@ export const useTileStore = defineStore('tileBoard', () => {
       for (const instance of findTilesByResourceId(resourceId)) instance.thumb = { ...thumb };
       const resource = resources.value[resourceId];
       if (resource) {
-        resource.thumb = { status: 'ready', strippedDataUrl: thumb.strippedDataUrl, retryCount: thumb.retryCount };
+        resource.thumb = {
+          status: 'ready',
+          strippedDataUrl: thumb.strippedDataUrl,
+          retryCount: thumb.retryCount,
+          sourceRef: tile.thumb?.sourceRef ?? resource.thumb?.sourceRef,
+        };
         resource.updatedAtMs = Date.now();
       }
       saveState();
@@ -1371,13 +1415,34 @@ export const useTileStore = defineStore('tileBoard', () => {
     }
   }
 
-  function saveState(bumpRevision = true) {
-    pruneOrphanResources();
+  function saveState(bumpRevision = true, options?: { pruneResources?: boolean }): void {
+    if (options?.pruneResources) {
+      pruneOrphanResources();
+    }
     if (bumpRevision) {
       revision.value += 1;
       updatedAtMs.value = Date.now();
       isDirty.value = true;
     }
+    schedulePersist();
+  }
+
+  /** 防抖调度：同步段只更新内存与 revision，落盘统一在空闲 120ms 后执行 */
+  function schedulePersist(): void {
+    if (persistTimer) clearTimeout(persistTimer);
+    persistTimer = setTimeout(() => {
+      persistTimer = null;
+      flushPersist();
+    }, PERSIST_DEBOUNCE_MS);
+  }
+
+  /** 立即构造 Manifest 并写入 localStorage 与 OPFS（OPFS 仍保留 300ms 合并窗口） */
+  function flushPersist(): void {
+    if (persistTimer) {
+      clearTimeout(persistTimer);
+      persistTimer = null;
+    }
+    const manifest = buildExploreManifest();
 
     if (typeof localStorage !== 'undefined') {
       try {
@@ -1385,14 +1450,14 @@ export const useTileStore = defineStore('tileBoard', () => {
           STORAGE_KEY,
           JSON.stringify({
             schemaVersion: 3,
-            groups: groups.value,
-            tiles: buildExploreManifest().tiles,
-            resources: resources.value,
-            tombstones: tombstones.value,
-            tempCredentials: tempCredentials.value,
-            vaultConfig: vaultConfig.value,
-            revision: revision.value,
-            updatedAtMs: updatedAtMs.value,
+            groups: manifest.groups,
+            tiles: manifest.tiles,
+            resources: manifest.resources,
+            tombstones: manifest.tombstones,
+            tempCredentials: manifest.tempCredentials,
+            vaultConfig: manifest.vaultConfig,
+            revision: manifest.revision,
+            updatedAtMs: manifest.updatedAtMs,
             wallpaper: wallpaper.value,
           }),
         );
@@ -1423,13 +1488,25 @@ export const useTileStore = defineStore('tileBoard', () => {
     }, 300);
   }
 
+  if (typeof window !== 'undefined') {
+    const flushOnUnload = () => {
+      if (persistTimer) {
+        clearTimeout(persistTimer);
+        persistTimer = null;
+        flushPersist();
+      }
+    };
+    window.addEventListener('pagehide', flushOnUnload);
+    window.addEventListener('beforeunload', flushOnUnload);
+  }
+
   function resetToDefault() {
     groups.value = getDefaultGroups();
     tiles.value = isMockDev ? getDefaultTiles() : [];
     tombstones.value = {};
     resources.value = {};
     ensureSystemTiles();
-    saveState();
+    saveState(true, { pruneResources: true });
   }
 
   /**
@@ -1494,6 +1571,12 @@ export const useTileStore = defineStore('tileBoard', () => {
     return map;
   });
 
+  /** O(1) 选中态查找 Set，供视图层替代 Array.includes 使用。 */
+  const selectedTileIdSet = computed<ReadonlySet<string>>(() => new Set(selectedTileIds.value));
+
+  /** O(1) 文件夹内选中态查找 Set。 */
+  const folderSelectedTileIdSet = computed<ReadonlySet<string>>(() => new Set(folderSelectedTileIds.value));
+
   const columns = computed(() => {
     const colsMap = new Map<number, TileGroupData[]>();
     for (const g of groups.value) {
@@ -1535,9 +1618,99 @@ export const useTileStore = defineStore('tileBoard', () => {
     clientX: number,
     clientY: number,
   ) {
-    file.size = 'medium';
-    file.customSpan = undefined;
     pendingFolderChildDrag.value = { file, folder, clientX, clientY };
+  }
+
+  // ---------------------------------------------------------------------------
+  // 文件夹弹窗内部拖拽会话（内部重排 ↔ 拖出磁贴板 的模式区分）
+  // ---------------------------------------------------------------------------
+  const folderDragState = ref<FolderDragState>({
+    isDragging: false,
+    folderId: null,
+    ids: [],
+    pointerX: 0,
+    pointerY: 0,
+    width: 0,
+    height: 0,
+    insertIndex: 0,
+    insertRect: null,
+    isOutside: false,
+  });
+
+  function beginFolderDrag(
+    folderId: string,
+    ids: string[],
+    width: number,
+    height: number,
+  ): void {
+    folderDragState.value = {
+      isDragging: true,
+      folderId,
+      ids: [...ids],
+      pointerX: 0,
+      pointerY: 0,
+      width,
+      height,
+      insertIndex: 0,
+      insertRect: null,
+      isOutside: false,
+    };
+  }
+
+  function updateFolderDrag(
+    pointerX: number,
+    pointerY: number,
+    insertIndex: number,
+    insertRect: FolderDragState['insertRect'],
+    isOutside: boolean,
+  ): void {
+    const state = folderDragState.value;
+    if (!state.isDragging) return;
+    state.pointerX = pointerX;
+    state.pointerY = pointerY;
+    state.insertIndex = insertIndex;
+    state.insertRect = insertRect;
+    state.isOutside = isOutside;
+  }
+
+  function endFolderDrag(): void {
+    folderDragState.value = {
+      isDragging: false,
+      folderId: null,
+      ids: [],
+      pointerX: 0,
+      pointerY: 0,
+      width: 0,
+      height: 0,
+      insertIndex: 0,
+      insertRect: null,
+      isOutside: false,
+    };
+  }
+
+  /**
+   * 文件夹内部重排：把 ids 对应的子项移动为「移除它们后数组」的第 insertIndex 位。
+   * 保持被拖拽组的原始相对顺序；单事务只调用一次 saveState()。
+   */
+  function reorderFolderChildren(
+    folderId: string,
+    ids: string[],
+    insertIndex: number,
+  ): number {
+    if (ids.length === 0) return 0;
+    const folder = getTileById(folderId);
+    if (!folder || folder.type !== 'folder') return 0;
+    const moving = new Set(ids);
+    const moved = folder.children.filter((c) => moving.has(c.id));
+    if (moved.length === 0) return 0;
+    const rest = folder.children.filter((c) => !moving.has(c.id));
+    const idx = Math.max(0, Math.min(insertIndex, rest.length));
+    rest.splice(idx, 0, ...moved);
+    folder.children = rest;
+    folder.updatedAt = new Date().toISOString().slice(0, 10);
+    folder.updatedAtMs = Date.now();
+    saveState();
+    return moved.length;
   }
 
   async function openTelegramMedia(tile: FileTileData): Promise<boolean> {
@@ -1648,6 +1821,13 @@ export const useTileStore = defineStore('tileBoard', () => {
     }
     tile.updatedAt = new Date().toISOString().slice(0, 10);
     tile.updatedAtMs = Date.now();
+    // 单磁贴调整大小后重排所在分组，防止与邻居重叠
+    const groupTiles = tiles.value.filter((t) => t.groupId === tile.groupId);
+    const reflowed = reflowGroupTilesLocal(groupTiles, maxCols);
+    for (const t of groupTiles) {
+      const pos = reflowed[t.id];
+      if (pos) { t.x = pos.x; t.y = pos.y; }
+    }
     saveState();
   }
 
@@ -1660,28 +1840,170 @@ export const useTileStore = defineStore('tileBoard', () => {
     const clampedW = Math.max(1, Math.min(maxCols - tile.x, w));
     const clampedH = Math.max(1, Math.min(6, h));
 
-    if (clampedW === 1 && clampedH === 1) {
+    if (clampedW === 2 && clampedH === 2) {
       tile.size = 'small';
       delete tile.customSpan;
-    } else if (clampedW === 2 && clampedH === 2) {
+    } else if (clampedW === 3 && clampedH === 3) {
       tile.size = 'medium';
-      delete tile.customSpan;
-    } else if (clampedW === 4 && clampedH === 2) {
-      tile.size = 'wide';
       delete tile.customSpan;
     } else if (clampedW === 4 && clampedH === 4) {
       tile.size = 'large';
       delete tile.customSpan;
     } else {
       tile.customSpan = { w: clampedW, h: clampedH };
-      if (clampedW >= 4) tile.size = 'wide';
-      else if (clampedW >= 2 && clampedH >= 2) tile.size = 'medium';
-      else tile.size = 'small';
+      tile.size = clampedW >= 4 && clampedH >= 4 ? 'large' : clampedW >= 3 && clampedH >= 3 ? 'medium' : 'small';
     }
 
     tile.updatedAt = new Date().toISOString().slice(0, 10);
     tile.updatedAtMs = Date.now();
+
+    // 尺寸变化后在函数内部重排所在分组，视图层无需再调用 applyDisplacedPositions
+    if (!tile.parentId) {
+      const groupTiles = tiles.value.filter((t) => t.groupId === tile.groupId);
+      const reflowed = reflowGroupTilesLocal(groupTiles, maxCols);
+      for (const t of groupTiles) {
+        const pos = reflowed[t.id];
+        if (pos) { t.x = pos.x; t.y = pos.y; }
+      }
+    }
     saveState();
+  }
+
+  /**
+   * 分组紧凑重排（本地版）：按阅读顺序贪心填入，消除重叠与空洞。无行数上限。
+   */
+  function reflowGroupTilesLocal(
+    groupTiles: TileData[],
+    maxColumns: number,
+  ): Record<string, { x: number; y: number }> {
+    const result: Record<string, { x: number; y: number }> = {};
+    const maxCols = maxColumns;
+    const sorted = [...groupTiles].sort((a, b) => a.y - b.y || a.x - b.x);
+    const grid: boolean[][] = [];
+
+    function ensureRow(r: number) {
+      while (grid.length <= r) grid.push(new Array(maxCols).fill(false));
+    }
+    function isAreaFree(x: number, y: number, w: number, h: number): boolean {
+      if (x + w > maxCols) return false;
+      for (let r = y; r < y + h; r++) {
+        ensureRow(r);
+        for (let c = x; c < x + w; c++) { if (grid[r][c]) return false; }
+      }
+      return true;
+    }
+    function markArea(x: number, y: number, w: number, h: number) {
+      for (let r = y; r < y + h; r++) {
+        ensureRow(r);
+        for (let c = x; c < x + w; c++) grid[r][c] = true;
+      }
+    }
+
+    const rowLimit = Math.max(400, groupTiles.length * 5);
+    for (const tile of sorted) {
+      const span = getTileSpan(tile.size, tile.customSpan);
+      let placed = false;
+      for (let r = 0; r < rowLimit && !placed; r++) {
+        for (let c = 0; c <= maxCols - span.w; c++) {
+          if (isAreaFree(c, r, span.w, span.h)) {
+            markArea(c, r, span.w, span.h);
+            result[tile.id] = { x: c, y: r };
+            placed = true;
+            break;
+          }
+        }
+      }
+      if (!placed) {
+        const bottom = grid.length;
+        markArea(0, bottom, span.w, span.h);
+        result[tile.id] = { x: 0, y: bottom };
+      }
+    }
+    return result;
+  }
+
+  /**
+   * 单事务批量调整磁贴大小（支持根页顶层磁贴与文件夹内子磁贴），
+   * 调整后对受影响的根页分组各执行一次紧凑重排，仅调用一次 saveState()。
+   */
+  function batchResizeTiles(tileIds: string[], size: TileSize): number {
+    if (tileIds.length === 0) return 0;
+    const today = new Date().toISOString().slice(0, 10);
+    const now = Date.now();
+    const affectedGroupIds = new Set<string>();
+    let count = 0;
+
+    for (const id of tileIds) {
+      const tile = getTileById(id);
+      if (!tile) continue;
+      tile.size = size;
+      delete tile.customSpan;
+      tile.updatedAt = today;
+      tile.updatedAtMs = now;
+      // 只有顶层磁贴才需要板上重排（文件夹子项不在磁贴板网格上）
+      if (!tile.parentId) affectedGroupIds.add(tile.groupId);
+      count += 1;
+    }
+
+    // 对每个受影响分组执行一次紧凑重排
+    for (const groupId of affectedGroupIds) {
+      const group = groups.value.find((g) => g.id === groupId);
+      const maxCols = group?.widthColumns || GROUP_COLUMNS;
+      const groupTiles = tiles.value.filter((t) => t.groupId === groupId);
+      const reflowed = reflowGroupTilesLocal(groupTiles, maxCols);
+      for (const t of groupTiles) {
+        const pos = reflowed[t.id];
+        if (pos) { t.x = pos.x; t.y = pos.y; }
+      }
+    }
+
+    if (count > 0) saveState();
+    return count;
+  }
+
+  /**
+   * 单事务批量按 span 调整磁贴大小（根页多选时拖拽右下角手柄批量联动）。
+   */
+  function batchResizeTileSpan(tileIds: string[], w: number, h: number): number {
+    if (tileIds.length === 0) return 0;
+    const today = new Date().toISOString().slice(0, 10);
+    const now = Date.now();
+    const affectedGroupIds = new Set<string>();
+    let count = 0;
+
+    for (const id of tileIds) {
+      const tile = getTileById(id);
+      if (!tile) continue;
+      const group = groups.value.find((g) => g.id === tile.groupId);
+      const maxCols = group?.widthColumns || GROUP_COLUMNS;
+      const clampedW = Math.max(1, Math.min(maxCols - tile.x, w));
+      const clampedH = Math.max(1, Math.min(6, h));
+      if (clampedW === 2 && clampedH === 2) { tile.size = 'small'; delete tile.customSpan; }
+      else if (clampedW === 3 && clampedH === 3) { tile.size = 'medium'; delete tile.customSpan; }
+      else if (clampedW === 4 && clampedH === 4) { tile.size = 'large'; delete tile.customSpan; }
+      else {
+        tile.customSpan = { w: clampedW, h: clampedH };
+        tile.size = clampedW >= 4 && clampedH >= 4 ? 'large' : clampedW >= 3 && clampedH >= 3 ? 'medium' : 'small';
+      }
+      tile.updatedAt = today;
+      tile.updatedAtMs = now;
+      if (!tile.parentId) affectedGroupIds.add(tile.groupId);
+      count += 1;
+    }
+
+    for (const groupId of affectedGroupIds) {
+      const group = groups.value.find((g) => g.id === groupId);
+      const maxCols = group?.widthColumns || GROUP_COLUMNS;
+      const groupTiles = tiles.value.filter((t) => t.groupId === groupId);
+      const reflowed = reflowGroupTilesLocal(groupTiles, maxCols);
+      for (const t of groupTiles) {
+        const pos = reflowed[t.id];
+        if (pos) { t.x = pos.x; t.y = pos.y; }
+      }
+    }
+
+    if (count > 0) saveState();
+    return count;
   }
 
   function normalizeGroupOrders() {
@@ -1868,7 +2190,7 @@ export const useTileStore = defineStore('tileBoard', () => {
     if (activeFolder.value?.id === tileId) {
       closeFolder();
     }
-    saveState();
+    saveState(true, { pruneResources: true });
   }
 
   function renameChildFile(folderId: string, fileId: string, newTitle: string) {
@@ -1970,7 +2292,7 @@ export const useTileStore = defineStore('tileBoard', () => {
   }
 
   /**
-   * 在指定分组内从 preferredY 行开始向下回绕搜索一个能容纳 span 的空位
+   * 在指定分组内从 preferredY 行开始向下搜索一个能容纳 span 的空位（无行数上限，不回绕）
    */
   function findNearestFreeSlot(
     groupId: string,
@@ -1997,9 +2319,9 @@ export const useTileStore = defineStore('tileBoard', () => {
           o.y + o.h <= row,
       );
 
-    const TOTAL_ROWS = 200;
-    for (let step = 0; step < TOTAL_ROWS; step++) {
-      const row = (preferredY + step) % TOTAL_ROWS;
+    const rowLimit = Math.max(400, occupied.length * 5 + preferredY + span.h + 10);
+    for (let step = 0; step < rowLimit; step++) {
+      const row = preferredY + step;
       for (let col = 0; col <= maxCols - span.w; col++) {
         if (fits(col, row)) return { x: col, y: row };
       }
@@ -2016,6 +2338,7 @@ export const useTileStore = defineStore('tileBoard', () => {
     targetGroupId?: string,
     targetX?: number,
     targetY?: number,
+    displacedPositions?: Record<string, { x: number; y: number }>,
   ) {
     const folder = getTileById(folderId);
     if (!folder || folder.type !== 'folder') return;
@@ -2027,14 +2350,23 @@ export const useTileStore = defineStore('tileBoard', () => {
     if (!item) return;
     item.groupId = targetGroupId || folder.groupId;
     item.parentId = undefined;
-    item.size = 'medium';
-    item.customSpan = undefined;
     item.updatedAt = new Date().toISOString().slice(0, 10);
     item.updatedAtMs = Date.now();
 
     const group = groups.value.find((g) => g.id === item.groupId);
     const maxCols = group?.widthColumns || GROUP_COLUMNS;
     const span = getTileSpan(item.size, item.customSpan);
+
+    if (displacedPositions) {
+      for (const t of tiles.value) {
+        if (t.groupId !== item.groupId || t.id === item.id) continue;
+        const pos = displacedPositions[t.id];
+        if (pos) {
+          t.x = pos.x;
+          t.y = pos.y;
+        }
+      }
+    }
 
     if (targetX === undefined || targetY === undefined) {
       const slot = findNearestFreeSlot(item.groupId, span, folder.y);
@@ -2047,6 +2379,45 @@ export const useTileStore = defineStore('tileBoard', () => {
 
     tiles.value.push(item);
     saveState();
+  }
+
+  /**
+   * 将文件夹内多个子项批量移出到文件夹所在分组，各自保留尺寸并寻找空位，仅落盘一次
+   */
+  function batchRemoveFilesFromFolder(folderId: string, fileIds: string[]): number {
+    const folder = getTileById(folderId);
+    if (!folder || folder.type !== 'folder' || fileIds.length === 0) return 0;
+
+    const targetGroupId = folder.groupId;
+    const group = groups.value.find((g) => g.id === targetGroupId);
+    const maxCols = group?.widthColumns || GROUP_COLUMNS;
+    const now = Date.now();
+    const today = new Date().toISOString().slice(0, 10);
+    let removed = 0;
+
+    for (const fileId of new Set(fileIds)) {
+      const index = folder.children.findIndex((f) => f.id === fileId);
+      if (index < 0) continue;
+      const [item] = folder.children.splice(index, 1);
+      if (!item) continue;
+      item.groupId = targetGroupId;
+      item.parentId = undefined;
+      item.updatedAt = today;
+      item.updatedAtMs = now;
+      const span = getTileSpan(item.size, item.customSpan);
+      const slot = findNearestFreeSlot(targetGroupId, span, folder.y);
+      item.x = Math.max(0, Math.min(slot.x, maxCols - span.w));
+      item.y = slot.y;
+      tiles.value.push(item);
+      removed += 1;
+    }
+
+    if (removed > 0) {
+      folder.updatedAt = today;
+      folder.updatedAtMs = now;
+      saveState();
+    }
+    return removed;
   }
 
   /**
@@ -2145,7 +2516,13 @@ export const useTileStore = defineStore('tileBoard', () => {
     saveState();
   }
 
-  function moveTile(tileId: string, targetGroupId: string, targetX: number, targetY: number) {
+  function moveTile(
+    tileId: string,
+    targetGroupId: string,
+    targetX: number,
+    targetY: number,
+    displacedPositions?: Record<string, { x: number; y: number }>,
+  ) {
     const tile = getTileById(tileId);
     if (!tile) return;
 
@@ -2162,6 +2539,18 @@ export const useTileStore = defineStore('tileBoard', () => {
     const span = getTileSpan(tile.size, tile.customSpan);
     const clampedX = Math.max(0, Math.min(targetX, maxCols - span.w));
     const clampedY = Math.max(0, targetY);
+
+    // 放手时把布局引擎算出的邻居位移与自身落点合并为一次事务
+    if (displacedPositions) {
+      for (const t of tiles.value) {
+        if (t.id === tile.id || t.groupId !== targetGroupId) continue;
+        const pos = displacedPositions[t.id];
+        if (pos) {
+          t.x = pos.x;
+          t.y = pos.y;
+        }
+      }
+    }
 
     tile.groupId = targetGroupId;
     tile.x = clampedX;
@@ -2243,7 +2632,7 @@ export const useTileStore = defineStore('tileBoard', () => {
   }
 
   /**
-   * 记录已归入磁贴拓扑的搜索结果 ID → 所在位置文案映射（支持递归扫描所有嵌套文件夹）
+   * 记录已归入磁贴拓扑的搜索结果 ID → 所在位置文案映射（支持递归扫描所有嵌套文件夹及多源合并锚点）
    */
   const archivedSourceMap = computed(() => {
     const map = new Map<string, string>();
@@ -2252,10 +2641,23 @@ export const useTileStore = defineStore('tileBoard', () => {
       groupTitleMap.set(g.id, g.title);
     }
 
+    const indexFileSources = (t: FileTileData, locationLabel: string) => {
+      if (t.sourceResultId) {
+        map.set(t.sourceResultId, locationLabel);
+      }
+      if (t.sources?.length) {
+        for (const src of t.sources) {
+          if (src.peerKey && src.msgId) {
+            map.set(`tg-${src.peerKey}-${src.msgId}`, locationLabel);
+          }
+        }
+      }
+    };
+
     const scanList = (list: TileData[], pathPrefix: string) => {
       for (const t of list) {
-        if (t.type === 'file' && t.sourceResultId) {
-          map.set(t.sourceResultId, pathPrefix);
+        if (t.type === 'file') {
+          indexFileSources(t, pathPrefix);
         } else if (t.type === 'folder') {
           scanList(t.children, `${pathPrefix} / ${t.title}`);
         }
@@ -2264,12 +2666,35 @@ export const useTileStore = defineStore('tileBoard', () => {
 
     for (const t of tiles.value) {
       const gTitle = groupTitleMap.get(t.groupId) || '磁贴分组';
-      if (t.type === 'file' && t.sourceResultId) {
-        map.set(t.sourceResultId, gTitle);
+      if (t.type === 'file') {
+        indexFileSources(t, gTitle);
       } else if (t.type === 'folder') {
         scanList(t.children, `${gTitle} / ${t.title}`);
       }
     }
+    return map;
+  });
+
+  /**
+   * peerKey / sessionId / tileId → 当前会话凭据三态（供会话管理中心行内直接修改）
+   */
+  const credentialStateByPeerKey = computed(() => {
+    const map = new Map<string, SessionCredentialState>();
+    const scan = (list: TileData[]) => {
+      for (const t of list) {
+        if (t.type === 'file') {
+          if (t.isSessionLink || t.sessionId || t.peerKey) {
+            const state = t.sessionCredentialState ?? 'joined';
+            if (t.peerKey) map.set(t.peerKey, state);
+            if (t.sessionId) map.set(t.sessionId, state);
+            map.set(t.id, state);
+          }
+        } else if (t.type === 'folder') {
+          scan(t.children);
+        }
+      }
+    };
+    scan(tiles.value);
     return map;
   });
 
@@ -2308,6 +2733,7 @@ export const useTileStore = defineStore('tileBoard', () => {
         extension: item.extension,
         fileSize: item.fileSize,
         sizeBytes: item.sizeBytes,
+        participantsCount: item.participantsCount,
         videoDuration: item.durationSeconds,
         videoWidth: item.width,
         videoHeight: item.height,
@@ -2321,6 +2747,7 @@ export const useTileStore = defineStore('tileBoard', () => {
         peerKey: item.peerRef ? `${item.peerRef.type}-${item.peerRef.id}` : undefined,
         peerType: item.peerRef?.type,
         accessHash: item.peerRef?.accessHash,
+        username: item.username,
         noforwards: item.noforwards,
         groupedId: item.groupedId,
         albumCount: item.albumMsgIds?.length,
@@ -2355,6 +2782,8 @@ export const useTileStore = defineStore('tileBoard', () => {
                       peerType: item.peerRef.type,
                       accessHash: item.peerRef.accessHash,
                       msgId: item.msgId,
+                      photoId: item.avatarPhotoId,
+                      dcId: item.avatarDcId,
                     }
                   : undefined,
               }
@@ -2490,22 +2919,71 @@ export const useTileStore = defineStore('tileBoard', () => {
   function toggleSelectTile(tileId: string, additive = false) {
     if (!additive) {
       selectedTileIds.value = [tileId];
+      lastSelectedTileId.value = tileId;
       return;
     }
     const idx = selectedTileIds.value.indexOf(tileId);
     if (idx >= 0) {
       selectedTileIds.value = selectedTileIds.value.filter((id) => id !== tileId);
+      if (lastSelectedTileId.value === tileId) {
+        lastSelectedTileId.value = selectedTileIds.value[selectedTileIds.value.length - 1] ?? null;
+      }
     } else {
       selectedTileIds.value = [...selectedTileIds.value, tileId];
+      lastSelectedTileId.value = tileId;
     }
+  }
+
+  function selectTileRange(targetTileId: string) {
+    const targetTile = getTileById(targetTileId);
+    if (!targetTile || targetTile.undeletable || targetTile.systemApp) return;
+
+    if (!lastSelectedTileId.value) {
+      toggleSelectTile(targetTileId, true);
+      lastSelectedTileId.value = targetTileId;
+      return;
+    }
+
+    const lastTile = getTileById(lastSelectedTileId.value);
+    if (!lastTile || lastTile.groupId !== targetTile.groupId) {
+      toggleSelectTile(targetTileId, true);
+      lastSelectedTileId.value = targetTileId;
+      return;
+    }
+
+    const groupTiles = tilesByGroup.value.get(targetTile.groupId) || [];
+    const idxA = groupTiles.findIndex((t) => t.id === lastSelectedTileId.value);
+    const idxB = groupTiles.findIndex((t) => t.id === targetTileId);
+    if (idxA === -1 || idxB === -1) {
+      toggleSelectTile(targetTileId, true);
+      lastSelectedTileId.value = targetTileId;
+      return;
+    }
+
+    const start = Math.min(idxA, idxB);
+    const end = Math.max(idxA, idxB);
+    const rangeIds = groupTiles
+      .slice(start, end + 1)
+      .filter((t) => !t.undeletable && !t.systemApp)
+      .map((t) => t.id);
+
+    setSelectedTileIds([...selectedTileIds.value, ...rangeIds]);
   }
 
   function setSelectedTileIds(ids: string[]) {
     selectedTileIds.value = Array.from(new Set(ids));
+    if (selectedTileIds.value.length > 0) {
+      if (!lastSelectedTileId.value || !selectedTileIds.value.includes(lastSelectedTileId.value)) {
+        lastSelectedTileId.value = selectedTileIds.value[selectedTileIds.value.length - 1] ?? null;
+      }
+    } else {
+      lastSelectedTileId.value = null;
+    }
   }
 
   function clearSelectedTiles() {
     selectedTileIds.value = [];
+    lastSelectedTileId.value = null;
   }
 
   function selectAllTilesInGroup(groupId?: string) {
@@ -2553,7 +3031,7 @@ export const useTileStore = defineStore('tileBoard', () => {
 
     selectedTileIds.value = selectedTileIds.value.filter((id) => !targetIds.includes(id));
     if (deletedCount > 0) {
-      saveState();
+      saveState(true, { pruneResources: true });
       debugLoggerDataSource.emitFrontendLog({
         domain: 'archive.tile',
         level: 'INFO',
@@ -2649,7 +3127,6 @@ export const useTileStore = defineStore('tileBoard', () => {
         parent.updatedAt = today;
         parent.updatedAtMs = now;
         tile.parentId = undefined;
-        tile.size = tile.size === 'small' ? 'medium' : tile.size;
         tiles.value.push(tile);
       }
 
@@ -2792,21 +3269,55 @@ export const useTileStore = defineStore('tileBoard', () => {
   function toggleSelectFolderChildTile(tileId: string, additive = false) {
     if (!additive) {
       folderSelectedTileIds.value = [tileId];
+      lastSelectedFolderTileId.value = tileId;
       return;
     }
     if (folderSelectedTileIds.value.includes(tileId)) {
       folderSelectedTileIds.value = folderSelectedTileIds.value.filter((id) => id !== tileId);
+      if (lastSelectedFolderTileId.value === tileId) {
+        lastSelectedFolderTileId.value = folderSelectedTileIds.value[folderSelectedTileIds.value.length - 1] ?? null;
+      }
     } else {
       folderSelectedTileIds.value = [...folderSelectedTileIds.value, tileId];
+      lastSelectedFolderTileId.value = tileId;
     }
+  }
+
+  function selectFolderTileRange(targetTileId: string, folderChildren: TileData[]) {
+    if (!lastSelectedFolderTileId.value) {
+      toggleSelectFolderChildTile(targetTileId, true);
+      lastSelectedFolderTileId.value = targetTileId;
+      return;
+    }
+
+    const idxA = folderChildren.findIndex((t) => t.id === lastSelectedFolderTileId.value);
+    const idxB = folderChildren.findIndex((t) => t.id === targetTileId);
+    if (idxA === -1 || idxB === -1) {
+      toggleSelectFolderChildTile(targetTileId, true);
+      lastSelectedFolderTileId.value = targetTileId;
+      return;
+    }
+
+    const start = Math.min(idxA, idxB);
+    const end = Math.max(idxA, idxB);
+    const rangeIds = folderChildren.slice(start, end + 1).map((t) => t.id);
+    setFolderSelectedTileIds([...folderSelectedTileIds.value, ...rangeIds]);
   }
 
   function setFolderSelectedTileIds(ids: string[]) {
     folderSelectedTileIds.value = Array.from(new Set(ids));
+    if (folderSelectedTileIds.value.length > 0) {
+      if (!lastSelectedFolderTileId.value || !folderSelectedTileIds.value.includes(lastSelectedFolderTileId.value)) {
+        lastSelectedFolderTileId.value = folderSelectedTileIds.value[folderSelectedTileIds.value.length - 1] ?? null;
+      }
+    } else {
+      lastSelectedFolderTileId.value = null;
+    }
   }
 
   function clearFolderSelectedTiles() {
     folderSelectedTileIds.value = [];
+    lastSelectedFolderTileId.value = null;
   }
 
   /**
@@ -2921,35 +3432,16 @@ export const useTileStore = defineStore('tileBoard', () => {
     };
 
     let dialog = peerKey ? chatStore.dialogs[peerKey] : undefined;
-    const peerType = tile.peerType || src?.peerType || srcRef?.peerType || dialog?.peer.type || parsePeerFromKey(peerKey)?.type || 'channel';
-    const peerId = src?.peerId || srcRef?.peerId || dialog?.peer.id || parsePeerFromKey(peerKey)?.id || peerKey.replace(/^(user|chat|channel)-/, '');
-    const accessHash = tile.accessHash || src?.accessHash || srcRef?.accessHash || dialog?.peer.accessHash;
+    const tempCred = peerKey
+      ? tempCredentials.value.find((c) => c.peerKey === peerKey)
+      : undefined;
+    const peerType = tile.peerType || src?.peerType || srcRef?.peerType || dialog?.peer.type || tempCred?.peerType || parsePeerFromKey(peerKey)?.type || 'channel';
+    const peerId = src?.peerId || srcRef?.peerId || dialog?.peer.id || tempCred?.peerId || parsePeerFromKey(peerKey)?.id || peerKey.replace(/^(user|chat|channel)-/, '');
+    const accessHash = tile.accessHash || src?.accessHash || srcRef?.accessHash || dialog?.peer.accessHash || tempCred?.accessHash;
 
-    // 1. 会话磁贴：拉取会话头像
+    // 1. 会话磁贴：直接使用已获取的会话凭据与头像定位信息拉取头像，不重复发起 ResolveUsername / CheckChatInvite 申领
     if (isSessionFileTile(tile)) {
-      if (!dialog?.avatar && tile.username) {
-        try {
-          const resolved = await telegramBusClient.chatCommand.resolveUsername(accountId, tile.username);
-          if (resolved) {
-            dialog = resolved;
-          }
-        } catch (error) {
-          const info = classifyTelegramError(error);
-          logCover('tile_cover_resolve_error', 'WARN', { ...baseTags, branch: 'username', bucket: info.bucket, code: info.code }, info.description);
-        }
-      }
-      if (!dialog?.avatar && tile.inviteHash) {
-        try {
-          const preview = await telegramBusClient.chatCommand.checkChatInvite(accountId, tile.inviteHash);
-          if (preview.dialog) {
-            dialog = preview.dialog;
-          }
-        } catch (error) {
-          const info = classifyTelegramError(error);
-          logCover('tile_cover_resolve_error', 'WARN', { ...baseTags, branch: 'invite', bucket: info.bucket, code: info.code }, info.description);
-        }
-      }
-      if (!dialog && !chatStore.archiveLoaded) {
+      if (!dialog && !tempCred && !srcRef?.photoId && !chatStore.archiveLoaded) {
         try {
           await chatStore.refreshArchiveDialogs();
           dialog = peerKey ? chatStore.dialogs[peerKey] : undefined;
@@ -2959,16 +3451,21 @@ export const useTileStore = defineStore('tileBoard', () => {
         }
       }
 
-      if (dialog?.avatar) {
+      const avatarPhotoId = dialog?.avatar?.photoId ?? srcRef?.photoId ?? tempCred?.avatarPhotoId;
+      const avatarDcId = dialog?.avatar?.dcId ?? srcRef?.dcId ?? tempCred?.avatarDcId;
+      const fallbackAvatarThumb = dialog?.avatar?.thumb ?? tile.thumb?.strippedDataUrl ?? tempCred?.avatarThumb;
+      const avatarPeer: TgPeerRef | undefined = dialog?.peer ?? (peerId ? { type: peerType, id: peerId, accessHash } : undefined);
+
+      if (avatarPeer && avatarPhotoId && avatarDcId) {
         try {
           const avatarMedia = await telegramBusClient.cover.getAvatar(
             accountId,
-            dialog.peer,
-            dialog.avatar.photoId,
-            dialog.avatar.dcId,
+            avatarPeer,
+            avatarPhotoId,
+            avatarDcId,
           );
           if (avatarMedia?.bytes && avatarMedia.bytes.byteLength > 0) {
-            await saveTileThumbnail(tile.id, new Uint8Array(avatarMedia.bytes), tile.thumb?.strippedDataUrl);
+            await saveTileThumbnail(tile.id, new Uint8Array(avatarMedia.bytes), fallbackAvatarThumb);
             logCover(
               'tile_cover_ok',
               'INFO',
@@ -2988,17 +3485,25 @@ export const useTileStore = defineStore('tileBoard', () => {
             info.description,
             Date.now() - startedAt,
           );
-          if (dialog.avatar.thumb) {
+          if (fallbackAvatarThumb) {
             tile.thumb = {
               ...(tile.thumb ?? { retryCount: 0 }),
               status: 'ready',
-              strippedDataUrl: dialog.avatar.thumb,
+              strippedDataUrl: fallbackAvatarThumb,
             };
             return true;
           }
         }
+      } else if (fallbackAvatarThumb) {
+        tile.thumb = {
+          ...(tile.thumb ?? { retryCount: 0 }),
+          status: 'ready',
+          strippedDataUrl: fallbackAvatarThumb,
+        };
+        return true;
       } else {
-        logCover('tile_cover_skipped', 'WARN', { ...baseTags, branch: 'avatar', bucket: 'NO_THUMB_SOURCE' }, '会话没有可用头像');
+        if (tile.thumb) tile.thumb.status = 'none';
+        logCover('tile_cover_skipped', 'DEBUG', { ...baseTags, branch: 'avatar', bucket: 'NO_THUMB_SOURCE' }, '会话没有可用头像');
       }
       return false;
     }
@@ -3167,6 +3672,10 @@ export const useTileStore = defineStore('tileBoard', () => {
       }
       // 纯文本搜索结果没有可下载媒体，直接跳过，避免无意义的 getHistoryAround
       if (!isSessionFileTile(tile) && !tile.photoInfo && !tile.videoInfo && !tile.fileInfo) {
+        continue;
+      }
+      // 明确标记无可用头像的会话磁贴不进入后台下载队列
+      if (isSessionFileTile(tile) && tile.thumb?.status === 'none') {
         continue;
       }
       targets.push(tile);
@@ -3414,6 +3923,380 @@ export const useTileStore = defineStore('tileBoard', () => {
     return recovered;
   }
 
+  /**
+   * 主动触发的磁贴精确去重（仅依据 Telegram 原生 ID：document.id / photo.id / peerKey）：
+   * - 支持作用域：folder（指定文件夹及其嵌套子文件夹）、group（指定分组）、selection（当前多选集合）、board（全磁贴板）
+   * - 择优保留主磁贴，自动将被清理重复项的 sources 多源定位锚点与缩略图合并至主磁贴
+   */
+  function deduplicateTiles(options?: {
+    scope: 'board' | 'group' | 'folder' | 'selection';
+    groupId?: string;
+    folderId?: string;
+    tileIds?: string[];
+  }): {
+    removedCount: number;
+    byKind: Record<'session' | 'video' | 'image' | 'file', number>;
+  } {
+    const scope = options?.scope ?? 'board';
+    const byKind: Record<'session' | 'video' | 'image' | 'file', number> = {
+      session: 0,
+      video: 0,
+      image: 0,
+      file: 0,
+    };
+
+    const candidates: FileTileData[] = [];
+    const seenTileIdSet = new Set<string>();
+    const collectFromNode = (node: TileData) => {
+      if (node.systemApp || node.undeletable) return;
+      if (node.type === 'file') {
+        if (!seenTileIdSet.has(node.id)) {
+          seenTileIdSet.add(node.id);
+          candidates.push(node);
+        }
+      } else if (node.type === 'folder') {
+        for (const child of node.children) {
+          collectFromNode(child);
+        }
+      }
+    };
+
+    if (scope === 'folder' && options?.folderId) {
+      const folder = getTileById(options.folderId);
+      if (folder && folder.type === 'folder') {
+        for (const child of folder.children) {
+          collectFromNode(child);
+        }
+      }
+    } else if (scope === 'group' && options?.groupId) {
+      for (const item of tiles.value) {
+        if (item.groupId === options.groupId) {
+          collectFromNode(item);
+        }
+      }
+    } else if (scope === 'selection') {
+      const rawIds =
+        options?.tileIds && options.tileIds.length > 0
+          ? options.tileIds
+          : folderSelectedTileIds.value.length > 0
+            ? folderSelectedTileIds.value
+            : selectedTileIds.value;
+      for (const id of rawIds) {
+        const t = getTileById(id);
+        if (t) collectFromNode(t);
+      }
+    } else {
+      for (const item of tiles.value) {
+        collectFromNode(item);
+      }
+    }
+
+    const buckets = new Map<
+      string,
+      {
+        kind: 'session' | 'video' | 'image' | 'file';
+        items: { tile: FileTileData; order: number }[];
+      }
+    >();
+
+    candidates.forEach((tile, idx) => {
+      const identity = getTileTelegramDedupKey(tile, resources.value);
+      if (!identity) return;
+      const existing = buckets.get(identity.key);
+      if (existing) {
+        existing.items.push({ tile, order: idx });
+      } else {
+        buckets.set(identity.key, {
+          kind: identity.kind,
+          items: [{ tile, order: idx }],
+        });
+      }
+    });
+
+    const scoreTile = (t: FileTileData, order: number): number => {
+      let score = -order;
+      if (t.pinnedOffline) score += 100_000;
+      if (t.hasVaultCopy) score += 50_000;
+      if (t.sessionCredentialState === 'joined') score += 30_000;
+      else if (t.sessionCredentialState === 'temp_auto_renew') score += 20_000;
+      else if (t.sessionCredentialState === 'temp_ephemeral') score += 10_000;
+      if (t.thumb?.objectUrl) score += 5_000;
+      else if (t.thumb?.strippedDataUrl) score += 1_000;
+      if (!t.parentId) score += 200;
+      return score;
+    };
+
+    const now = Date.now();
+    const today = new Date().toISOString().slice(0, 10);
+    const removedIds = new Set<string>();
+
+    for (const [, bucket] of buckets) {
+      if (bucket.items.length < 2) continue;
+      const sorted = [...bucket.items].sort(
+        (a, b) => scoreTile(b.tile, b.order) - scoreTile(a.tile, a.order),
+      );
+      const survivor = sorted[0]!.tile;
+      const duplicates = sorted.slice(1).map((entry) => entry.tile);
+
+      const sourceMap = new Map<string, NonNullable<FileTileData['sources']>[number]>();
+      for (const src of survivor.sources ?? []) {
+        sourceMap.set(`${src.kind}:${src.accountId}:${src.peerKey}:${src.msgId}`, src);
+      }
+
+      for (const dup of duplicates) {
+        for (const src of dup.sources ?? []) {
+          const k = `${src.kind}:${src.accountId}:${src.peerKey}:${src.msgId}`;
+          if (!sourceMap.has(k)) {
+            sourceMap.set(k, src);
+          }
+        }
+        if (dup.pinnedOffline) survivor.pinnedOffline = true;
+        if (dup.hasVaultCopy) survivor.hasVaultCopy = true;
+        if (!survivor.thumb?.objectUrl && dup.thumb?.objectUrl) {
+          survivor.thumb = { ...dup.thumb };
+        } else if (!survivor.thumb?.strippedDataUrl && dup.thumb?.strippedDataUrl) {
+          survivor.thumb = {
+            ...(survivor.thumb ?? { status: dup.thumb.status, retryCount: 0 }),
+            strippedDataUrl: dup.thumb.strippedDataUrl,
+          };
+        }
+        if (dup.tags?.length) {
+          survivor.tags = Array.from(new Set([...(survivor.tags ?? []), ...dup.tags]));
+        }
+
+        removedIds.add(dup.id);
+        tombstones.value[dup.id] = now;
+        byKind[bucket.kind] += 1;
+
+        const parentFolder = findParentFolderOfTile(dup.id);
+        if (parentFolder) {
+          parentFolder.children = parentFolder.children.filter((c) => c.id !== dup.id);
+          parentFolder.updatedAt = today;
+          parentFolder.updatedAtMs = now;
+        } else {
+          tiles.value = tiles.value.filter((t) => t.id !== dup.id);
+        }
+      }
+
+      if (sourceMap.size > 0) {
+        survivor.sources = Array.from(sourceMap.values());
+      }
+      survivor.updatedAt = today;
+      survivor.updatedAtMs = now;
+
+      if (survivor.resourceId && resources.value[survivor.resourceId]) {
+        const res = resources.value[survivor.resourceId]!;
+        if (survivor.sources?.length) {
+          res.sources = survivor.sources;
+        }
+        res.updatedAtMs = now;
+      }
+    }
+
+    const removedCount = removedIds.size;
+    if (removedCount > 0) {
+      selectedTileIds.value = selectedTileIds.value.filter((id) => !removedIds.has(id));
+      folderSelectedTileIds.value = folderSelectedTileIds.value.filter((id) => !removedIds.has(id));
+      if (selectedFile.value && removedIds.has(selectedFile.value.id)) {
+        closeFile();
+      }
+      saveState(true, { pruneResources: true });
+
+      const parts: string[] = [];
+      if (byKind.session > 0) parts.push(`会话 ${byKind.session} 项`);
+      if (byKind.video > 0) parts.push(`视频 ${byKind.video} 项`);
+      if (byKind.image > 0) parts.push(`图片 ${byKind.image} 项`);
+      if (byKind.file > 0) parts.push(`文件 ${byKind.file} 项`);
+
+      showCoverRefreshBanner(
+        `去重完成：已清理 ${removedCount} 个重复磁贴（${parts.join(' · ')}），多源定位已合并`,
+      );
+      debugLoggerDataSource.emitFrontendLog({
+        domain: 'archive.tile',
+        level: 'INFO',
+        action: 'deduplicate_tiles',
+        tags: {
+          scope,
+          groupId: options?.groupId,
+          folderId: options?.folderId,
+          removedCount,
+          session: byKind.session,
+          video: byKind.video,
+          image: byKind.image,
+          file: byKind.file,
+        },
+        message: '主动执行 Telegram 原生 ID 磁贴去重与多源合并',
+      });
+    } else {
+      showCoverRefreshBanner('当前区域未发现重复的会话或媒体磁贴');
+    }
+
+    return { removedCount, byKind };
+  }
+
+  /**
+   * 针对指定目标目录（文件夹或分组）执行会话专属去重：
+   * 依据会话链接的前面段（extractSessionLinkPrefix）精准聚合并择优保留唯一主磁贴。
+   */
+  function deduplicateSessionTilesInTarget(options: {
+    groupId?: string;
+    folderId?: string;
+  }): {
+    analyzedCount: number;
+    duplicateGroupsCount: number;
+    removedCount: number;
+    survivorCount: number;
+  } {
+    const candidates: FileTileData[] = [];
+    const seenTileIdSet = new Set<string>();
+
+    const collectFromNode = (node: TileData) => {
+      if (node.systemApp || node.undeletable) return;
+      if (node.type === 'file') {
+        if (!seenTileIdSet.has(node.id) && isSessionTile(node)) {
+          seenTileIdSet.add(node.id);
+          candidates.push(node);
+        }
+      } else if (node.type === 'folder') {
+        for (const child of node.children) {
+          collectFromNode(child);
+        }
+      }
+    };
+
+    if (options.folderId) {
+      const folder = getTileById(options.folderId);
+      if (folder && folder.type === 'folder') {
+        for (const child of folder.children) {
+          collectFromNode(child);
+        }
+      }
+    } else if (options.groupId) {
+      for (const item of tiles.value) {
+        if (item.groupId === options.groupId) {
+          collectFromNode(item);
+        }
+      }
+    } else {
+      for (const item of tiles.value) {
+        collectFromNode(item);
+      }
+    }
+
+    const buckets = new Map<string, { tile: FileTileData; order: number }[]>();
+
+    candidates.forEach((tile, idx) => {
+      const identity = extractSessionLinkPrefix(tile);
+      if (!identity) return;
+      const existing = buckets.get(identity.key);
+      if (existing) {
+        existing.push({ tile, order: idx });
+      } else {
+        buckets.set(identity.key, [{ tile, order: idx }]);
+      }
+    });
+
+    const scoreTile = (t: FileTileData, order: number): number => {
+      let score = -order;
+      if (t.pinnedOffline) score += 100_000;
+      if (t.hasVaultCopy) score += 50_000;
+      if (t.sessionCredentialState === 'joined') score += 30_000;
+      else if (t.sessionCredentialState === 'temp_auto_renew') score += 20_000;
+      else if (t.sessionCredentialState === 'temp_ephemeral') score += 10_000;
+      if (t.thumb?.objectUrl) score += 5_000;
+      else if (t.thumb?.strippedDataUrl) score += 1_000;
+      if (!t.parentId) score += 200;
+      return score;
+    };
+
+    const now = Date.now();
+    const today = new Date().toISOString().slice(0, 10);
+    const removedIds = new Set<string>();
+    let duplicateGroupsCount = 0;
+
+    for (const [, items] of buckets) {
+      if (items.length < 2) continue;
+      duplicateGroupsCount += 1;
+      const sorted = [...items].sort(
+        (a, b) => scoreTile(b.tile, b.order) - scoreTile(a.tile, a.order),
+      );
+      const survivor = sorted[0]!.tile;
+      const duplicates = sorted.slice(1).map((entry) => entry.tile);
+
+      const sourceMap = new Map<string, NonNullable<FileTileData['sources']>[number]>();
+      for (const src of survivor.sources ?? []) {
+        sourceMap.set(`${src.kind}:${src.accountId}:${src.peerKey}:${src.msgId}`, src);
+      }
+
+      for (const dup of duplicates) {
+        for (const src of dup.sources ?? []) {
+          const k = `${src.kind}:${src.accountId}:${src.peerKey}:${src.msgId}`;
+          if (!sourceMap.has(k)) {
+            sourceMap.set(k, src);
+          }
+        }
+        if (dup.pinnedOffline) survivor.pinnedOffline = true;
+        if (dup.hasVaultCopy) survivor.hasVaultCopy = true;
+        if (!survivor.thumb?.objectUrl && dup.thumb?.objectUrl) {
+          survivor.thumb = { ...dup.thumb };
+        } else if (!survivor.thumb?.strippedDataUrl && dup.thumb?.strippedDataUrl) {
+          survivor.thumb = {
+            ...(survivor.thumb ?? { status: dup.thumb.status, retryCount: 0 }),
+            strippedDataUrl: dup.thumb.strippedDataUrl,
+          };
+        }
+        if (dup.tags?.length) {
+          survivor.tags = Array.from(new Set([...(survivor.tags ?? []), ...dup.tags]));
+        }
+
+        removedIds.add(dup.id);
+        tombstones.value[dup.id] = now;
+
+        const parentFolder = findParentFolderOfTile(dup.id);
+        if (parentFolder) {
+          parentFolder.children = parentFolder.children.filter((c) => c.id !== dup.id);
+          parentFolder.updatedAt = today;
+          parentFolder.updatedAtMs = now;
+        } else {
+          tiles.value = tiles.value.filter((t) => t.id !== dup.id);
+        }
+      }
+
+      if (sourceMap.size > 0) {
+        survivor.sources = Array.from(sourceMap.values());
+      }
+      survivor.updatedAt = today;
+      survivor.updatedAtMs = now;
+    }
+
+    const removedCount = removedIds.size;
+    if (removedCount > 0) {
+      selectedTileIds.value = selectedTileIds.value.filter((id) => !removedIds.has(id));
+      folderSelectedTileIds.value = folderSelectedTileIds.value.filter((id) => !removedIds.has(id));
+      saveState(true, { pruneResources: true });
+
+      debugLoggerDataSource.emitFrontendLog({
+        domain: 'archive.storage',
+        action: 'deduplicate_session_tiles_in_target',
+        level: 'INFO',
+        message: `在指定目录下依据会话链接前段清理 ${removedCount} 个重复会话磁贴`,
+        tags: {
+          groupId: options.groupId,
+          folderId: options.folderId,
+          removedCount,
+          duplicateGroupsCount,
+        },
+      });
+    }
+
+    return {
+      analyzedCount: candidates.length,
+      duplicateGroupsCount,
+      removedCount,
+      survivorCount: candidates.length - removedCount,
+    };
+  }
+
   loadState();
 
   return {
@@ -3445,8 +4328,10 @@ export const useTileStore = defineStore('tileBoard', () => {
     fileDetailTitleDraft,
     fileDetailDescDraft,
     selectedTileIds,
+    lastSelectedTileId,
     marqueeState,
     folderSelectedTileIds,
+    lastSelectedFolderTileId,
     folderMarqueeState,
     isRefreshingTileCovers,
     coverRefreshBannerText,
@@ -3456,12 +4341,20 @@ export const useTileStore = defineStore('tileBoard', () => {
     groupDragState,
     pendingFolderChildDrag,
     beginFolderChildDrag,
+    folderDragState,
+    beginFolderDrag,
+    updateFolderDrag,
+    endFolderDrag,
+    reorderFolderChildren,
     filteredTiles,
     tilesByGroup,
+    selectedTileIdSet,
+    folderSelectedTileIdSet,
     columns,
     allFoldersFlat,
     loadState,
     saveState,
+    flushPersist,
     resetToDefault,
     buildExploreManifest,
     applyExploreManifest,
@@ -3482,6 +4375,8 @@ export const useTileStore = defineStore('tileBoard', () => {
     closeContextMenu,
     resizeTile,
     resizeTileSpan,
+    batchResizeTiles,
+    batchResizeTileSpan,
     renameTile,
     deleteTile,
     renameChildFile,
@@ -3497,12 +4392,14 @@ export const useTileStore = defineStore('tileBoard', () => {
     moveGroupToNewColumn,
     dissolveFolder,
     removeFileFromFolder,
+    batchRemoveFilesFromFolder,
     addFileToFolder,
     moveFileBetweenFolders,
     addSubFolder,
     createFolderFromFiles,
     moveTile,
     toggleSelectTile,
+    selectTileRange,
     setSelectedTileIds,
     clearSelectedTiles,
     selectAllTilesInGroup,
@@ -3515,16 +4412,20 @@ export const useTileStore = defineStore('tileBoard', () => {
     closeExplorerPicker,
     confirmExplorerPickerMove,
     toggleSelectFolderChildTile,
+    selectFolderTileRange,
     setFolderSelectedTileIds,
     clearFolderSelectedTiles,
     applyUpdatedSearchResultThumb,
     refreshTileCoversByIds,
     findSessionTileIds,
     reloadMissingOrFailedTileCovers,
+    deduplicateTiles,
+    deduplicateSessionTilesInTarget,
     scheduleTileCoverRefresh,
     addNewFile,
     addNewFolder,
     archivedSourceMap,
+    credentialStateByPeerKey,
     importSearchResultsToTopology,
     applyDisplacedPositions: (groupId: string, positions: Record<string, { x: number; y: number }>) => {
       const list = tiles.value.filter((t) => t.groupId === groupId);

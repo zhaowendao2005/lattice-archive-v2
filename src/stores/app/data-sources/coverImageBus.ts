@@ -125,19 +125,6 @@ class CoverImageBus {
     }
 
     const enqueuedAt = Date.now();
-    this.emit(
-      'bus_enqueue',
-      'DEBUG',
-      {
-        key,
-        lane,
-        priority,
-        queued: this.queue.length + 1,
-        totalActive: this.totalActive,
-        activeInLane: this.activeByLane[lane],
-      },
-      '封面任务入队',
-    );
 
     const promise = new Promise<T>((resolve, reject) => {
       const task: QueuedTask<T> = {
@@ -158,22 +145,6 @@ class CoverImageBus {
       this.queue.sort((a, b) => b.priority - a.priority);
       this.processQueue();
     })
-      .then((value) => {
-        this.emit(
-          'bus_done',
-          'DEBUG',
-          {
-            key,
-            lane,
-            priority,
-            waitMs: Date.now() - enqueuedAt,
-            queued: this.queue.length,
-            totalActive: this.totalActive,
-          },
-          '封面任务完成',
-        );
-        return value;
-      })
       .catch((error: unknown) => {
         // 取消是预期路径（视口滚走 / 弹窗关闭），不计为失败。
         if (isAbortError(error)) {

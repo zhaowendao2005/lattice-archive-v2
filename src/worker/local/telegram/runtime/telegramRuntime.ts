@@ -162,8 +162,13 @@ function debugLog(stage: string, detail?: Record<string, unknown>) {
 function applyLogLevel(telegram: TelegramClient) {
   telegram.setLogLevel(debugEnabled ? LogLevel.DEBUG : LogLevel.INFO);
 }
+const lastEmittedConnection = new Map<string, { state: Extract<TgEvent, { t: 'connectionState' }>['state']; message?: string }>();
 function emitConnection(state: Extract<TgEvent, { t: 'connectionState' }>['state'], message?: string) {
-  if (authorizedAccountId) emit({ t: 'connectionState', accountId: authorizedAccountId, state, message });
+  if (!authorizedAccountId) return;
+  const prev = lastEmittedConnection.get(authorizedAccountId);
+  if (prev && prev.state === state && (prev.message ?? '') === (message ?? '')) return;
+  lastEmittedConnection.set(authorizedAccountId, { state, message });
+  emit({ t: 'connectionState', accountId: authorizedAccountId, state, message });
 }
 const base64Url = (value: Uint8Array) => btoa(String.fromCharCode(...value)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
 

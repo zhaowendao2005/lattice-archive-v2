@@ -21,7 +21,7 @@ export function computeDisplacedPositions(
   const dragSpan = getTileSpan(draggedTile.size, draggedTile.customSpan);
   const maxCols = maxColumns;
 
-  // 2D grid matrix
+  // 2D grid matrix — no hard row cap, grows dynamically
   const grid: (string | null)[][] = [];
 
   function ensureRow(r: number) {
@@ -71,7 +71,8 @@ export function computeDisplacedPositions(
     .filter(t => !heldIds?.has(t.id))
     .sort((a, b) => a.y - b.y || a.x - b.x);
 
-  // 4. Place other tiles
+  // 4. Place other tiles — search downward without a fixed row cap
+  const rowLimit = Math.max(400, groupTiles.length * 5);
   for (const tile of otherTilesSorted) {
     const span = getTileSpan(tile.size, tile.customSpan);
 
@@ -83,7 +84,7 @@ export function computeDisplacedPositions(
       // Find nearest gap/opening starting from min(tile.y, ghostY)
       let placed = false;
       const startRow = Math.max(0, Math.min(tile.y, ghostY));
-      for (let r = startRow; r < 200 && !placed; r++) {
+      for (let r = startRow; r < rowLimit && !placed; r++) {
         for (let c = 0; c <= maxCols - span.w; c++) {
           if (isAreaFree(c, r, span.w, span.h)) {
             markArea(tile.id, c, r, span.w, span.h);
@@ -96,6 +97,77 @@ export function computeDisplacedPositions(
       if (!placed) {
         result[tile.id] = { x: tile.x, y: tile.y + dragSpan.h };
       }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * 紧凑重排算法：将分组内所有磁贴按阅读顺序 (y, x) 依次贪心放入第一个可用格位，
+ * 消除批量调整大小后的重叠与空洞。O(N × cols) 时间，无行数上限。
+ *
+ * 返回每个磁贴 id → 新坐标的映射（仅包含分组内顶层磁贴）。
+ */
+export function reflowGroupTiles(
+  groupTiles: TileData[],
+  maxColumns: number = GROUP_COLUMNS,
+): Record<string, { x: number; y: number }> {
+  const result: Record<string, { x: number; y: number }> = {};
+  const maxCols = maxColumns;
+
+  // Sort by reading order so tiles retain their relative visual position after reflow
+  const sorted = [...groupTiles].sort((a, b) => a.y - b.y || a.x - b.x);
+
+  // Column-height array: tracks the topmost free row per column
+  // We use a simple occupancy grid for correctness with variable-width tiles
+  const grid: boolean[][] = [];
+
+  function ensureRow(r: number) {
+    while (grid.length <= r) {
+      grid.push(new Array(maxCols).fill(false));
+    }
+  }
+
+  function isAreaFree(x: number, y: number, w: number, h: number): boolean {
+    if (x + w > maxCols) return false;
+    for (let r = y; r < y + h; r++) {
+      ensureRow(r);
+      for (let c = x; c < x + w; c++) {
+        if (grid[r][c]) return false;
+      }
+    }
+    return true;
+  }
+
+  function markArea(x: number, y: number, w: number, h: number) {
+    for (let r = y; r < y + h; r++) {
+      ensureRow(r);
+      for (let c = x; c < x + w; c++) {
+        grid[r][c] = true;
+      }
+    }
+  }
+
+  const rowLimit = Math.max(400, groupTiles.length * 5);
+  for (const tile of sorted) {
+    const span = getTileSpan(tile.size, tile.customSpan);
+    let placed = false;
+    for (let r = 0; r < rowLimit && !placed; r++) {
+      for (let c = 0; c <= maxCols - span.w; c++) {
+        if (isAreaFree(c, r, span.w, span.h)) {
+          markArea(c, r, span.w, span.h);
+          result[tile.id] = { x: c, y: r };
+          placed = true;
+          break;
+        }
+      }
+    }
+    if (!placed) {
+      // Fallback: stack below current grid bottom
+      const bottom = grid.length;
+      markArea(0, bottom, span.w, span.h);
+      result[tile.id] = { x: 0, y: bottom };
     }
   }
 

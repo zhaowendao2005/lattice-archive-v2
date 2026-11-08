@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onUnmounted, watch, type ComponentPublicInstance } from 'vue';
-import { FolderInput, GripVertical, Plus, RefreshCw, Trash2, X } from '@lucide/vue';
+import { GripVertical, Plus, RefreshCw } from '@lucide/vue';
 import type { TileData, TileGroupData } from '../../types/tile';
 import {
   getTilePixelDimensions,
@@ -24,22 +24,79 @@ function bindBoardRef(el: Element | ComponentPublicInstance | null) {
   archiveDomRegistry.setBoardEl(el instanceof HTMLElement ? el : null);
 }
 
-function checkAutoScroll(clientX: number, clientY: number) {
-  const boardEl = archiveDomRegistry.getBoardEl();
-  if (!boardEl) return;
-  const rect = boardEl.getBoundingClientRect();
-  const threshold = 60;
-  // Vertical auto-scroll
-  if (clientY > rect.bottom - threshold && clientY <= rect.bottom + 40) {
-    boardEl.scrollTop += 14;
-  } else if (clientY < rect.top + threshold && clientY >= rect.top - 40) {
-    boardEl.scrollTop -= 14;
+let autoScrollRaf: number | null = null;
+let autoScrollVx = 0;
+let autoScrollVy = 0;
+let onAutoScrollTick: (() => void) | null = null;
+
+function stopAutoScroll() {
+  if (autoScrollRaf !== null) {
+    cancelAnimationFrame(autoScrollRaf);
+    autoScrollRaf = null;
   }
-  // Horizontal auto-scroll
-  if (clientX > rect.right - threshold && clientX <= rect.right + 40) {
-    boardEl.scrollLeft += 14;
-  } else if (clientX < rect.left + threshold && clientX >= rect.left - 40) {
-    boardEl.scrollLeft -= 14;
+  autoScrollVx = 0;
+  autoScrollVy = 0;
+  onAutoScrollTick = null;
+}
+
+function updateAutoScroll(clientX: number, clientY: number, onTick?: () => void) {
+  if (onTick) {
+    onAutoScrollTick = onTick;
+  }
+  const boardEl = archiveDomRegistry.getBoardEl();
+  if (!boardEl) {
+    stopAutoScroll();
+    return;
+  }
+  const rect = boardEl.getBoundingClientRect();
+  const threshold = 64;
+  const maxSpeed = 22;
+
+  let vx = 0;
+  let vy = 0;
+
+  // 垂直方向按贴近边缘程度渐进加速
+  if (clientY > rect.bottom - threshold && clientY <= rect.bottom + 50) {
+    const ratio = Math.min(1, Math.max(0.12, (clientY - (rect.bottom - threshold)) / threshold));
+    vy = Math.round(ratio * maxSpeed);
+  } else if (clientY < rect.top + threshold && clientY >= rect.top - 50) {
+    const ratio = Math.min(1, Math.max(0.12, ((rect.top + threshold) - clientY) / threshold));
+    vy = -Math.round(ratio * maxSpeed);
+  }
+
+  // 水平方向按贴近边缘程度渐进加速
+  if (clientX > rect.right - threshold && clientX <= rect.right + 50) {
+    const ratio = Math.min(1, Math.max(0.12, (clientX - (rect.right - threshold)) / threshold));
+    vx = Math.round(ratio * maxSpeed);
+  } else if (clientX < rect.left + threshold && clientX >= rect.left - 50) {
+    const ratio = Math.min(1, Math.max(0.12, ((rect.left + threshold) - clientX) / threshold));
+    vx = -Math.round(ratio * maxSpeed);
+  }
+
+  autoScrollVx = vx;
+  autoScrollVy = vy;
+
+  if (vx !== 0 || vy !== 0) {
+    if (autoScrollRaf === null) {
+      const step = () => {
+        const el = archiveDomRegistry.getBoardEl();
+        if (!el || (autoScrollVx === 0 && autoScrollVy === 0)) {
+          stopAutoScroll();
+          return;
+        }
+        const prevLeft = el.scrollLeft;
+        const prevTop = el.scrollTop;
+        el.scrollLeft += autoScrollVx;
+        el.scrollTop += autoScrollVy;
+        if (el.scrollLeft !== prevLeft || el.scrollTop !== prevTop) {
+          onAutoScrollTick?.();
+        }
+        autoScrollRaf = requestAnimationFrame(step);
+      };
+      autoScrollRaf = requestAnimationFrame(step);
+    }
+  } else {
+    stopAutoScroll();
   }
 }
 
@@ -551,7 +608,7 @@ function onGlobalPointerMove(event: PointerEvent) {
   tileStore.dragState.pointerX = event.clientX;
   tileStore.dragState.pointerY = event.clientY;
 
-  checkAutoScroll(event.clientX, event.clientY);
+  updateAutoScroll(event.clientX, event.clientY);
 
   const tileDim = getTilePixelDimensions(tileStore.dragState.tile.size, tileStore.dragState.tile.customSpan);
   const tileLeft = event.clientX - tileStore.dragState.offsetX;
@@ -672,6 +729,20 @@ function onGlobalPointerMove(event: PointerEvent) {
   }
 }
 
+/** 复用拖拽过程中已算好的排开结果；若落点未变则直接返回，避免放手时重算 + 二次写盘 */
+function resolveDropDisplaced(
+  groupTiles: TileData[],
+  tile: TileData,
+  dropX: number,
+  dropY: number,
+  maxCols: number,
+): Record<string, { x: number; y: number }> {
+  const cached = tileStore.dragState.displacedPositions;
+  const ghost = cached[tile.id];
+  if (ghost && ghost.x === dropX && ghost.y === dropY) return cached;
+  return computeDisplacedPositions(groupTiles, tile, dropX, dropY, maxCols);
+}
+
 function onGlobalPointerUp() {
   if (!tileStore.dragState.isDragging || !tileStore.dragState.tile) {
     cleanupDrag();
@@ -786,9 +857,8 @@ function onGlobalPointerUp() {
     const group = tileStore.groups.find(g => g.id === currentGroupId);
     const maxCols = group?.widthColumns || GROUP_COLUMNS;
     const groupTiles = tileStore.tilesByGroup.get(currentGroupId) || [];
-    const finalDisplaced = computeDisplacedPositions(groupTiles, tile, dropX, dropY, maxCols);
-    tileStore.applyDisplacedPositions(currentGroupId, finalDisplaced);
-    tileStore.removeFileFromFolder(sourceFolderId, tile.id, currentGroupId, dropX, dropY);
+    const displaced = resolveDropDisplaced(groupTiles, tile, dropX, dropY, maxCols);
+    tileStore.removeFileFromFolder(sourceFolderId, tile.id, currentGroupId, dropX, dropY, displaced);
     cleanupDrag();
     return;
   }
@@ -802,10 +872,8 @@ function onGlobalPointerUp() {
     const group = tileStore.groups.find(g => g.id === currentGroupId);
     const maxCols = group?.widthColumns || GROUP_COLUMNS;
     const groupTiles = tileStore.tilesByGroup.get(currentGroupId) || [];
-    const finalDisplaced = computeDisplacedPositions(groupTiles, tile, dropX, dropY, maxCols);
-    tileStore.applyDisplacedPositions(currentGroupId, finalDisplaced);
-
-    tileStore.moveTile(tile.id, currentGroupId, dropX, dropY);
+    const displaced = resolveDropDisplaced(groupTiles, tile, dropX, dropY, maxCols);
+    tileStore.moveTile(tile.id, currentGroupId, dropX, dropY, displaced);
     cleanupDrag();
     return;
   }
@@ -822,6 +890,7 @@ function onGlobalPointerUp() {
 }
 
 function cleanupDrag() {
+  stopAutoScroll();
   clearHoverTarget();
   clearDisplaceTimer();
   resetFolderIntent();
@@ -872,7 +941,7 @@ function handleGroupDragStart(event: PointerEvent, group: TileGroupData) {
     tileStore.groupDragState.pointerX = moveEvent.clientX;
     tileStore.groupDragState.pointerY = moveEvent.clientY;
 
-    checkAutoScroll(moveEvent.clientX, moveEvent.clientY);
+    updateAutoScroll(moveEvent.clientX, moveEvent.clientY);
 
     // 1. Detect if dragging outwards or between columns to create/insert a new column
     const colEls = Array.from(
@@ -956,6 +1025,7 @@ function handleGroupDragStart(event: PointerEvent, group: TileGroupData) {
   };
 
   const onGroupPointerUp = () => {
+    stopAutoScroll();
     window.removeEventListener('pointermove', onGroupPointerMove);
     window.removeEventListener('pointerup', onGroupPointerUp);
     window.removeEventListener('pointercancel', onGroupPointerUp);
@@ -994,14 +1064,18 @@ function handleBoardContextMenu(event: MouseEvent) {
 /**
  * Windows 风格框选 (Rubber-band Marquee Selection)：
  * 在磁贴板空白处按住左键拖拽即可框选与选区相交的所有非系统磁贴。
+ * 深度兼容滚轮/触控板滚动与边缘平滑自动滚动（具备滚动增量视口投影与动态相交命中）。
  */
 const marqueeRectStyle = computed(() => {
   const m = tileStore.marqueeState;
   if (!m.isSelecting) return null;
-  const left = Math.min(m.startX, m.currentX);
-  const top = Math.min(m.startY, m.currentY);
-  const width = Math.abs(m.currentX - m.startX);
-  const height = Math.abs(m.currentY - m.startY);
+  const projectedStartX = m.startX - ((m.currentScrollLeft ?? 0) - (m.startScrollLeft ?? 0));
+  const projectedStartY = m.startY - ((m.currentScrollTop ?? 0) - (m.startScrollTop ?? 0));
+  const left = Math.min(projectedStartX, m.currentX);
+  const top = Math.min(projectedStartY, m.currentY);
+  const width = Math.abs(m.currentX - projectedStartX);
+  const height = Math.abs(m.currentY - projectedStartY);
+  if (width < 3 && height < 3) return null;
   return {
     left: `${left}px`,
     top: `${top}px`,
@@ -1023,40 +1097,52 @@ function onBoardPointerDown(event: PointerEvent) {
   const target = event.target as HTMLElement | null;
   if (!target) return;
 
-  // 若点击在磁贴、分组标题栏、分组宽度调节器、按钮、输入框或底部批量操作栏上，不启动框选
+  // 若点击在磁贴、分组标题栏、分组宽度调节器、按钮或输入框上，不启动框选
   if (
     target.closest('.archive-base-tile') ||
     target.closest('[data-group-header]') ||
     target.closest('.group-width-resizer') ||
-    target.closest('[data-batch-action-bar]') ||
     target.closest('button') ||
     target.closest('input')
   ) {
     return;
   }
 
+  const boardEl = archiveDomRegistry.getBoardEl();
   const startX = event.clientX;
   const startY = event.clientY;
+  const startScrollLeft = boardEl ? boardEl.scrollLeft : 0;
+  const startScrollTop = boardEl ? boardEl.scrollTop : 0;
   const additive = event.ctrlKey || event.metaKey || event.shiftKey;
   const baseSelectedIds = additive ? [...tileStore.selectedTileIds] : [];
   let hasMovedMarquee = false;
 
   const updateMarqueeHits = (currX: number, currY: number) => {
-    const boxLeft = Math.min(startX, currX);
-    const boxRight = Math.max(startX, currX);
-    const boxTop = Math.min(startY, currY);
-    const boxBottom = Math.max(startY, currY);
+    const el = archiveDomRegistry.getBoardEl();
+    const curScrollLeft = el ? el.scrollLeft : startScrollLeft;
+    const curScrollTop = el ? el.scrollTop : startScrollTop;
+
+    tileStore.marqueeState.currentScrollLeft = curScrollLeft;
+    tileStore.marqueeState.currentScrollTop = curScrollTop;
+
+    const projectedStartX = startX - (curScrollLeft - startScrollLeft);
+    const projectedStartY = startY - (curScrollTop - startScrollTop);
+
+    const boxLeft = Math.min(projectedStartX, currX);
+    const boxRight = Math.max(projectedStartX, currX);
+    const boxTop = Math.min(projectedStartY, currY);
+    const boxBottom = Math.max(projectedStartY, currY);
 
     const tileEls = Array.from(document.querySelectorAll('[data-board-tile-id]')) as HTMLElement[];
     const hitIds = new Set<string>(baseSelectedIds);
 
-    for (const el of tileEls) {
-      const tid = el.getAttribute('data-board-tile-id');
+    for (const tileEl of tileEls) {
+      const tid = tileEl.getAttribute('data-board-tile-id');
       if (!tid) continue;
       const tileObj = tileStore.getTileById(tid);
       if (!tileObj || tileObj.undeletable || tileObj.systemApp) continue;
 
-      const r = el.getBoundingClientRect();
+      const r = tileEl.getBoundingClientRect();
       const intersects =
         r.left < boxRight &&
         r.right > boxLeft &&
@@ -1070,6 +1156,12 @@ function onBoardPointerDown(event: PointerEvent) {
     tileStore.setSelectedTileIds(Array.from(hitIds));
   };
 
+  const onBoardScroll = () => {
+    if (hasMovedMarquee && tileStore.marqueeState.isSelecting) {
+      updateMarqueeHits(tileStore.marqueeState.currentX, tileStore.marqueeState.currentY);
+    }
+  };
+
   const onMarqueeMove = (moveEvent: PointerEvent) => {
     if (
       tileStore.dragState.isDragging ||
@@ -1080,9 +1172,15 @@ function onBoardPointerDown(event: PointerEvent) {
       onMarqueeUp();
       return;
     }
-    const dx = Math.abs(moveEvent.clientX - startX);
-    const dy = Math.abs(moveEvent.clientY - startY);
-    if (!hasMovedMarquee && dx < 5 && dy < 5) return;
+    const curEl = archiveDomRegistry.getBoardEl();
+    const curScrollLeft = curEl ? curEl.scrollLeft : startScrollLeft;
+    const curScrollTop = curEl ? curEl.scrollTop : startScrollTop;
+    const projectedStartX = startX - (curScrollLeft - startScrollLeft);
+    const projectedStartY = startY - (curScrollTop - startScrollTop);
+
+    const dx = Math.abs(moveEvent.clientX - projectedStartX);
+    const dy = Math.abs(moveEvent.clientY - projectedStartY);
+    if (!hasMovedMarquee && dx < 4 && dy < 4) return;
 
     if (!hasMovedMarquee) {
       hasMovedMarquee = true;
@@ -1092,6 +1190,10 @@ function onBoardPointerDown(event: PointerEvent) {
         startY,
         currentX: moveEvent.clientX,
         currentY: moveEvent.clientY,
+        startScrollLeft,
+        startScrollTop,
+        currentScrollLeft: curScrollLeft,
+        currentScrollTop: curScrollTop,
         additive,
         baseSelectedIds,
       };
@@ -1100,14 +1202,18 @@ function onBoardPointerDown(event: PointerEvent) {
       tileStore.marqueeState.currentY = moveEvent.clientY;
     }
 
-    checkAutoScroll(moveEvent.clientX, moveEvent.clientY);
+    updateAutoScroll(moveEvent.clientX, moveEvent.clientY, () => {
+      updateMarqueeHits(tileStore.marqueeState.currentX, tileStore.marqueeState.currentY);
+    });
     updateMarqueeHits(moveEvent.clientX, moveEvent.clientY);
   };
 
   const onMarqueeUp = () => {
+    stopAutoScroll();
     window.removeEventListener('pointermove', onMarqueeMove);
     window.removeEventListener('pointerup', onMarqueeUp);
     window.removeEventListener('pointercancel', onMarqueeUp);
+    boardEl?.removeEventListener('scroll', onBoardScroll);
 
     if (!hasMovedMarquee && !additive && tileStore.selectedTileIds.length > 0) {
       tileStore.clearSelectedTiles();
@@ -1115,20 +1221,14 @@ function onBoardPointerDown(event: PointerEvent) {
     tileStore.marqueeState.isSelecting = false;
   };
 
+  boardEl?.addEventListener('scroll', onBoardScroll, { passive: true });
   window.addEventListener('pointermove', onMarqueeMove);
   window.addEventListener('pointerup', onMarqueeUp);
   window.addEventListener('pointercancel', onMarqueeUp);
 }
 
-function handleBatchDeleteSelected() {
-  const count = tileStore.selectedTileIds.length;
-  if (count === 0) return;
-  if (confirm(`确定要批量删除已选中的 ${count} 项磁贴吗？`)) {
-    tileStore.batchDeleteTiles();
-  }
-}
-
 onUnmounted(() => {
+  stopAutoScroll();
   cleanupDrag();
   tileStore.marqueeState.isSelecting = false;
 });
@@ -1234,58 +1334,6 @@ onUnmounted(() => {
         :class="tileStore.isRefreshingTileCovers ? 'animate-spin' : ''"
       />
       <span>{{ tileStore.coverRefreshBannerText }}</span>
-    </div>
-
-    <!-- 底部悬浮批量操作栏（当已框选或多选磁贴时浮现） -->
-    <div
-      v-if="tileStore.selectedTileIds.length > 0 && !tileStore.dragState.isDragging"
-      data-batch-action-bar="true"
-      class="fixed bottom-5 left-1/2 z-[9100] flex -translate-x-1/2 items-center gap-2.5 rounded-[2px] border border-sky-400/45 bg-[#0f172a]/90 px-4 py-2 text-xs text-white shadow-[0_16px_40px_rgba(0,0,0,0.65)] backdrop-blur-2xl"
-    >
-      <span class="flex items-center gap-1.5 font-medium text-sky-200">
-        <span class="inline-flex size-5 items-center justify-center rounded-[2px] bg-sky-500 font-mono text-[11px] font-bold text-white">
-          {{ tileStore.selectedTileIds.length }}
-        </span>
-        <span>已选磁贴 · 可直接拖拽至文件夹/分组</span>
-      </span>
-
-      <div class="h-3.5 w-px bg-white/15" />
-
-      <button
-        type="button"
-        class="flex items-center gap-1 rounded-[2px] border border-emerald-400/40 bg-emerald-500/20 px-2.5 py-1 text-[11px] font-medium text-emerald-200 transition-colors hover:bg-emerald-500/35 hover:text-white"
-        @click="tileStore.refreshTileCoversByIds()"
-      >
-        <RefreshCw class="size-3.5" :class="tileStore.isRefreshingTileCovers ? 'animate-spin' : ''" />
-        <span>刷新封面</span>
-      </button>
-
-      <button
-        type="button"
-        class="flex items-center gap-1 rounded-[2px] border border-sky-400/40 bg-sky-500/20 px-2.5 py-1 text-[11px] font-medium text-sky-200 transition-colors hover:bg-sky-500/35 hover:text-white"
-        @click="tileStore.openExplorerPickerForTiles()"
-      >
-        <FolderInput class="size-3.5" />
-        <span>批量移入文件夹…</span>
-      </button>
-
-      <button
-        type="button"
-        class="flex items-center gap-1 rounded-[2px] border border-rose-400/40 bg-rose-500/20 px-2.5 py-1 text-[11px] font-medium text-rose-200 transition-colors hover:bg-rose-500/35 hover:text-white"
-        @click="handleBatchDeleteSelected"
-      >
-        <Trash2 class="size-3.5" />
-        <span>批量删除</span>
-      </button>
-
-      <button
-        type="button"
-        class="flex items-center gap-1 rounded-[2px] border border-white/15 bg-white/5 px-2 py-1 text-[11px] text-white/65 transition-colors hover:bg-white/15 hover:text-white"
-        @click="tileStore.clearSelectedTiles()"
-      >
-        <X class="size-3" />
-        <span>取消</span>
-      </button>
     </div>
 
     <!-- Floating Drag Preview Attached Precisely to Cursor (is-preview disables inner transforms) -->

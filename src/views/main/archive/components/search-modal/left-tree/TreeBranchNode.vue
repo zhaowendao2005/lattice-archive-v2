@@ -2,7 +2,8 @@
 import { computed } from 'vue';
 import { Check, ChevronRight, Database, FolderPlus, LayoutGrid, MessageSquare, Search } from '@lucide/vue';
 import { useAggregateSearchStore } from '@/stores/archive/stores/aggregateSearchStore';
-import { useTileStore } from '@/stores/archive/stores/tileStore';
+import { countFolderItemsRecursive, useTileStore } from '@/stores/archive/stores/tileStore';
+import { isSessionTile } from '@/stores/archive/utils/resourceManifest';
 import type { FileTileData, FolderTileData, TileGroupData } from '../../../types/tile';
 import { getFileVisual } from '../../tiles/fileVisuals';
 import TreeFolderItem from './TreeFolderItem.vue';
@@ -12,6 +13,7 @@ const props = defineProps<{
   selectableTarget?: boolean;
   selectedTargetType?: 'group' | 'folder';
   selectedTargetId?: string;
+  sessionOnly?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -37,9 +39,31 @@ const foldersInGroup = computed(
   () => groupTiles.value.filter((t): t is FolderTileData => t.type === 'folder'),
 );
 
-const filesInGroup = computed(
-  () => groupTiles.value.filter((t): t is FileTileData => t.type === 'file'),
-);
+const filesInGroup = computed(() => {
+  const all = groupTiles.value.filter((t): t is FileTileData => t.type === 'file');
+  if (props.sessionOnly) {
+    return all.filter((t) => !t.systemApp && isSessionTile(t));
+  }
+  return all;
+});
+
+const displayedGroupCount = computed(() => {
+  if (props.sessionOnly) {
+    let count = 0;
+    for (const t of groupTiles.value) {
+      if (t.type === 'folder') {
+        count += countFolderItemsRecursive(
+          t,
+          (item) => item.type === 'file' && isSessionTile(item as FileTileData),
+        );
+      } else if (t.type === 'file' && isSessionTile(t) && !t.systemApp) {
+        count += 1;
+      }
+    }
+    return count;
+  }
+  return groupTiles.value.length;
+});
 
 const isGroupOpen = computed(() => searchStore.isGroupExpanded(props.group.id));
 
@@ -222,7 +246,7 @@ function onFileContextMenu(event: MouseEvent, file: FileTileData) {
         v-else
         class="shrink-0 rounded-[2px] border border-white/10 bg-white/[0.04] px-1 py-0.2 font-mono text-[10px] text-white/40"
       >
-        {{ groupTiles.length }}
+        {{ displayedGroupCount }}
       </span>
     </div>
 
@@ -244,6 +268,7 @@ function onFileContextMenu(event: MouseEvent, file: FileTileData) {
             :selectable-target="selectableTarget"
             :selected-target-type="selectedTargetType"
             :selected-target-id="selectedTargetId"
+            :session-only="sessionOnly"
             @select-target="emit('select-target', $event)"
           />
 

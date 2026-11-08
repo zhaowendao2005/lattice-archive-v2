@@ -14,6 +14,7 @@ const props = withDefaults(
     selectedTargetType?: 'group' | 'folder';
     selectedTargetId?: string;
     footerHint?: string;
+    sessionOnly?: boolean;
   }>(),
   {
     isOpen: undefined,
@@ -22,6 +23,7 @@ const props = withDefaults(
     selectedTargetType: 'group',
     selectedTargetId: '',
     footerHint: '',
+    sessionOnly: false,
   },
 );
 
@@ -164,6 +166,7 @@ function handleBlankContextMenu(event: MouseEvent) {
           :selectable-target="selectableTarget"
           :selected-target-type="selectedTargetType"
           :selected-target-id="selectedTargetId"
+          :session-only="sessionOnly"
           @select-target="emit('select-target', $event)"
         />
       </div>

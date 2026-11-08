@@ -1,23 +1,27 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, onUnmounted } from 'vue';
 import {
-  Check,
   ChevronRight,
   Folder,
   FolderPlus,
-  MessageSquare,
   Plus,
   RefreshCw,
+  Sparkles,
   UnfoldHorizontal,
   X,
 } from '@lucide/vue';
-import { useChatStore } from '@/stores/chat/stores/chatStore';
-import { useChatMediaStore } from '@/stores/chat/stores/chatMediaStore';
-import type { TgPeerKey } from '@/stores/chat/types';
-import type { FileTileData, FolderTileData, TileData } from '../../types/tile';
-import { countFolderItemsRecursive, useTileStore } from '@/stores/archive/stores/tileStore';
-import { getFileVisual } from '../tiles/fileVisuals';
+import type { FileTileData, FolderDragState, FolderTileData, TileData } from '../../types/tile';
+import {
+  countFolderItemsRecursive,
+  getTilePixelDimensions,
+  GRID_GAP,
+  UNIT_SIZE,
+  useTileStore,
+} from '@/stores/archive/stores/tileStore';
+import { archiveDomRegistry } from '../../store/archiveDomRegistry';
 import { isTelegramMediaTile } from '../../utils/tilePresentation';
+import FileTile from '../tiles/FileTile.vue';
+import FolderTile from '../tiles/FolderTile.vue';
 
 const props = defineProps<{
   folder: FolderTileData;
@@ -28,45 +32,17 @@ const emit = defineEmits<{
 }>();
 
 const tileStore = useTileStore();
-const chatStore = useChatStore();
-const chatMediaStore = useChatMediaStore();
-
-function isChildSession(child: TileData): boolean {
-  return (
-    child.type === 'file' &&
-    Boolean(
-      child.isSessionLink ||
-        child.sessionCredentialState ||
-        child.extension?.toLowerCase() === 'tg',
-    )
-  );
-}
-
-function getChildThumb(child: TileData): string {
-  if (child.type === 'file' && isChildSession(child)) {
-    const key = child.peerKey || child.sessionId;
-    if (key) {
-      const liveAvatar = chatMediaStore.dialogAvatarUrl(key);
-      if (liveAvatar) return liveAvatar;
-      const dialog = chatStore.dialogs[key as TgPeerKey];
-      if (dialog?.avatar?.thumb) return dialog.avatar.thumb;
-    }
-  }
-  return child.thumb?.objectUrl || child.thumb?.strippedDataUrl || '';
-}
-
-function isChildSelected(childId: string): boolean {
-  return tileStore.folderSelectedTileIds.includes(childId);
-}
 
 const folderMarqueeRectStyle = computed(() => {
   const m = tileStore.folderMarqueeState;
   if (!m.isSelecting) return null;
-  const left = Math.min(m.startX, m.currentX);
-  const top = Math.min(m.startY, m.currentY);
-  const width = Math.abs(m.currentX - m.startX);
-  const height = Math.abs(m.currentY - m.startY);
-  if (width < 4 && height < 4) return null;
+  const projectedStartX = m.startX - ((m.currentScrollLeft ?? 0) - (m.startScrollLeft ?? 0));
+  const projectedStartY = m.startY - ((m.currentScrollTop ?? 0) - (m.startScrollTop ?? 0));
+  const left = Math.min(projectedStartX, m.currentX);
+  const top = Math.min(projectedStartY, m.currentY);
+  const width = Math.abs(m.currentX - projectedStartX);
+  const height = Math.abs(m.currentY - projectedStartY);
+  if (width < 3 && height < 3) return null;
   return {
     left: `${left}px`,
     top: `${top}px`,
@@ -75,11 +51,87 @@ const folderMarqueeRectStyle = computed(() => {
   };
 });
 
+let folderAutoScrollRaf: number | null = null;
+let folderAutoScrollVy = 0;
+let onFolderAutoScrollTick: (() => void) | null = null;
+
+function stopFolderAutoScroll() {
+  if (folderAutoScrollRaf !== null) {
+    cancelAnimationFrame(folderAutoScrollRaf);
+    folderAutoScrollRaf = null;
+  }
+  folderAutoScrollVy = 0;
+  onFolderAutoScrollTick = null;
+}
+
+function updateFolderAutoScroll(containerEl: HTMLElement, clientY: number, onTick?: () => void) {
+  if (onTick) {
+    onFolderAutoScrollTick = onTick;
+  }
+  const rect = containerEl.getBoundingClientRect();
+  const threshold = 50;
+  const maxSpeed = 18;
+
+  let vy = 0;
+  if (clientY > rect.bottom - threshold && clientY <= rect.bottom + 40) {
+    const ratio = Math.min(1, Math.max(0.15, (clientY - (rect.bottom - threshold)) / threshold));
+    vy = Math.round(ratio * maxSpeed);
+  } else if (clientY < rect.top + threshold && clientY >= rect.top - 40) {
+    const ratio = Math.min(1, Math.max(0.15, ((rect.top + threshold) - clientY) / threshold));
+    vy = -Math.round(ratio * maxSpeed);
+  }
+
+  folderAutoScrollVy = vy;
+
+  if (vy !== 0) {
+    if (folderAutoScrollRaf === null) {
+      const step = () => {
+        if (!containerEl || folderAutoScrollVy === 0) {
+          stopFolderAutoScroll();
+          return;
+        }
+        const prevTop = containerEl.scrollTop;
+        containerEl.scrollTop += folderAutoScrollVy;
+        if (containerEl.scrollTop !== prevTop) {
+          onFolderAutoScrollTick?.();
+        }
+        folderAutoScrollRaf = requestAnimationFrame(step);
+      };
+      folderAutoScrollRaf = requestAnimationFrame(step);
+    }
+  } else {
+    stopFolderAutoScroll();
+  }
+}
+
 const groupTitle = computed(
   () => tileStore.groups.find((g) => g.id === props.folder.groupId)?.title ?? '未分组',
 );
 
 const totalRecursiveCount = computed(() => countFolderItemsRecursive(props.folder));
+
+/** 文件夹弹窗内部拖拽会话（状态在 store，视图只读取） */
+const folderDragState = computed(() => tileStore.folderDragState);
+
+/** 跟随光标的拖拽残影样式（居中对齐指针） */
+const folderDragGhostStyle = computed(() => {
+  const state = folderDragState.value;
+  if (!state.isDragging) return null;
+  return {
+    left: `${state.pointerX - state.width / 2}px`,
+    top: `${state.pointerY - state.height / 2}px`,
+    width: `${state.width}px`,
+    height: `${state.height}px`,
+  };
+});
+
+function bindFolderModalRef(el: unknown) {
+  archiveDomRegistry.setFolderModalEl(el);
+}
+
+function bindFolderGridRef(el: unknown) {
+  archiveDomRegistry.setFolderGridEl(el);
+}
 
 function startEditingTitle() {
   tileStore.folderModalTitleDraft = props.folder.title;
@@ -97,10 +149,6 @@ function handleDissolve() {
   if (confirm(`确定要解散文件夹「${props.folder.title}」吗？其中的项目将移至上一级。`)) {
     tileStore.dissolveFolder(props.folder.id);
   }
-}
-
-function handleRemoveItem(item: TileData) {
-  tileStore.removeFileFromFolder(props.folder.id, item.id);
 }
 
 function handleItemContextMenu(event: MouseEvent, item: TileData) {
@@ -160,28 +208,155 @@ function handleAddFileQuick() {
   }
 }
 
-let suppressClick = false;
-
-function handleOpenChild(event: MouseEvent, item: TileData) {
-  if (suppressClick) {
-    suppressClick = false;
-    return;
-  }
-  if (event.ctrlKey || event.metaKey || event.shiftKey || tileStore.folderSelectedTileIds.length > 0) {
-    tileStore.toggleSelectFolderChildTile(item.id, true);
-    return;
-  }
+function handleOpenChild(item: TileData) {
   if (item.type === 'folder') {
     tileStore.openFolder(item);
-  } else {
-    const file = item as FileTileData;
-    if (isTelegramMediaTile(file, tileStore.resources)) void tileStore.openTelegramMedia(file);
-    else tileStore.openFile(file);
+    return;
   }
+  const file = item as FileTileData;
+  if (isTelegramMediaTile(file, tileStore.resources)) void tileStore.openTelegramMedia(file);
+  else tileStore.openFile(file);
+}
+
+/**
+ * 计算插入目标：DOM 顺序与 folder.children 数组顺序一致（v-for 按数组渲染），
+ * 因此只需跳过被拖拽项，找到指针最近的兄弟磁贴，再判断插到它前面还是后面。
+ */
+function computeInsertTarget(
+  gridEl: HTMLElement | null,
+  ids: string[],
+  px: number,
+  py: number,
+): { index: number; bar: FolderDragState['insertRect'] } {
+  const els = Array.from(
+    gridEl?.querySelectorAll<HTMLElement>('[data-folder-tile-id]') ?? [],
+  ).filter((el) => !ids.includes(el.dataset.folderTileId ?? ''));
+
+  let bestEl: HTMLElement | null = null;
+  let bestDist = Number.POSITIVE_INFINITY;
+  let bestAfter = true;
+
+  for (const el of els) {
+    const r = el.getBoundingClientRect();
+    const dx = Math.max(r.left - px, 0, px - r.right);
+    const dy = Math.max(r.top - py, 0, py - r.bottom);
+    const dist = Math.hypot(dx, dy);
+    if (dist >= bestDist) continue;
+    bestDist = dist;
+    bestEl = el;
+    const cy = r.top + r.height / 2;
+    const cx = r.left + r.width / 2;
+    // 指针偏在该元素中心之后（先比 Y，Y 接近时再比 X）→ 插到它后面
+    bestAfter = py > cy || (Math.abs(py - cy) <= r.height / 2 && px > cx);
+  }
+
+  if (!bestEl) return { index: 0, bar: null };
+
+  const target: HTMLElement = bestEl;
+  const index = els.indexOf(target) + (bestAfter ? 1 : 0);
+  const r = target.getBoundingClientRect();
+  return {
+    index,
+    bar: { left: bestAfter ? r.right + 3 : r.left - 3, top: r.top, height: r.height },
+  };
+}
+
+/**
+ * 文件夹内拖拽分流：
+ * - 指针仍在弹窗卡片内 → 内部重排（改变 folder.children 顺序）
+ * - 指针离开弹窗卡片 → 立即移交磁贴板（必须在 pointermove 中移交，
+ *   TileBoard 的 sync watcher 会 closeFolder() 并 beginTileDrag() 接管后续移动）
+ */
+function onChildDragStart(
+  event: PointerEvent,
+  item: TileData,
+  _grabOffset?: { x: number; y: number },
+) {
+  const multiSelected =
+    tileStore.folderSelectedTileIds.length > 1 &&
+    tileStore.folderSelectedTileIdSet.has(item.id);
+  const ids = multiSelected ? [...tileStore.folderSelectedTileIds] : [item.id];
+
+  const { width, height } = getTilePixelDimensions(item.size, item.customSpan);
+  tileStore.beginFolderDrag(props.folder.id, ids, width, height);
+  tileStore.updateFolderDrag(event.clientX, event.clientY, 0, null, false);
+
+  let handedOff = false;
+  /** 指针离开弹窗卡片的起始时刻（0 表示当前在卡片内） */
+  let outsideSince = 0;
+  /** 离开弹窗需持续的时间，避免边缘误触直接弹飞 */
+  const OUTSIDE_DWELL_MS = 150;
+
+  const cleanup = () => {
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+    window.removeEventListener('pointercancel', onUp);
+  };
+
+  const onMove = (moveEvent: PointerEvent) => {
+    if (handedOff) return;
+
+    // 1) 指针是否已离开弹窗卡片（离开需持续 OUTSIDE_DWELL_MS 才真正移交）
+    const modalEl = archiveDomRegistry.getFolderModalEl();
+    const rect = modalEl?.getBoundingClientRect();
+    const isOutsideNow =
+      !!rect &&
+      (moveEvent.clientX < rect.left ||
+        moveEvent.clientX > rect.right ||
+        moveEvent.clientY < rect.top ||
+        moveEvent.clientY > rect.bottom);
+
+    const now = performance.now();
+    if (!isOutsideNow) {
+      outsideSince = 0;
+    } else if (outsideSince === 0) {
+      outsideSince = now;
+    }
+    const handedOffNow = outsideSince > 0 && now - outsideSince >= OUTSIDE_DWELL_MS;
+
+    // 2) 计算插入下标与指示线
+    const target = computeInsertTarget(
+      archiveDomRegistry.getFolderGridEl(),
+      ids,
+      moveEvent.clientX,
+      moveEvent.clientY,
+    );
+    tileStore.updateFolderDrag(
+      moveEvent.clientX,
+      moveEvent.clientY,
+      target.index,
+      target.bar,
+      isOutsideNow,
+    );
+
+    // 3) 已在卡片外停留足够久 → 立即移交磁贴板
+    if (handedOffNow) {
+      handedOff = true;
+      cleanup();
+      tileStore.endFolderDrag();
+      if (ids.length > 1) tileStore.setSelectedTileIds([...ids]);
+      tileStore.beginFolderChildDrag(item, props.folder, moveEvent.clientX, moveEvent.clientY);
+    }
+  };
+
+  const onUp = () => {
+    cleanup();
+    if (handedOff) return;
+    const state = tileStore.folderDragState;
+    if (state.isDragging && !state.isOutside) {
+      tileStore.reorderFolderChildren(props.folder.id, [...state.ids], state.insertIndex);
+    }
+    tileStore.endFolderDrag();
+  };
+
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', onUp);
+  window.addEventListener('pointercancel', onUp);
 }
 
 /**
  * 在文件夹网格空白处按住左键拖拽 → 启动框选 (Marquee Selection)
+ * 深度兼容垂直滚动与边缘平滑自动滚动
  */
 function onFolderSectionPointerDown(event: PointerEvent) {
   if (event.button !== 0) return;
@@ -190,23 +365,34 @@ function onFolderSectionPointerDown(event: PointerEvent) {
   if (
     target.closest('[data-folder-tile-id]') ||
     target.closest('button') ||
-    target.closest('input') ||
-    target.closest('[data-folder-batch-bar]')
+    target.closest('input')
   ) {
     return;
   }
 
+  const containerEl = (event.currentTarget as HTMLElement) || target.closest('section');
   const startX = event.clientX;
   const startY = event.clientY;
+  const startScrollLeft = containerEl ? containerEl.scrollLeft : 0;
+  const startScrollTop = containerEl ? containerEl.scrollTop : 0;
   const additive = event.ctrlKey || event.metaKey || event.shiftKey;
   const baseSelectedIds = additive ? [...tileStore.folderSelectedTileIds] : [];
   let hasMovedMarquee = false;
 
   const updateHits = (currX: number, currY: number) => {
-    const boxLeft = Math.min(startX, currX);
-    const boxRight = Math.max(startX, currX);
-    const boxTop = Math.min(startY, currY);
-    const boxBottom = Math.max(startY, currY);
+    const curScrollLeft = containerEl ? containerEl.scrollLeft : startScrollLeft;
+    const curScrollTop = containerEl ? containerEl.scrollTop : startScrollTop;
+
+    tileStore.folderMarqueeState.currentScrollLeft = curScrollLeft;
+    tileStore.folderMarqueeState.currentScrollTop = curScrollTop;
+
+    const projectedStartX = startX - (curScrollLeft - startScrollLeft);
+    const projectedStartY = startY - (curScrollTop - startScrollTop);
+
+    const boxLeft = Math.min(projectedStartX, currX);
+    const boxRight = Math.max(projectedStartX, currX);
+    const boxTop = Math.min(projectedStartY, currY);
+    const boxBottom = Math.max(projectedStartY, currY);
 
     const tileEls = Array.from(document.querySelectorAll('[data-folder-tile-id]')) as HTMLElement[];
     const hitIds = new Set<string>(baseSelectedIds);
@@ -226,10 +412,21 @@ function onFolderSectionPointerDown(event: PointerEvent) {
     tileStore.setFolderSelectedTileIds(Array.from(hitIds));
   };
 
+  const onContainerScroll = () => {
+    if (hasMovedMarquee && tileStore.folderMarqueeState.isSelecting) {
+      updateHits(tileStore.folderMarqueeState.currentX, tileStore.folderMarqueeState.currentY);
+    }
+  };
+
   const onMove = (moveEvent: PointerEvent) => {
-    const dx = Math.abs(moveEvent.clientX - startX);
-    const dy = Math.abs(moveEvent.clientY - startY);
-    if (!hasMovedMarquee && dx < 5 && dy < 5) return;
+    const curScrollLeft = containerEl ? containerEl.scrollLeft : startScrollLeft;
+    const curScrollTop = containerEl ? containerEl.scrollTop : startScrollTop;
+    const projectedStartX = startX - (curScrollLeft - startScrollLeft);
+    const projectedStartY = startY - (curScrollTop - startScrollTop);
+
+    const dx = Math.abs(moveEvent.clientX - projectedStartX);
+    const dy = Math.abs(moveEvent.clientY - projectedStartY);
+    if (!hasMovedMarquee && dx < 4 && dy < 4) return;
 
     if (!hasMovedMarquee) {
       hasMovedMarquee = true;
@@ -239,6 +436,10 @@ function onFolderSectionPointerDown(event: PointerEvent) {
         startY,
         currentX: moveEvent.clientX,
         currentY: moveEvent.clientY,
+        startScrollLeft,
+        startScrollTop,
+        currentScrollLeft: curScrollLeft,
+        currentScrollTop: curScrollTop,
         additive,
         baseSelectedIds,
       };
@@ -246,13 +447,21 @@ function onFolderSectionPointerDown(event: PointerEvent) {
       tileStore.folderMarqueeState.currentX = moveEvent.clientX;
       tileStore.folderMarqueeState.currentY = moveEvent.clientY;
     }
+
+    if (containerEl) {
+      updateFolderAutoScroll(containerEl, moveEvent.clientY, () => {
+        updateHits(tileStore.folderMarqueeState.currentX, tileStore.folderMarqueeState.currentY);
+      });
+    }
     updateHits(moveEvent.clientX, moveEvent.clientY);
   };
 
   const onUp = () => {
+    stopFolderAutoScroll();
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
     window.removeEventListener('pointercancel', onUp);
+    containerEl?.removeEventListener('scroll', onContainerScroll);
 
     if (!hasMovedMarquee && !additive && tileStore.folderSelectedTileIds.length > 0) {
       tileStore.clearFolderSelectedTiles();
@@ -260,64 +469,17 @@ function onFolderSectionPointerDown(event: PointerEvent) {
     tileStore.folderMarqueeState.isSelecting = false;
   };
 
+  containerEl?.addEventListener('scroll', onContainerScroll, { passive: true });
   window.addEventListener('pointermove', onMove);
   window.addEventListener('pointerup', onUp);
   window.addEventListener('pointercancel', onUp);
 }
 
-/**
- * 按住卡片拖动超过阈值 → 从文件夹“拖出”：弹窗关闭，拖拽交给磁贴板接管。
- */
-function onItemPointerDown(event: PointerEvent, item: TileData) {
-  if (event.button !== 0) return;
-  if ((event.target as HTMLElement)?.closest('button')) return;
-
-  const startX = event.clientX;
-  const startY = event.clientY;
-  let started = false;
-
-  const cleanup = () => {
-    window.removeEventListener('pointermove', onPointerMove);
-    window.removeEventListener('pointerup', cleanup);
-    window.removeEventListener('pointercancel', cleanup);
-  };
-
-  const onPointerMove = (moveEvent: PointerEvent) => {
-    if (started) return;
-    if (
-      Math.abs(moveEvent.clientX - startX) < 6 &&
-      Math.abs(moveEvent.clientY - startY) < 6
-    ) {
-      return;
-    }
-
-    started = true;
-    cleanup();
-
-    suppressClick = true;
-    window.setTimeout(() => {
-      suppressClick = false;
-    }, 0);
-
-    if (
-      tileStore.folderSelectedTileIds.length > 1 &&
-      tileStore.folderSelectedTileIds.includes(item.id)
-    ) {
-      tileStore.setSelectedTileIds([...tileStore.folderSelectedTileIds]);
-    }
-
-    tileStore.beginFolderChildDrag(
-      item,
-      props.folder,
-      moveEvent.clientX,
-      moveEvent.clientY,
-    );
-  };
-
-  window.addEventListener('pointermove', onPointerMove);
-  window.addEventListener('pointerup', cleanup);
-  window.addEventListener('pointercancel', cleanup);
-}
+onUnmounted(() => {
+  stopFolderAutoScroll();
+  tileStore.folderMarqueeState.isSelecting = false;
+  tileStore.endFolderDrag();
+});
 </script>
 
 <template>
@@ -327,6 +489,7 @@ function onItemPointerDown(event: PointerEvent, item: TileData) {
   >
     <!-- 文件夹详情：支持无限嵌套面包屑下钻与返回 -->
     <div
+      :ref="bindFolderModalRef"
       class="archive-modal-card relative flex h-[min(860px,90vh)] w-[min(1280px,94vw)] flex-col overflow-hidden border border-white/15 bg-[#0f172a]/70 text-white shadow-[inset_0_1px_0_0_rgba(255,255,255,0.14),0_24px_60px_-12px_rgba(0,0,0,0.6)] backdrop-blur-2xl"
     >
       <!-- 顶栏 + 面包屑路径条 -->
@@ -393,6 +556,16 @@ function onItemPointerDown(event: PointerEvent, item: TileData) {
 
           <button
             type="button"
+            class="flex h-[26px] items-center gap-1 border border-sky-400/30 bg-sky-500/15 px-2 text-[11px] text-sky-200 transition-colors hover:bg-sky-500/25"
+            title="按 Telegram 原生 ID（document.id / photo.id / peerKey）清理此文件夹内的重复磁贴并合并多源定位"
+            @click="tileStore.deduplicateTiles({ scope: 'folder', folderId: folder.id })"
+          >
+            <Sparkles class="size-3.5" />
+            <span>去重整理</span>
+          </button>
+
+          <button
+            type="button"
             class="flex h-[26px] items-center gap-1 border border-emerald-400/30 bg-emerald-500/15 px-2 text-[11px] text-emerald-200 transition-colors hover:bg-emerald-500/25"
             title="重新载入当前文件夹内加载失败或缺失的贴图"
             @click="tileStore.reloadMissingOrFailedTileCovers(folder.id)"
@@ -429,108 +602,42 @@ function onItemPointerDown(event: PointerEvent, item: TileData) {
           @pointerdown="onFolderSectionPointerDown"
           @contextmenu="handleFolderBlankContextMenu"
         >
-          <div class="grid grid-cols-[repeat(auto-fill,minmax(92px,1fr))] gap-2.5">
-            <div
-              v-for="child in folder.children"
-              :key="child.id"
-              :data-folder-tile-id="child.id"
-              class="group/sub relative flex aspect-square cursor-grab select-none flex-col items-center justify-center gap-1.5 overflow-hidden border px-1.5 pb-1.5 pt-2 transition-all active:cursor-grabbing"
-              :class="[
-                isChildSelected(child.id)
-                  ? 'border-sky-400 bg-sky-500/20 ring-2 ring-sky-400/70 shadow-[0_0_14px_rgba(56,189,248,0.3)]'
-                  : child.type === 'folder'
-                    ? 'border-amber-400/25 bg-amber-500/10 hover:border-amber-400/50 hover:bg-amber-500/18'
-                    : 'border-white/10 bg-white/[0.04] hover:border-white/25 hover:bg-white/[0.09]',
-              ]"
-              @pointerdown="onItemPointerDown($event, child)"
-              @click="handleOpenChild($event, child)"
-              @contextmenu="handleItemContextMenu($event, child)"
-            >
-              <!-- 缩略图背景（单层封面全画幅呈现） -->
-              <img
-                v-if="getChildThumb(child)"
-                :src="getChildThumb(child)"
-                alt=""
-                class="pointer-events-none absolute inset-0 size-full object-cover opacity-85 transition-opacity duration-150 group-hover/sub:opacity-100"
+          <!-- Archive 同款像素网格：UNIT_SIZE=50 / GRID_GAP=6，跨度由 BaseTile 内联 gridColumn/gridRow 提供 -->
+          <div
+            :ref="bindFolderGridRef"
+            class="relative grid"
+            :style="{
+              gridTemplateColumns: `repeat(auto-fill, ${UNIT_SIZE}px)`,
+              gridAutoRows: `${UNIT_SIZE}px`,
+              gap: `${GRID_GAP}px`,
+              gridAutoFlow: 'dense',
+            }"
+          >
+            <template v-for="child in folder.children" :key="child.id">
+              <FolderTile
+                v-if="child.type === 'folder'"
+                :folder="child"
+                in-folder-grid
+                :title="child.title"
+                @click="handleOpenChild($event)"
+                @contextmenu="handleItemContextMenu($event, child)"
+                @dragstart="(e, t, off) => onChildDragStart(e, t, off)"
               />
-              <div
-                v-if="getChildThumb(child)"
-                class="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/90 via-black/35 to-black/15"
+              <FileTile
+                v-else
+                :file="child"
+                in-folder-grid
+                @click="handleOpenChild($event)"
+                @contextmenu="handleItemContextMenu($event, child)"
+                @dragstart="(e, t, off) => onChildDragStart(e, t, off)"
               />
-
-              <!-- 左上角多选勾选框 -->
-              <button
-                type="button"
-                class="absolute left-1 top-1 z-20 flex size-4 items-center justify-center rounded-[2px] border transition-all"
-                :class="
-                  isChildSelected(child.id)
-                    ? 'border-sky-300 bg-sky-500 text-white opacity-100 shadow-sm'
-                    : 'border-white/30 bg-black/45 text-transparent opacity-0 group-hover/sub:opacity-100 hover:border-sky-300'
-                "
-                title="选择 / 取消选择此磁贴"
-                @pointerdown.stop
-                @click.stop="tileStore.toggleSelectFolderChildTile(child.id, true)"
-              >
-                <Check class="size-2.5" :stroke-width="3" />
-              </button>
-
-              <button
-                type="button"
-                class="absolute right-0 top-0 z-10 flex size-5 items-center justify-center text-white/30 opacity-0 transition-opacity hover:text-rose-400 group-hover/sub:opacity-100"
-                title="移出到磁贴板"
-                @click.stop="handleRemoveItem(child)"
-              >
-                <X class="size-2.5" />
-              </button>
-
-              <!-- 子文件夹图标 -->
-              <template v-if="child.type === 'folder'">
-                <Folder class="relative z-10 size-6 shrink-0 text-amber-300" :stroke-width="1.8" />
-                <span class="relative z-10 font-mono text-[9px] text-amber-200/75">
-                  {{ child.children.length }} 项
-                </span>
-              </template>
-
-              <!-- 子文件或会话图标 -->
-              <template v-else>
-                <!-- 若已有单层封面背景，绝不再重复嵌套缩小版图片！仅在无封面时展示类型占位图标 -->
-                <template v-if="!getChildThumb(child)">
-                  <MessageSquare
-                    v-if="isChildSession(child)"
-                    class="relative z-10 size-5 shrink-0 text-sky-300"
-                    :stroke-width="1.9"
-                  />
-                  <component
-                    v-else
-                    :is="getFileVisual(child.fileType).icon"
-                    class="relative z-10 size-5 shrink-0"
-                    :class="getFileVisual(child.fileType).color"
-                    :stroke-width="1.8"
-                  />
-                </template>
-                <!-- 会话三态角标 -->
-                <span
-                  v-if="child.sessionCredentialState"
-                  class="absolute bottom-1.5 right-1.5 z-10 size-2 rounded-full"
-                  :class="
-                    child.sessionCredentialState === 'joined'
-                      ? 'bg-emerald-400'
-                      : child.sessionCredentialState === 'temp_auto_renew'
-                        ? 'bg-purple-400'
-                        : 'bg-amber-400'
-                  "
-                />
-              </template>
-
-              <p class="relative z-10 w-full truncate text-center text-[10px] font-medium leading-tight text-white/95 drop-shadow-[0_1px_2px_rgba(0,0,0,0.9)]">
-                {{ child.title }}
-              </p>
-            </div>
+            </template>
 
             <!-- 添加子文件夹 -->
             <button
               type="button"
-              class="flex aspect-square flex-col items-center justify-center gap-1 border border-dashed border-amber-400/20 text-amber-300/50 transition-colors hover:border-amber-400/45 hover:bg-amber-500/[0.06] hover:text-amber-200"
+              class="flex flex-col items-center justify-center gap-1 border border-dashed border-amber-400/20 text-amber-300/50 transition-colors hover:border-amber-400/45 hover:bg-amber-500/[0.06] hover:text-amber-200"
+              :style="{ gridColumn: 'span 2', gridRow: 'span 2', width: '106px', height: '106px' }"
               title="新建子文件夹"
               @click="handleAddSubFolderQuick"
             >
@@ -541,7 +648,8 @@ function onItemPointerDown(event: PointerEvent, item: TileData) {
             <!-- 添加文件 -->
             <button
               type="button"
-              class="flex aspect-square flex-col items-center justify-center gap-1 border border-dashed border-white/15 text-white/35 transition-colors hover:border-white/30 hover:bg-white/[0.04] hover:text-white/75"
+              class="flex flex-col items-center justify-center gap-1 border border-dashed border-white/15 text-white/35 transition-colors hover:border-white/30 hover:bg-white/[0.04] hover:text-white/75"
+              :style="{ gridColumn: 'span 2', gridRow: 'span 2', width: '106px', height: '106px' }"
               title="添加文件"
               @click="handleAddFileQuick"
             >
@@ -594,6 +702,15 @@ function onItemPointerDown(event: PointerEvent, item: TileData) {
           <div class="shrink-0 space-y-2 border-t border-white/10 p-3">
             <button
               type="button"
+              class="flex w-full items-center justify-center gap-1.5 border border-sky-400/30 bg-sky-500/15 py-2 text-[11px] text-sky-200 transition-colors hover:bg-sky-500/25"
+              @click="tileStore.deduplicateTiles({ scope: 'folder', folderId: folder.id })"
+            >
+              <Sparkles class="size-3.5" :stroke-width="1.75" />
+              <span>清理重复磁贴 (按 TG ID)</span>
+            </button>
+
+            <button
+              type="button"
               class="flex w-full items-center justify-center gap-1.5 border border-emerald-400/30 bg-emerald-500/15 py-2 text-[11px] text-emerald-200 transition-colors hover:bg-emerald-500/25"
               @click="tileStore.reloadMissingOrFailedTileCovers(folder.id)"
             >
@@ -637,6 +754,39 @@ function onItemPointerDown(event: PointerEvent, item: TileData) {
           v-if="folderMarqueeRectStyle"
           class="pointer-events-none fixed z-[9999] rounded-[2px] border border-sky-400/90 bg-sky-500/20 shadow-[0_0_16px_rgba(56,189,248,0.28)]"
           :style="folderMarqueeRectStyle"
+        />
+
+        <!-- 文件夹内部重排：拖拽残影（跟随光标）；离开弹窗时提示即将移出 -->
+        <div
+          v-if="folderDragState.isDragging"
+          class="pointer-events-none fixed z-[9999] flex items-center justify-center rounded-[2px] border text-[12px] font-bold shadow-2xl"
+          :class="
+            folderDragState.isOutside
+              ? 'border-amber-400/80 bg-amber-950/90 text-amber-200'
+              : 'border-sky-400/70 bg-[#0f172a]/90 text-sky-200'
+          "
+          :style="folderDragGhostStyle"
+        >
+          <span
+            v-if="folderDragState.ids.length > 1"
+            class="flex size-6 items-center justify-center rounded-[2px] bg-sky-500 font-mono text-[11px] text-white"
+          >
+            {{ folderDragState.ids.length }}
+          </span>
+          <span v-else-if="folderDragState.isOutside" class="px-1.5 text-[9px] font-medium leading-tight">
+            移出到磁贴板
+          </span>
+        </div>
+
+        <!-- 文件夹内部重排：插入位置指示线 -->
+        <div
+          v-if="folderDragState.isDragging && folderDragState.insertRect && !folderDragState.isOutside"
+          class="pointer-events-none fixed z-[9998] w-0.5 rounded-full bg-sky-400 shadow-[0_0_10px_rgba(56,189,248,0.9)]"
+          :style="{
+            left: `${folderDragState.insertRect.left}px`,
+            top: `${folderDragState.insertRect.top}px`,
+            height: `${folderDragState.insertRect.height}px`,
+          }"
         />
       </Teleport>
     </div>

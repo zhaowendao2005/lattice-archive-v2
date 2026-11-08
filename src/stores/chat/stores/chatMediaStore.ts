@@ -111,6 +111,21 @@ function viewerItemsOf(viewer: { peerKey: TgPeerKey; messageId: number; single: 
   return messages.filter(isViewerItem);
 }
 
+/**
+ * 查看器当前项：优先在消息窗口中定位；后台补差 / 频道校准可能整体替换窗口
+ * （归档磁贴或搜索跳转打开的旧消息不在最新页内），此时退回打开查看器时的消息快照，
+ * 避免查看器与播放器随窗口漂移被卸载。index 为 -1 表示来自快照。
+ */
+function resolveViewerItem(
+  viewer: { messageId: number },
+  items: TgMessageDto[],
+  snapshot: TgMessageDto | null,
+): { message: TgMessageDto; media: NonNullable<TgMessageDto['media']>; index: number } | null {
+  const index = items.findIndex((message) => message.id === viewer.messageId);
+  const message = index >= 0 ? items[index] : snapshot?.id === viewer.messageId ? snapshot : undefined;
+  return message?.media ? { message, media: message.media, index } : null;
+}
+
 export interface FilmstripItem { target: string; thumb?: string; url?: string; active: boolean; isVideo: boolean }
 
 export interface MediaViewerModel {
@@ -151,6 +166,8 @@ export const useChatMediaStore = defineStore('chatMedia', {
     autoDownload: chatPreferences.readAutoDownload() as AutoDownloadPrefs,
     /** 查看器当前项；single 表示以文件方式发送的视频单独打开，不参与翻页。覆盖层属于 UI 态，不进路由。 */
     viewer: null as { peerKey: TgPeerKey; messageId: number; single: boolean } | null,
+    /** 查看器当前项的消息快照：窗口被后台同步整体替换时仍能维持播放，不参与其他业务。 */
+    viewerMessage: null as TgMessageDto | null,
     /** 查看器放大与平移（px，相对舞台中心）。 */
     zoom: { scale: 1, x: 0, y: 0 },
     /** 最近一次指针类型：触屏上点击视频切换控制条而非播放。 */
@@ -171,9 +188,9 @@ export const useChatMediaStore = defineStore('chatMedia', {
       const viewer = state.viewer;
       if (!viewer) return null;
       const items = viewerItemsOf(viewer);
-      const index = items.findIndex((message) => message.id === viewer.messageId);
-      const message = items[index];
-      if (!message?.media) return null;
+      const item = resolveViewerItem(viewer, items, state.viewerMessage);
+      if (!item) return null;
+      const { message, media, index } = item;
       const dialog = useChatStore().dialogs[viewer.peerKey];
       const title = message.senderName || dialog?.title || '媒体';
       const senderAvatar = message.senderAvatar && message.senderKey
@@ -190,12 +207,12 @@ export const useChatMediaStore = defineStore('chatMedia', {
         avatarKey: senderAvatar?.key,
         avatarThumb: senderAvatar?.thumb,
         dateLabel: formatDateTime(message.date),
-        position: `${index + 1} / ${items.length}`,
+        position: index >= 0 ? `${index + 1} / ${items.length}` : '1 / 1',
         hasPrev: index > 0,
-        hasNext: index < items.length - 1,
+        hasNext: index >= 0 && index < items.length - 1,
         filmstrip: filmstripOf(state.entries, viewer.peerKey, items, message),
       };
-      const photo = message.media.photo;
+      const photo = media.photo;
       if (photo) {
         const preview = state.entries[photoKey(photo, previewSizeOf(photo))];
         const full = state.entries[photoKey(photo, photo.full)];
@@ -210,12 +227,12 @@ export const useChatMediaStore = defineStore('chatMedia', {
           height: photo.height,
         };
       }
-      const video = message.media.video!;
+      const video = media.video!;
       const previewKey = videoPreviewOf(video)?.key;
       const thumb = video.cover?.thumb ?? video.thumb;
       return {
         ...base,
-        type: message.media.kind === 'gif' ? 'gif' : 'video',
+        type: media.kind === 'gif' ? 'gif' : 'video',
         quality: 'full',
         isLoading: false,
         error: null,
@@ -268,13 +285,18 @@ export const useChatMediaStore = defineStore('chatMedia', {
       this.revealed = {};
       this.manual = {};
       this.viewer = null;
+      this.viewerMessage = null;
       this.zoom = { scale: 1, x: 0, y: 0 };
     },
 
     resolve(target: string): MessageRef | null {
       const parsed = parseMediaTarget(target);
       if (!parsed) return null;
-      const message = useChatStore().windows[parsed.peerKey]?.messages.find((item) => item.id === parsed.messageId);
+      let message = useChatStore().windows[parsed.peerKey]?.messages.find((item) => item.id === parsed.messageId);
+      // 窗口被后台同步替换后，查看器仍指向打开时的消息快照。
+      if (!message?.media && this.viewer?.peerKey === parsed.peerKey && this.viewerMessage?.id === parsed.messageId) {
+        message = this.viewerMessage;
+      }
       return message?.media ? { peerKey: parsed.peerKey, message } : null;
     },
 
@@ -305,6 +327,21 @@ export const useChatMediaStore = defineStore('chatMedia', {
     /** 获取头像图片 URL：优先使用已加载的 160×160 清晰头像，未就绪时回退到随实体下发的 strippedThumb。 */
     avatarUrl(key?: string, thumb?: string): string | undefined {
       return (key ? this.entries[key]?.url : undefined) ?? thumb;
+    },
+
+    /**
+     * 纯读取头像 URL（不触发加载请求）：仅供渲染函数/computed 使用，
+     * 彻底杜绝在模板渲染期间产生副作用（状态写入 / 异步请求）。
+     */
+    peekDialogAvatarUrl(peerKey?: string): string | undefined {
+      if (!peerKey) return undefined;
+      const chat = useChatStore();
+      const dialog =
+        chat.dialogs[peerKey] ??
+        (chat.resolvedDialog?.key === peerKey ? chat.resolvedDialog : undefined);
+      if (!dialog?.avatar) return undefined;
+      const key = avatarKey(dialog.key, dialog.avatar);
+      return this.entries[key]?.url ?? dialog.avatar.thumb;
     },
 
     async refreshDialogAvatars(peerKeys: string[]): Promise<{ refreshed: number; skipped: number }> {
@@ -490,6 +527,7 @@ export const useChatMediaStore = defineStore('chatMedia', {
       const ref = this.resolve(target);
       if (!ref) return;
       this.viewer = { peerKey: ref.peerKey, messageId: ref.message.id, single: single || !isViewerItem(ref.message) };
+      this.viewerMessage = ref.message;
       this.revealed[target] = true;
       this.resetZoom();
       this.loadViewerAssets();
@@ -500,11 +538,11 @@ export const useChatMediaStore = defineStore('chatMedia', {
       const viewer = this.viewer;
       if (!viewer) return;
       const items = viewerItemsOf(viewer);
-      const index = items.findIndex((message) => message.id === viewer.messageId);
-      const current = items[index];
-      if (!current?.media) return;
+      const item = resolveViewerItem(viewer, items, this.viewerMessage);
+      if (!item) return;
+      const { message: current, media, index } = item;
       const ref = { peerKey: viewer.peerKey, message: current };
-      const photo = current.media.photo;
+      const photo = media.photo;
       if (photo) {
         const fullKey = photoKey(photo, photo.full);
         if (this.entries[fullKey]?.status === 'error') delete this.entries[fullKey];
@@ -516,7 +554,7 @@ export const useChatMediaStore = defineStore('chatMedia', {
         if (request && this.entries[request.key]?.status === 'error') delete this.entries[request.key];
         this.requestPreview(ref, PRIORITY_VIEWER + 1);
       }
-      const neighbors = [items[index - 1], items[index + 1]];
+      const neighbors = index >= 0 ? [items[index - 1], items[index + 1]] : [];
       if (current.groupedId) neighbors.push(...items.filter((item) => item.groupedId === current.groupedId));
       for (const neighbor of neighbors) if (neighbor && neighbor !== current) this.requestPreview({ peerKey: viewer.peerKey, message: neighbor }, PRIORITY_NEIGHBOR);
       useChatVideoStore().syncViewer();
@@ -535,6 +573,8 @@ export const useChatMediaStore = defineStore('chatMedia', {
       const parsed = parseMediaTarget(target);
       if (!viewer || !parsed || parsed.peerKey !== viewer.peerKey || parsed.messageId === viewer.messageId) return;
       this.viewer = { ...viewer, messageId: parsed.messageId };
+      const next = this.resolve(target);
+      if (next) this.viewerMessage = next.message;
       this.revealed[target] = true;
       this.resetZoom();
       this.loadViewerAssets();
@@ -542,6 +582,7 @@ export const useChatMediaStore = defineStore('chatMedia', {
 
     closeViewer() {
       this.viewer = null;
+      this.viewerMessage = null;
       this.resetZoom();
       useChatVideoStore().syncViewer();
     },

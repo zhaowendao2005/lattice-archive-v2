@@ -29,7 +29,8 @@ import { sessionBatchImporter } from '../data-sources/sessionBatchImporter';
 import { exploreSyncEngine } from '../data-sources/exploreSyncEngine';
 import { useAggregateSearchStore } from './aggregateSearchStore';
 import { useTileStore } from '@/stores/archive/stores/tileStore';
-import type { SessionCredentialState } from '@/views/main/archive/types/tile';
+import { extractSessionLinkPrefix, isSessionTile, type SessionLinkIdentity } from '../utils/resourceManifest';
+import type { FileTileData, SessionCredentialState, TileData } from '@/views/main/archive/types/tile';
 import { useChatStore } from '@/stores/chat/stores/chatStore';
 import { useChatMediaStore } from '@/stores/chat/stores/chatMediaStore';
 import { telegramBusClient } from '@/stores/telegram/data-sources/telegramBusClient';
@@ -141,6 +142,7 @@ export const useSessionManagerStore = defineStore('sessionManager', {
       isLeftTreeOpen: true,
 
       // Tab 1: 全部会话与批量收纳
+      sessionListSource: 'directory' as 'directory' | 'telegram',
       selectedPeerKeys: [] as string[],
       lastClickedPeerIndex: null as number | null,
       selectedCredentialIds: [] as string[],
@@ -212,6 +214,81 @@ export const useSessionManagerStore = defineStore('sessionManager', {
   },
 
   getters: {
+    /**
+     * 当前左栏选定目录下（文件夹或分组）包含的会话磁贴集合（已剔除非会话类型），携带提取出的会话前缀
+     */
+    currentDirectorySessionTiles(state): Array<{
+      tile: FileTileData;
+      identity: SessionLinkIdentity | null;
+    }> {
+      const tileStore = useTileStore();
+      const rawList: FileTileData[] = [];
+      const seen = new Set<string>();
+
+      const collect = (node: TileData) => {
+        if (node.systemApp || node.undeletable) return;
+        if (node.type === 'file') {
+          if (!seen.has(node.id) && isSessionTile(node)) {
+            seen.add(node.id);
+            rawList.push(node);
+          }
+        } else if (node.type === 'folder') {
+          for (const child of node.children) {
+            collect(child);
+          }
+        }
+      };
+
+      if (state.targetFolderId) {
+        const folder = tileStore.getTileById(state.targetFolderId);
+        if (folder && folder.type === 'folder') {
+          for (const child of folder.children) {
+            collect(child);
+          }
+        }
+      } else if (state.targetGroupId) {
+        for (const item of tileStore.tiles) {
+          if (item.groupId === state.targetGroupId) {
+            collect(item);
+          }
+        }
+      } else {
+        for (const item of tileStore.tiles) {
+          collect(item);
+        }
+      }
+
+      const kw = state.sessionFilterKeyword.trim().toLowerCase();
+      const withIdentity = rawList.map((tile) => ({
+        tile,
+        identity: extractSessionLinkPrefix(tile),
+      }));
+
+      return withIdentity.filter(({ tile, identity }) => {
+        if (state.sessionFilterMode === 'joined') {
+          const cred = tile.sessionCredentialState;
+          if (cred && cred !== 'joined') return false;
+        } else if (state.sessionFilterMode === 'archived') {
+          if (!tile.archivedInTg) return false;
+        }
+
+        if (!kw) return true;
+        return (
+          tile.title.toLowerCase().includes(kw) ||
+          (tile.username?.toLowerCase().includes(kw) ?? false) ||
+          (tile.description?.toLowerCase().includes(kw) ?? false) ||
+          (identity?.prefix.toLowerCase().includes(kw) ?? false)
+        );
+      });
+    },
+
+    displayedSessionKeys(state): string[] {
+      if (state.sessionListSource === 'directory') {
+        return (this as any).currentDirectorySessionTiles.map((x: any) => x.tile.id);
+      }
+      return (this as any).filteredDialogs.map((d: any) => d.key);
+    },
+
     filteredDialogs(state): TgDialogDto[] {
       const chatStore = useChatStore();
       const all = Object.values(chatStore.dialogs);
@@ -304,6 +381,8 @@ export const useSessionManagerStore = defineStore('sessionManager', {
         this.targetGroupId = payload.id;
         this.targetFolderId = '';
       }
+      this.sessionListSource = 'directory';
+      this.clearSelectedPeers();
     },
 
     setActiveTab(tab: SessionManagerTab) {
@@ -351,11 +430,11 @@ export const useSessionManagerStore = defineStore('sessionManager', {
     },
 
     handleSessionCardClick(index: number, key: string, event: MouseEvent) {
-      const list = this.filteredDialogs;
-      if (event.shiftKey && this.lastClickedPeerIndex !== null && list.length > 0) {
+      const keys = this.displayedSessionKeys;
+      if (event.shiftKey && this.lastClickedPeerIndex !== null && keys.length > 0) {
         const start = Math.max(0, Math.min(this.lastClickedPeerIndex, index));
-        const end = Math.min(list.length - 1, Math.max(this.lastClickedPeerIndex, index));
-        const rangeKeys = list.slice(start, end + 1).map((d) => d.key);
+        const end = Math.min(keys.length - 1, Math.max(this.lastClickedPeerIndex, index));
+        const rangeKeys = keys.slice(start, end + 1);
         this.selectedPeerKeys = Array.from(new Set([...this.selectedPeerKeys, ...rangeKeys]));
         return;
       }
@@ -364,13 +443,40 @@ export const useSessionManagerStore = defineStore('sessionManager', {
     },
 
     selectAllFilteredPeers() {
-      const keys = this.filteredDialogs.map((d) => d.key);
+      const keys = this.displayedSessionKeys;
       this.selectedPeerKeys = Array.from(new Set([...this.selectedPeerKeys, ...keys]));
     },
 
     clearSelectedPeers() {
       this.selectedPeerKeys = [];
       this.lastClickedPeerIndex = null;
+    },
+
+    /**
+     * 针对当前在左侧树中选定的目录（文件夹或分组）执行会话专属去重
+     */
+    deduplicateCurrentDirectorySessions() {
+      const tileStore = useTileStore();
+      const result = tileStore.deduplicateSessionTilesInTarget({
+        groupId: this.targetGroupId,
+        folderId: this.targetFolderId || undefined,
+      });
+
+      const targetName = this.targetFolderId
+        ? tileStore.getTileById(this.targetFolderId)?.title || '当前文件夹'
+        : tileStore.groups.find((g) => g.id === this.targetGroupId)?.title || '当前分组';
+
+      if (result.removedCount > 0) {
+        const msg = `「${targetName}」会话去重完成：共分析 ${result.analyzedCount} 个磁贴，发现 ${result.duplicateGroupsCount} 组重复，已清理 ${result.removedCount} 个重复磁贴，保留 ${result.survivorCount} 个唯一会话`;
+        this.patrolNotice = msg;
+        this.batchPlaceNotice = msg;
+      } else {
+        const msg = `「${targetName}」会话去重分析：当前目录下 ${result.analyzedCount} 个会话磁贴均为唯一会话，无须清理`;
+        this.patrolNotice = msg;
+        this.batchPlaceNotice = msg;
+      }
+      this.clearSelectedPeers();
+      return result;
     },
 
     /**
@@ -415,14 +521,19 @@ export const useSessionManagerStore = defineStore('sessionManager', {
           fileType: 'generic',
           extension: 'TG',
           fileSize: d.participantsCount ? `${d.participantsCount} 成员` : kindLabel,
+          participantsCount: d.participantsCount,
           sessionId: d.key,
           sessionTitle: d.title,
           sessionKind: 'joined',
+          username: d.username,
+          avatarPhotoId: d.avatar?.photoId,
+          avatarDcId: d.avatar?.dcId,
           updatedAt: d.date
             ? new Date(d.date * 1000).toISOString().slice(0, 10)
             : new Date().toISOString().slice(0, 10),
           badgeMeta: kindLabel,
           thumbnailUrl: avatarThumb,
+          thumbTier0Url: d.avatar?.thumb,
           peerRef: d.peer,
           originAccountId: chatStore.accountId ?? undefined,
         };
@@ -482,17 +593,22 @@ export const useSessionManagerStore = defineStore('sessionManager', {
         fileType: 'generic',
         extension: 'TG',
         fileSize: credential.participantsCount ? `${credential.participantsCount} 成员` : '临时会话',
+        participantsCount: credential.participantsCount,
         sessionId: credential.peerKey,
         sessionTitle: credential.title,
         sessionKind: 'credential_only',
         credentialState: credential.state,
+        username: credential.username,
         inviteHash: credential.inviteHash,
+        avatarPhotoId: credential.avatarPhotoId,
+        avatarDcId: credential.avatarDcId,
         peekExpiresAt: credential.peekExpiresAt,
         lastVerifiedAt: credential.lastVerifiedAt,
         autoRenew: credential.autoRenew,
         updatedAt: new Date(credential.lastVerifiedAt).toISOString().slice(0, 10),
         badgeMeta: '临时凭据',
-        thumbnailUrl: '',
+        thumbnailUrl: credential.avatarThumb || '',
+        thumbTier0Url: credential.avatarThumb,
         peerRef: { type: credential.peerType, id: credential.peerId, accessHash: credential.accessHash },
         originAccountId: credential.accountId || chatStore.accountId || undefined,
       }));
@@ -583,18 +699,29 @@ export const useSessionManagerStore = defineStore('sessionManager', {
               unreadCount: dialog.unreadCount,
               participantsCount: dialog.participantsCount,
               archivedInTg: this.archiveInTelegram,
-              thumb: avatarThumb
-                ? {
-                    status: 'pending',
-                    strippedDataUrl: avatarThumb,
-                    retryCount: 0,
-                  }
-                : undefined,
+              thumb:
+                dialog.avatar || avatarThumb
+                  ? {
+                      status: dialog.avatar ? 'pending' : 'ready',
+                      strippedDataUrl: avatarThumb,
+                      retryCount: 0,
+                      sourceRef: dialog.avatar
+                        ? {
+                            accountId: chatStore.accountId ?? '',
+                            peerId: dialog.peer.id,
+                            peerType: dialog.peer.type,
+                            accessHash: dialog.peer.accessHash,
+                            photoId: dialog.avatar.photoId,
+                            dcId: dialog.avatar.dcId,
+                          }
+                        : undefined,
+                    }
+                  : { status: 'none', retryCount: 0 },
             },
             targetGroup.id,
             this.targetFolderId || undefined,
           );
-          if (placedTile?.id) placedTileIds.push(placedTile.id);
+          if (placedTile?.id && dialog.avatar) placedTileIds.push(placedTile.id);
 
           if (this.archiveInTelegram && dialog.kind !== 'self' && (dialog.folderId ?? 0) === 0) {
             peersToArchive.push(dialog.peer);
@@ -663,28 +790,43 @@ export const useSessionManagerStore = defineStore('sessionManager', {
           const inviteMatch = /(?:t\.me\/(?:\+|joinchat\/)|^\+)([a-zA-Z0-9_-]+)/i.exec(item);
           if (inviteMatch) {
             const hash = inviteMatch[1]!;
+            const existingCred = this.tempCredentials.find((c) => c.inviteHash === hash);
+            if (existingCred) {
+              if (this.newCredentialPlaceToBoard && targetGroup) {
+                this.placeTempCredentialTile(existingCred, targetGroup.id);
+              }
+              addedCount += 1;
+              continue;
+            }
             const check = this.consumeQuota(accountId, 'checkChatInvite', 1);
             if (!check.allowed) {
               this.patrolNotice = check.reason ?? '配额受限';
               break;
             }
             const preview = await telegramBusClient.chatCommand.checkChatInvite(accountId, hash);
-            const credId = `temp-invite-${hash}`;
             const peerKey = preview.dialog?.key ?? `invite-${hash}`;
+            const credId = preview.dialog?.key ? `temp-harvest-${preview.dialog.key}` : `temp-invite-${hash}`;
             const cred: TempSessionCredential = {
               id: credId,
               peerKey,
               peerId: preview.dialog?.peer.id ?? hash,
-              peerType: 'channel',
-              title: preview.title,
+              peerType: preview.dialog?.peer.type ?? 'channel',
+              peerKind:
+                preview.dialog?.kind === 'group' || preview.dialog?.kind === 'supergroup' || preview.dialog?.kind === 'channel'
+                  ? preview.dialog.kind
+                  : undefined,
+              title: preview.dialog?.title ?? preview.title,
               inviteHash: hash,
               accessHash: preview.dialog?.peer.accessHash,
+              avatarPhotoId: preview.dialog?.avatar?.photoId,
+              avatarDcId: preview.dialog?.avatar?.dcId,
+              avatarThumb: preview.dialog?.avatar?.thumb,
               accountId,
               state: this.newCredentialAutoRenew ? 'temp_auto_renew' : 'temp_ephemeral',
               autoRenew: this.newCredentialAutoRenew,
               lastVerifiedAt: Date.now(),
-              peekExpiresAt: preview.peekExpiresAt ? preview.peekExpiresAt * 1000 : Date.now() + 24 * 3600_000,
-              participantsCount: preview.participantsCount,
+              peekExpiresAt: preview.peekExpiresAt ?? Date.now() + 24 * 3600_000,
+              participantsCount: preview.participantsCount ?? preview.dialog?.participantsCount,
               about: preview.about,
               linkedTileIds: [],
               status: 'healthy',
@@ -697,22 +839,45 @@ export const useSessionManagerStore = defineStore('sessionManager', {
           } else {
             const cleanUsername = item.replace(/^(?:https?:\/\/)?(?:t\.me\/|@)/i, '').split(/[/?#]/)[0];
             if (!cleanUsername) continue;
-            const check = this.consumeQuota(accountId, 'resolveUsername', 1);
-            if (!check.allowed) {
-              this.patrolNotice = check.reason ?? '配额受限';
-              break;
+            const existingDialog = Object.values(chatStore.dialogs).find(
+              (d) => d.username?.toLowerCase() === cleanUsername.toLowerCase(),
+            );
+            const existingCred = this.tempCredentials.find(
+              (c) => c.username?.toLowerCase() === cleanUsername.toLowerCase(),
+            );
+            if (existingCred) {
+              if (this.newCredentialPlaceToBoard && targetGroup) {
+                this.placeTempCredentialTile(existingCred, targetGroup.id);
+              }
+              addedCount += 1;
+              continue;
             }
-            const dialog = await telegramBusClient.chatCommand.resolveUsername(accountId, cleanUsername);
+            let dialog = existingDialog;
+            if (!dialog) {
+              const check = this.consumeQuota(accountId, 'resolveUsername', 1);
+              if (!check.allowed) {
+                this.patrolNotice = check.reason ?? '配额受限';
+                break;
+              }
+              dialog = (await telegramBusClient.chatCommand.resolveUsername(accountId, cleanUsername)) ?? undefined;
+            }
             if (!dialog) continue;
-            const credId = `temp-user-${dialog.key}`;
+            const credId = `temp-harvest-${dialog.key}`;
             const cred: TempSessionCredential = {
               id: credId,
               peerKey: dialog.key,
               peerId: dialog.peer.id,
               peerType: dialog.peer.type,
+              peerKind:
+                dialog.kind === 'group' || dialog.kind === 'supergroup' || dialog.kind === 'channel'
+                  ? dialog.kind
+                  : undefined,
               title: dialog.title,
               username: dialog.username ?? cleanUsername,
               accessHash: dialog.peer.accessHash,
+              avatarPhotoId: dialog.avatar?.photoId,
+              avatarDcId: dialog.avatar?.dcId,
+              avatarThumb: dialog.avatar?.thumb,
               accountId,
               state: this.newCredentialAutoRenew ? 'temp_auto_renew' : 'temp_ephemeral',
               autoRenew: this.newCredentialAutoRenew,
@@ -740,9 +905,31 @@ export const useSessionManagerStore = defineStore('sessionManager', {
     },
 
     upsertTempCredential(cred: TempSessionCredential) {
-      const idx = this.tempCredentials.findIndex((c) => c.id === cred.id);
-      if (idx >= 0) this.tempCredentials[idx] = cred;
-      else this.tempCredentials.unshift(cred);
+      const idx = this.tempCredentials.findIndex(
+        (c) => c.id === cred.id || (cred.peerKey && c.peerKey === cred.peerKey),
+      );
+      if (idx >= 0) {
+        const existing = this.tempCredentials[idx]!;
+        this.tempCredentials[idx] = {
+          ...existing,
+          ...cred,
+          id: existing.id,
+          username: cred.username ?? existing.username,
+          inviteHash: cred.inviteHash ?? existing.inviteHash,
+          accessHash: cred.accessHash ?? existing.accessHash,
+          avatarPhotoId: cred.avatarPhotoId ?? existing.avatarPhotoId,
+          avatarDcId: cred.avatarDcId ?? existing.avatarDcId,
+          avatarThumb: cred.avatarThumb ?? existing.avatarThumb,
+          participantsCount: cred.participantsCount ?? existing.participantsCount,
+          about: cred.about ?? existing.about,
+          peekExpiresAt: cred.peekExpiresAt ?? existing.peekExpiresAt,
+          linkedTileIds: Array.from(new Set([...existing.linkedTileIds, ...cred.linkedTileIds])),
+        };
+      } else {
+        this.tempCredentials.unshift(cred);
+      }
+      const tileStore = useTileStore();
+      tileStore.tempCredentials = this.tempCredentials;
     },
 
     placeSelectedCredentialTiles() {
@@ -762,7 +949,12 @@ export const useSessionManagerStore = defineStore('sessionManager', {
       const dialog = chatStore.dialogs[cred.peerKey as TgPeerKey];
       const liveAvatar = chatMediaStore.dialogAvatarUrl(cred.peerKey);
       const avatarThumb =
-        dialog?.avatar?.thumb ?? (liveAvatar && !liveAvatar.startsWith('blob:') ? liveAvatar : undefined);
+        cred.avatarThumb ??
+        dialog?.avatar?.thumb ??
+        (liveAvatar && !liveAvatar.startsWith('blob:') ? liveAvatar : undefined);
+      const avatarPhotoId = cred.avatarPhotoId ?? dialog?.avatar?.photoId;
+      const avatarDcId = cred.avatarDcId ?? dialog?.avatar?.dcId;
+      const hasAvatarSource = Boolean(avatarPhotoId && avatarDcId);
       const newTile = tileStore.addNewFile(
         {
           title: cred.title,
@@ -785,18 +977,29 @@ export const useSessionManagerStore = defineStore('sessionManager', {
           lastVerifiedAt: cred.lastVerifiedAt,
           autoRenew: cred.autoRenew,
           participantsCount: cred.participantsCount,
-          thumb: avatarThumb
-            ? {
-                status: 'pending',
-                strippedDataUrl: avatarThumb,
-                retryCount: 0,
-              }
-            : undefined,
+          thumb:
+            hasAvatarSource || avatarThumb
+              ? {
+                  status: hasAvatarSource ? 'pending' : 'ready',
+                  strippedDataUrl: avatarThumb,
+                  retryCount: 0,
+                  sourceRef: hasAvatarSource
+                    ? {
+                        accountId: cred.accountId,
+                        peerId: cred.peerId,
+                        peerType: cred.peerType,
+                        accessHash: cred.accessHash,
+                        photoId: avatarPhotoId,
+                        dcId: avatarDcId,
+                      }
+                    : undefined,
+                }
+              : { status: 'none', retryCount: 0 },
         },
         group.id,
         this.targetFolderId || undefined,
       );
-      if (newTile?.id) {
+      if (newTile?.id && hasAvatarSource) {
         tileStore.scheduleTileCoverRefresh([newTile.id], 'temp_credential_place');
       }
       if (!cred.linkedTileIds.includes(newTile.id)) {
@@ -909,6 +1112,58 @@ export const useSessionManagerStore = defineStore('sessionManager', {
     async removeTempCredential(credId: string) {
       this.tempCredentials = this.tempCredentials.filter((c) => c.id !== credId);
       await this.persistGovernanceToOpfs();
+    },
+
+    /**
+     * 直接修改已有会话的凭据模式（不触发 Telegram join，仅更新磁贴拓扑与临时凭据池状态）
+     */
+    async setSessionCredentialMode(peerKey: string, state: SessionCredentialState) {
+      const tileStore = useTileStore();
+      tileStore.upgradeSessionTileCredential(peerKey, state);
+      const cred = this.tempCredentials.find((c) => c.peerKey === peerKey || c.id === peerKey);
+      if (cred) {
+        cred.state = state;
+        cred.autoRenew = state === 'temp_auto_renew';
+        await this.persistGovernanceToOpfs();
+      }
+      this.patrolNotice = `凭据模式已切换为「${this.credentialModeLabel(state)}」`;
+    },
+
+    /**
+     * 将顶部选择的凭据模式批量应用到已勾选的、且已收纳为磁贴的会话
+     */
+    async batchSetSelectedSessionsCredentialMode(state: SessionCredentialState) {
+      const tileStore = useTileStore();
+      const keys = this.selectedPeerKeys.filter((key) => tileStore.credentialStateByPeerKey.has(key));
+      for (const key of keys) {
+        await this.setSessionCredentialMode(key, state);
+      }
+      this.patrolNotice =
+        keys.length > 0
+          ? `已将 ${keys.length} 个会话的凭据模式切换为「${this.credentialModeLabel(state)}」`
+          : '选中的会话尚未收纳为磁贴，无法修改凭据模式';
+    },
+
+    credentialModeLabel(state: SessionCredentialState): string {
+      if (state === 'temp_auto_renew') return '临时自动续期';
+      if (state === 'temp_ephemeral') return '临时免打扰';
+      return '已加入';
+    },
+
+    /**
+     * 修改临时凭据池中某条凭据的模式；选择「已加入」时走现有转正流程
+     */
+    async setTempCredentialMode(credId: string, state: SessionCredentialState) {
+      const cred = this.tempCredentials.find((c) => c.id === credId);
+      if (!cred) return;
+      if (state === 'joined') {
+        await this.upgradeTempCredentialToJoined(credId);
+        return;
+      }
+      cred.state = state;
+      cred.autoRenew = state === 'temp_auto_renew';
+      await this.persistGovernanceToOpfs();
+      this.patrolNotice = `「${cred.title}」凭据模式已切换为「${this.credentialModeLabel(state)}」`;
     },
 
     // =========================================================================

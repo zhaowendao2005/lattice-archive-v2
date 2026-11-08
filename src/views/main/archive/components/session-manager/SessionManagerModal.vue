@@ -22,6 +22,8 @@ import {
   Info,
   KeyRound,
   Layers,
+  LayoutGrid,
+  Link,
   PanelLeft,
   RefreshCw,
   Search,
@@ -44,6 +46,7 @@ import { useTileStore } from '@/stores/archive/stores/tileStore';
 import { useTelegramStore } from '@/stores/telegram/stores/telegramStore';
 import { useChatMediaStore } from '@/stores/chat/stores/chatMediaStore';
 import type { TgDialogDto } from '@/stores/chat/types';
+import type { FileTileData } from '@/views/main/archive/types/tile';
 import TileExplorerTree from '../search-modal/left-tree/TileExplorerTree.vue';
 
 const sessionStore = useSessionManagerStore();
@@ -52,8 +55,15 @@ const tileStore = useTileStore();
 const telegramStore = useTelegramStore();
 const chatMediaStore = useChatMediaStore();
 
+const currentListLength = computed(() => {
+  if (sessionStore.sessionListSource === 'directory') {
+    return sessionStore.currentDirectorySessionTiles.length;
+  }
+  return sessionStore.filteredDialogs.length;
+});
+
 const TABS: { id: SessionManagerTab; label: string; badge?: () => string | number }[] = [
-  { id: 'sessions', label: '全部会话与收纳', badge: () => sessionStore.filteredDialogs.length },
+  { id: 'sessions', label: '全部会话与收纳', badge: () => currentListLength.value },
   { id: 'temp_pool', label: '临时会话凭据池', badge: () => sessionStore.tempCredentials.length },
   { id: 'accounts_quota', label: '多账号矩阵与配额', badge: () => telegramStore.accounts.length },
   { id: 'vault_storage', label: '私有备份群与存储' },
@@ -79,6 +89,13 @@ const dragGhostStyle = computed(() => {
   };
 });
 
+/** 当前选中的收纳目标路径是否为文件夹 */
+const isFolderTargetSelected = computed(() => {
+  if (!sessionStore.targetFolderId) return false;
+  const folder = tileStore.getTileById(sessionStore.targetFolderId);
+  return Boolean(folder && folder.type === 'folder');
+});
+
 /** 当前选中的收纳目标路径展示文案 */
 const currentTargetPathLabel = computed(() => {
   const group = tileStore.groups.find((g) => g.id === sessionStore.targetGroupId) ?? tileStore.groups[0];
@@ -86,10 +103,10 @@ const currentTargetPathLabel = computed(() => {
   if (sessionStore.targetFolderId) {
     const folder = tileStore.getTileById(sessionStore.targetFolderId);
     if (folder && folder.type === 'folder') {
-      return `${group.title} / 📁 ${folder.title}`;
+      return `${group.title} / ${folder.title}`;
     }
   }
-  return `🗂️ ${group.title}（分组根目录）`;
+  return `${group.title}（分组根目录）`;
 });
 
 function resolveDialogAvatarUrl(dialog: TgDialogDto): string | null {
@@ -115,6 +132,16 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
+function resolveDialogLinkPrefix(dialog: TgDialogDto): string {
+  if (dialog.username) return `https://t.me/${dialog.username.replace(/^@/, '')}`;
+  if (dialog.peer?.type === 'channel') return `https://t.me/c/${dialog.peer.id}`;
+  return dialog.key;
+}
+
+function resolveTileAvatarUrl(tile: FileTileData): string | null {
+  return tile.thumb?.objectUrl ?? tile.thumb?.strippedDataUrl ?? null;
+}
+
 let suppressNextCardClick = false;
 
 function onSessionCardClick(index: number, key: string, event: MouseEvent) {
@@ -123,6 +150,50 @@ function onSessionCardClick(index: number, key: string, event: MouseEvent) {
     return;
   }
   sessionStore.handleSessionCardClick(index, key, event);
+}
+
+function onTileCardPointerDown(tile: FileTileData, event: PointerEvent) {
+  if (event.button !== 0) return;
+  const target = event.target as HTMLElement | null;
+  if (target?.closest('button, input, select, a')) return;
+  const startX = event.clientX;
+  const startY = event.clientY;
+  let dragStarted = false;
+
+  const cleanup = () => {
+    window.removeEventListener('pointermove', onPointerMove);
+    window.removeEventListener('pointerup', onPointerUp);
+    window.removeEventListener('pointercancel', onPointerUp);
+  };
+
+  const onPointerMove = (moveEvent: PointerEvent) => {
+    if (!dragStarted) {
+      if (
+        Math.abs(moveEvent.clientX - startX) < 5 &&
+        Math.abs(moveEvent.clientY - startY) < 5
+      ) {
+        return;
+      }
+      dragStarted = true;
+      suppressNextCardClick = true;
+      window.setTimeout(() => {
+        suppressNextCardClick = false;
+      }, 0);
+      searchStore.startInternalTreeNodeDrag(tile.id, tile.title, moveEvent.clientX, moveEvent.clientY);
+    }
+    searchStore.updateDragToTreePointer(moveEvent.clientX, moveEvent.clientY);
+  };
+
+  const onPointerUp = () => {
+    cleanup();
+    if (dragStarted) {
+      searchStore.finishDragToTree();
+    }
+  };
+
+  window.addEventListener('pointermove', onPointerMove);
+  window.addEventListener('pointerup', onPointerUp);
+  window.addEventListener('pointercancel', onPointerUp);
 }
 
 function onSessionCardPointerDown(dialog: TgDialogDto, event: PointerEvent) {
@@ -365,6 +436,7 @@ onUnmounted(() => {
               :selectable-target="true"
               :selected-target-type="sessionStore.targetFolderId ? 'folder' : 'group'"
               :selected-target-id="sessionStore.targetFolderId || sessionStore.targetGroupId"
+              :session-only="true"
               @select-target="sessionStore.selectTargetFromExplorer"
             />
 
@@ -377,17 +449,53 @@ onUnmounted(() => {
             >
               <!-- 顶部筛选与收纳路径工具栏 -->
               <div class="shrink-0 border-b border-white/10 bg-white/[0.02] px-4 py-3 space-y-2.5">
-                <!-- 第一行：搜索框 + 状态筛选胶囊 + 全选/清空 -->
+                <!-- 第一行：数据源模式切换 + 搜索框 + 状态筛选胶囊 + 全选/清空 -->
                 <div class="flex flex-wrap items-center justify-between gap-2.5">
                   <div class="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+                    <!-- 数据源模式切换：当前目录磁贴 vs TG 账号会话库 -->
+                    <div class="flex items-center gap-1">
+                      <button
+                        type="button"
+                        class="h-8 rounded-[2px] border px-2.5 text-[11px] font-medium transition-colors"
+                        :class="
+                          sessionStore.sessionListSource === 'directory'
+                            ? 'border-sky-400/50 bg-sky-500/20 text-sky-200 shadow-[inset_0_1px_0_0_rgba(56,189,248,0.25)]'
+                            : 'border-white/10 bg-white/[0.03] text-white/55 hover:border-white/25 hover:text-white/85'
+                        "
+                        title="查看并管理左侧选定目录内的会话磁贴（已剔除非会话磁贴）"
+                        @click="
+                          sessionStore.sessionListSource = 'directory';
+                          sessionStore.clearSelectedPeers();
+                        "
+                      >
+                        当前目录磁贴 ({{ sessionStore.currentDirectorySessionTiles.length }})
+                      </button>
+                      <button
+                        type="button"
+                        class="h-8 rounded-[2px] border px-2.5 text-[11px] font-medium transition-colors"
+                        :class="
+                          sessionStore.sessionListSource === 'telegram'
+                            ? 'border-sky-400/50 bg-sky-500/20 text-sky-200 shadow-[inset_0_1px_0_0_rgba(56,189,248,0.25)]'
+                            : 'border-white/10 bg-white/[0.03] text-white/55 hover:border-white/25 hover:text-white/85'
+                        "
+                        title="查看 Telegram 账号内的全部原始会话，支持一键批量收纳"
+                        @click="
+                          sessionStore.sessionListSource = 'telegram';
+                          sessionStore.clearSelectedPeers();
+                        "
+                      >
+                        TG 账号会话库 ({{ sessionStore.filteredDialogs.length }})
+                      </button>
+                    </div>
+
                     <div
-                      class="flex h-8 w-64 items-center gap-2 rounded-[2px] border border-white/15 bg-black/35 px-2.5 focus-within:border-sky-400/60"
+                      class="flex h-8 w-56 items-center gap-2 rounded-[2px] border border-white/15 bg-black/35 px-2.5 focus-within:border-sky-400/60"
                     >
                       <Search class="size-3.5 shrink-0 text-white/40" />
                       <input
                         :value="sessionStore.sessionFilterKeyword"
                         type="text"
-                        placeholder="筛选会话标题或 @username…"
+                        placeholder="筛选标题、@username 或链接…"
                         class="w-full bg-transparent text-xs text-white placeholder-white/35 outline-none"
                         @input="sessionStore.sessionFilterKeyword = ($event.target as HTMLInputElement).value"
                       />
@@ -396,8 +504,8 @@ onUnmounted(() => {
                     <div class="flex items-center gap-1">
                       <button
                         v-for="mode in [
-                          { id: 'all', label: '全部会话' },
-                          { id: 'joined', label: 'TG 主列表' },
+                          { id: 'all', label: '全部' },
+                          { id: 'joined', label: '已加入' },
                           { id: 'archived', label: 'TG 已归档' },
                         ]"
                         :key="mode.id"
@@ -417,14 +525,14 @@ onUnmounted(() => {
 
                   <div class="flex items-center gap-1.5 text-[11px]">
                     <span class="font-mono text-white/45">
-                      已选 <strong class="text-sky-300">{{ sessionStore.selectedPeerKeys.length }}</strong> / {{ sessionStore.filteredDialogs.length }}
+                      已选 <strong class="text-sky-300">{{ sessionStore.selectedPeerKeys.length }}</strong> / {{ currentListLength }}
                     </span>
                     <button
                       type="button"
                       class="h-7 rounded-[2px] border border-white/12 bg-white/[0.04] px-2.5 text-white/75 transition-colors hover:border-white/25 hover:bg-white/[0.08] hover:text-white"
                       @click="sessionStore.selectAllFilteredPeers()"
                     >
-                      全选当前 ({{ sessionStore.filteredDialogs.length }})
+                      全选当前 ({{ currentListLength }})
                     </button>
                     <button
                       v-if="sessionStore.selectedPeerKeys.length > 0"
@@ -437,15 +545,21 @@ onUnmounted(() => {
                   </div>
                 </div>
 
-                <!-- 第二行：目标收纳路径指示器（联动左栏 Explore）+ 凭据模式 + TG 静默归档 + 一键收纳按钮 -->
+                <!-- 第二行：目标收纳路径指示器（联动左栏 Explore）+ 凭据模式 + 去重操作 + 一键收纳按钮 -->
                 <div class="flex flex-wrap items-center justify-between gap-2.5 border-t border-white/8 pt-2.5 text-[11px]">
                   <div class="flex flex-wrap items-center gap-2.5">
                     <!-- 当前目标路径指示器（点击左栏任意分组/文件夹可实时切换） -->
                     <div
-                      class="flex h-7 items-center gap-1.5 rounded-[2px] border border-sky-400/35 bg-sky-500/10 px-2.5 text-sky-200"
+                      class="flex h-7 items-center gap-1.5 rounded-[2px] border px-2.5"
+                      :class="
+                        isFolderTargetSelected
+                          ? 'border-amber-400/40 bg-amber-500/15 text-amber-100'
+                          : 'border-sky-400/35 bg-sky-500/10 text-sky-200'
+                      "
                       title="在左侧 Explore 目录树中点击任意分组或文件夹即可切换目标落位路径，也可直接在左栏新建文件夹"
                     >
-                      <Folder class="size-3.5 shrink-0 text-sky-300" />
+                      <Folder v-if="isFolderTargetSelected" class="size-3.5 shrink-0 text-amber-300" />
+                      <LayoutGrid v-else class="size-3.5 shrink-0 text-sky-300" />
                       <span class="text-white/55">目标路径：</span>
                       <span class="max-w-[220px] truncate font-medium">{{ currentTargetPathLabel }}</span>
                     </div>
@@ -475,6 +589,20 @@ onUnmounted(() => {
                       <option value="temp_ephemeral" class="bg-slate-900 text-white">🟡 临时免打扰 (Ephemeral)</option>
                     </select>
 
+                    <!-- 把顶部模式批量应用到已勾选会话 -->
+                    <button
+                      type="button"
+                      class="flex h-7 items-center gap-1 rounded-[2px] border border-white/15 bg-white/[0.05] px-2 text-[11px] text-white/80 transition-colors hover:bg-white/10"
+                      title="把上方凭据模式应用到已勾选的会话磁贴"
+                      @click="
+                        sessionStore.batchSetSelectedSessionsCredentialMode(
+                          sessionStore.credentialModeForPlacement,
+                        )
+                      "
+                    >
+                      应用到已选 ({{ sessionStore.selectedPeerKeys.length }})
+                    </button>
+
                     <label class="flex cursor-pointer items-center gap-1.5 text-white/75 hover:text-white">
                       <input
                         type="checkbox"
@@ -487,6 +615,18 @@ onUnmounted(() => {
                   </div>
 
                   <div class="flex items-center gap-2">
+                    <!-- 会话链接去重交互按钮（仅在目录磁贴模式下显示） -->
+                    <button
+                      v-if="sessionStore.sessionListSource === 'directory'"
+                      type="button"
+                      class="flex h-7 items-center gap-1.5 rounded-[2px] border border-amber-400/50 bg-amber-500/15 px-2.5 text-[11px] font-medium text-amber-200 shadow-[inset_0_1px_0_0_rgba(251,191,36,0.25)] transition-colors hover:bg-amber-500/25"
+                      title="分析当前目录下的会话磁贴，依据会话链接前段（如 t.me/c/xxx、@username、邀请哈希）自动清理重复磁贴，只保留一个主磁贴"
+                      @click="sessionStore.deduplicateCurrentDirectorySessions()"
+                    >
+                      <Sparkles class="size-3.5 text-amber-300" />
+                      <span>会话链接去重</span>
+                    </button>
+
                     <button
                       type="button"
                       class="flex h-7 items-center gap-1.5 border border-white/15 bg-white/[0.05] px-2.5 text-[11px] text-white/80 hover:bg-white/10"
@@ -495,18 +635,19 @@ onUnmounted(() => {
                       <RefreshCw class="size-3.5" :class="sessionStore.isRefreshingSelectedCovers ? 'animate-spin' : ''" />刷新选中封面 ({{ sessionStore.selectedPeerKeys.length }})
                     </button>
                     <button
+                      v-if="sessionStore.sessionListSource === 'telegram'"
                       type="button"
                       class="flex h-7 items-center gap-1.5 rounded-[2px] border border-sky-400/60 bg-sky-500/25 px-3 text-[11px] font-medium text-sky-100 shadow-[inset_0_1px_0_0_rgba(56,189,248,0.3)] transition-colors hover:bg-sky-500/35"
                       @click="sessionStore.batchPlaceSelectedSessionsIntoExplore()"
                     >
-                    <FolderPlus class="size-3.5 text-sky-300" />
-                    <span>
-                      {{
-                        sessionStore.isBatchPlacing
-                          ? '正在批量收纳…'
-                          : `一键收纳至目标路径 (${sessionStore.selectedPeerKeys.length})`
-                      }}
-                    </span>
+                      <FolderPlus class="size-3.5 text-sky-300" />
+                      <span>
+                        {{
+                          sessionStore.isBatchPlacing
+                            ? '正在批量收纳…'
+                            : `一键收纳至目标路径 (${sessionStore.selectedPeerKeys.length})`
+                        }}
+                      </span>
                     </button>
                   </div>
                 </div>
@@ -515,135 +656,322 @@ onUnmounted(() => {
 
               <!-- 会话单列卡片流（与 SearchResultCard 保持完全一致的结构与手感） -->
               <div class="search-modal-scroll flex-1 overflow-y-auto px-4 py-3">
-                <div
-                  v-if="sessionStore.filteredDialogs.length === 0"
-                  class="flex h-64 flex-col items-center justify-center rounded-[2px] border border-dashed border-white/12 bg-white/[0.01] text-center text-white/45"
-                >
-                  <Users class="mb-2 size-8 opacity-40" />
-                  <p class="text-xs font-medium text-white/70">暂无匹配的 Telegram 会话</p>
-                  <p class="mt-1 text-[11px] text-white/40">
-                    连接 Telegram 账号后，可在此勾选群组/频道并直接拖入左侧 Explore 磁贴树或一键批量收纳
-                  </p>
-                </div>
-
-                <div v-else class="space-y-1.5">
-                  <article
-                    v-for="(dialog, idx) in sessionStore.filteredDialogs"
-                    :key="dialog.key"
-                    class="group relative flex cursor-grab select-none items-center gap-3 rounded-[2px] border p-2.5 transition-all duration-150 active:cursor-grabbing"
-                    :class="
-                      sessionStore.selectedPeerKeys.includes(dialog.key)
-                        ? 'border-sky-400/85 bg-sky-500/[0.17] ring-1 ring-sky-400/55 shadow-[inset_0_1px_0_0_rgba(56,189,248,0.28),0_6px_18px_-6px_rgba(14,165,233,0.3)]'
-                        : 'border-white/10 bg-white/[0.03] hover:border-white/25 hover:bg-white/[0.06]'
-                    "
-                    @pointerdown="onSessionCardPointerDown(dialog, $event)"
-                    @click="onSessionCardClick(idx, dialog.key, $event)"
+                <!-- 1. 当前目录会话磁贴视图 -->
+                <template v-if="sessionStore.sessionListSource === 'directory'">
+                  <div
+                    v-if="sessionStore.currentDirectorySessionTiles.length === 0"
+                    class="flex h-64 flex-col items-center justify-center rounded-[2px] border border-dashed border-white/12 bg-white/[0.01] text-center text-white/45"
                   >
-                    <!-- 左端：正方形缩略图容器 (Square Thumbnail) -->
-                    <div
-                      class="relative aspect-square size-14 shrink-0 overflow-hidden rounded-[2px] border border-white/12 bg-black/45"
+                    <Users class="mb-2 size-8 opacity-40" />
+                    <p class="text-xs font-medium text-white/70">当前目录下暂无会话磁贴</p>
+                    <p class="mt-1 text-[11px] text-white/40">
+                      可切换上方「TG 账号会话库」一键收纳，或在左栏点击选择其它分组/文件夹
+                    </p>
+                  </div>
+
+                  <div v-else class="space-y-1.5">
+                    <article
+                      v-for="(item, idx) in sessionStore.currentDirectorySessionTiles"
+                      :key="item.tile.id"
+                      class="group relative flex cursor-grab select-none items-center gap-3 rounded-[2px] border p-2.5 transition-all duration-150 active:cursor-grabbing"
+                      :class="
+                        sessionStore.selectedPeerKeys.includes(item.tile.id)
+                          ? 'border-sky-400/85 bg-sky-500/[0.17] ring-1 ring-sky-400/55 shadow-[inset_0_1px_0_0_rgba(56,189,248,0.28),0_6px_18px_-6px_rgba(14,165,233,0.3)]'
+                          : 'border-white/10 bg-white/[0.03] hover:border-white/25 hover:bg-white/[0.06]'
+                      "
+                      @pointerdown="onTileCardPointerDown(item.tile, $event)"
+                      @click="onSessionCardClick(idx, item.tile.id, $event)"
                     >
-                      <img
-                        v-if="resolveDialogAvatarUrl(dialog)"
-                        :src="resolveDialogAvatarUrl(dialog)!"
-                        :alt="dialog.title"
-                        loading="lazy"
-                        class="h-full w-full object-cover transition-transform duration-200 group-hover:scale-105"
-                      />
+                      <!-- 左端：正方形缩略图容器 -->
                       <div
-                        v-else
-                        class="flex h-full w-full items-center justify-center bg-gradient-to-br from-sky-500/25 via-slate-800 to-slate-950 text-base font-bold text-sky-200"
+                        class="relative aspect-square size-14 shrink-0 overflow-hidden rounded-[2px] border border-white/12 bg-black/45"
                       >
-                        {{ dialog.title.slice(0, 2).toUpperCase() }}
-                      </div>
-                      <!-- 缩略图底部胶囊角标 -->
-                      <span
-                        class="absolute bottom-0.5 right-0.5 rounded-[1px] bg-black/75 px-1 py-0.2 font-mono text-[9px] text-white/85 backdrop-blur-xs"
-                      >
-                        {{ resolveDialogKindLabel(dialog.kind) }}
-                      </span>
-                    </div>
-
-                    <!-- 中部：Title 与结构化元数据 -->
-                    <div class="min-w-0 flex-1">
-                      <!-- 第一行：Title + 已归档磁贴位置标记 + TG 归档态标签 -->
-                      <div class="flex items-center gap-2">
-                        <h3
-                          class="min-w-0 flex-1 truncate text-[13px] font-medium tracking-wide"
-                          :class="sessionStore.selectedPeerKeys.includes(dialog.key) ? 'text-white' : 'text-white/92'"
+                        <img
+                          v-if="resolveTileAvatarUrl(item.tile)"
+                          :src="resolveTileAvatarUrl(item.tile)!"
+                          :alt="item.tile.title"
+                          loading="lazy"
+                          class="h-full w-full object-cover transition-transform duration-200 group-hover:scale-105"
+                        />
+                        <div
+                          v-else
+                          class="flex h-full w-full items-center justify-center bg-gradient-to-br from-sky-500/25 via-slate-800 to-slate-950 text-base font-bold text-sky-200"
                         >
-                          {{ dialog.title }}
-                        </h3>
-
-                        <!-- 已在磁贴拓扑中的实时标记 -->
+                          {{ item.tile.title.slice(0, 2).toUpperCase() }}
+                        </div>
                         <span
-                          v-if="tileStore.archivedSourceMap.get(dialog.key)"
-                          class="flex shrink-0 items-center gap-1 rounded-[2px] border border-emerald-400/40 bg-emerald-500/15 px-1.5 py-0.5 text-[10px] text-emerald-300"
-                          :title="`已归入：${tileStore.archivedSourceMap.get(dialog.key)}`"
+                          class="absolute bottom-0.5 right-0.5 rounded-[1px] bg-black/75 px-1 py-0.2 font-mono text-[9px] text-white/85 backdrop-blur-xs"
                         >
-                          <CheckCircle2 class="size-2.5" />
-                          <span class="max-w-[140px] truncate">{{ tileStore.archivedSourceMap.get(dialog.key) }}</span>
+                          {{ resolveDialogKindLabel((item.tile.peerType as any) || 'channel') }}
                         </span>
+                      </div>
 
-                        <!-- TG 侧主列表 / 已归档标记 -->
-                        <span
-                          class="shrink-0 rounded-[2px] border px-1.5 py-0.5 text-[10px]"
-                          :class="
-                            (dialog.folderId ?? 0) === 1
-                              ? 'border-white/15 bg-white/[0.06] text-white/60'
-                              : 'border-sky-400/35 bg-sky-500/15 text-sky-300'
+                      <!-- 中部：Title、会话链接前缀与元数据 -->
+                      <div class="min-w-0 flex-1">
+                        <!-- 第一行：Title + 已归档磁贴位置标记 + TG 归档态标签 -->
+                        <div class="flex items-center gap-2">
+                          <h3
+                            class="min-w-0 flex-1 truncate text-[13px] font-medium tracking-wide"
+                            :class="sessionStore.selectedPeerKeys.includes(item.tile.id) ? 'text-white' : 'text-white/92'"
+                          >
+                            {{ item.tile.title }}
+                          </h3>
+
+                          <!-- 已在磁贴拓扑中的实时标记 -->
+                          <span
+                            v-if="tileStore.archivedSourceMap.get(item.tile.sourceResultId || item.tile.peerKey || item.tile.id)"
+                            class="flex shrink-0 items-center gap-1 rounded-[2px] border border-emerald-400/40 bg-emerald-500/15 px-1.5 py-0.5 text-[10px] text-emerald-300"
+                            :title="`已归入：${tileStore.archivedSourceMap.get(item.tile.sourceResultId || item.tile.peerKey || item.tile.id)}`"
+                          >
+                            <CheckCircle2 class="size-2.5" />
+                            <span class="max-w-[140px] truncate">
+                              {{ tileStore.archivedSourceMap.get(item.tile.sourceResultId || item.tile.peerKey || item.tile.id) }}
+                            </span>
+                          </span>
+
+                          <!-- TG 侧主列表 / 已归档标记 -->
+                          <span
+                            class="shrink-0 rounded-[2px] border px-1.5 py-0.5 text-[10px]"
+                            :class="
+                              item.tile.archivedInTg
+                                ? 'border-white/15 bg-white/[0.06] text-white/60'
+                                : 'border-sky-400/35 bg-sky-500/15 text-sky-300'
+                            "
+                          >
+                            {{ item.tile.archivedInTg ? 'TG 已归档' : 'TG 主列表' }}
+                          </span>
+                        </div>
+
+                        <!-- 第二行：突出展示会话链接前缀段（由此直观看出指向哪个会话） -->
+                        <div v-if="item.identity" class="mt-0.5 flex items-center gap-1.5 font-mono text-[11px] text-sky-300">
+                          <Link class="size-3 shrink-0 text-sky-400" />
+                          <span class="truncate font-semibold tracking-tight">{{ item.identity.prefix }}</span>
+                        </div>
+
+                        <!-- 第三行：最近描述/消息摘要 -->
+                        <p class="mt-0.5 truncate text-[11px] text-white/55">
+                          {{ item.tile.description || (item.tile.username ? `@${item.tile.username}` : '会话磁贴') }}
+                        </p>
+
+                        <!-- 第四行：账号标识、成员数、活跃日期 -->
+                        <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10px] text-white/40">
+                          <span class="flex items-center gap-1 text-white/65">
+                            <Users class="size-2.5 text-sky-300" />
+                            <span class="max-w-[180px] truncate">
+                              {{ item.tile.username ? `@${item.tile.username}` : (item.tile.peerKey || item.tile.sessionId || item.tile.id) }}
+                            </span>
+                          </span>
+
+                          <span v-if="item.tile.participantsCount">
+                            {{ item.tile.participantsCount.toLocaleString('zh-CN') }} 成员
+                          </span>
+                          <span v-if="(item.tile.unreadCount ?? 0) > 0" class="text-sky-300">
+                            未读 {{ item.tile.unreadCount }}
+                          </span>
+                          <span class="uppercase">{{ item.tile.peerType || 'SESSION' }}</span>
+                          <span>{{ formatDialogDate(item.tile.updatedAtMs ? item.tile.updatedAtMs / 1000 : undefined) }}</span>
+                        </div>
+                      </div>
+
+                      <!-- 右端：凭据下拉 + 拖拽把手 + 勾选框 -->
+                      <div class="flex shrink-0 items-center gap-1.5 pl-1">
+                        <select
+                          :value="item.tile.sessionCredentialState || 'joined'"
+                          class="h-6 max-w-[92px] rounded-[2px] border border-white/12 bg-black/40 px-1 text-[10px] text-white/85 outline-none focus:border-sky-400/50"
+                          title="修改该会话磁贴的凭据模式"
+                          @pointerdown.stop
+                          @click.stop
+                          @change="
+                            sessionStore.setSessionCredentialMode(
+                              item.tile.id,
+                              ($event.target as HTMLSelectElement).value as any,
+                            )
                           "
                         >
-                          {{ (dialog.folderId ?? 0) === 1 ? 'TG 已归档' : 'TG 主列表' }}
-                        </span>
+                          <option value="joined" class="bg-slate-900 text-white">🟢 已加入</option>
+                          <option value="temp_auto_renew" class="bg-slate-900 text-white">🔵 自动续期</option>
+                          <option value="temp_ephemeral" class="bg-slate-900 text-white">🟡 临时免打扰</option>
+                        </select>
+                        <GripVertical
+                          class="size-3.5 text-white/20 opacity-0 transition-opacity group-hover:opacity-100"
+                        />
+                        <div
+                          class="flex size-4 items-center justify-center rounded-[2px] border transition-colors"
+                          :class="
+                            sessionStore.selectedPeerKeys.includes(item.tile.id)
+                              ? 'border-sky-400 bg-sky-400 text-slate-950 shadow-[0_0_8px_rgba(56,189,248,0.6)]'
+                              : 'border-white/20 bg-black/35 text-transparent group-hover:border-white/40'
+                          "
+                        >
+                          <Check class="size-3" :stroke-width="2.5" />
+                        </div>
                       </div>
+                    </article>
+                  </div>
+                </template>
 
-                      <!-- 第二行：最近消息摘要 -->
-                      <p class="mt-1 truncate text-[11px] text-white/55">
-                        {{
-                          dialog.lastMessage?.text ||
-                            (dialog.username ? `@${dialog.username}` : `${resolveDialogKindLabel(dialog.kind)}会话`)
-                        }}
-                      </p>
+                <!-- 2. TG 账号原始会话库视图 -->
+                <template v-else>
+                  <div
+                    v-if="sessionStore.filteredDialogs.length === 0"
+                    class="flex h-64 flex-col items-center justify-center rounded-[2px] border border-dashed border-white/12 bg-white/[0.01] text-center text-white/45"
+                  >
+                    <Users class="mb-2 size-8 opacity-40" />
+                    <p class="text-xs font-medium text-white/70">暂无匹配的 Telegram 会话</p>
+                    <p class="mt-1 text-[11px] text-white/40">
+                      连接 Telegram 账号后，可在此勾选群组/频道并直接拖入左侧 Explore 磁贴树或一键批量收纳
+                    </p>
+                  </div>
 
-                      <!-- 第三行：账号标识、成员数、未读数、活跃日期 -->
-                      <div class="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10px] text-white/40">
-                        <span class="flex items-center gap-1 text-white/65">
-                          <Users class="size-2.5 text-sky-300" />
-                          <span class="max-w-[180px] truncate">
-                            {{ dialog.username ? `@${dialog.username}` : dialog.key }}
-                          </span>
-                        </span>
-
-                        <span v-if="dialog.participantsCount">
-                          {{ dialog.participantsCount.toLocaleString('zh-CN') }} 成员
-                        </span>
-                        <span v-if="dialog.unreadCount > 0" class="text-sky-300">
-                          未读 {{ dialog.unreadCount }}
-                        </span>
-                        <span class="uppercase">{{ dialog.kind }}</span>
-                        <span>{{ formatDialogDate(dialog.date) }}</span>
-                      </div>
-                    </div>
-
-                    <!-- 右端：拖拽把手提示与多选高亮勾选框 -->
-                    <div class="flex shrink-0 items-center gap-1.5 pl-1">
-                      <GripVertical
-                        class="size-3.5 text-white/20 opacity-0 transition-opacity group-hover:opacity-100"
-                      />
+                  <div v-else class="space-y-1.5">
+                    <article
+                      v-for="(dialog, idx) in sessionStore.filteredDialogs"
+                      :key="dialog.key"
+                      class="group relative flex cursor-grab select-none items-center gap-3 rounded-[2px] border p-2.5 transition-all duration-150 active:cursor-grabbing"
+                      :class="
+                        sessionStore.selectedPeerKeys.includes(dialog.key)
+                          ? 'border-sky-400/85 bg-sky-500/[0.17] ring-1 ring-sky-400/55 shadow-[inset_0_1px_0_0_rgba(56,189,248,0.28),0_6px_18px_-6px_rgba(14,165,233,0.3)]'
+                          : 'border-white/10 bg-white/[0.03] hover:border-white/25 hover:bg-white/[0.06]'
+                      "
+                      @pointerdown="onSessionCardPointerDown(dialog, $event)"
+                      @click="onSessionCardClick(idx, dialog.key, $event)"
+                    >
+                      <!-- 左端：正方形缩略图容器 -->
                       <div
-                        class="flex size-4 items-center justify-center rounded-[2px] border transition-colors"
-                        :class="
-                          sessionStore.selectedPeerKeys.includes(dialog.key)
-                            ? 'border-sky-400 bg-sky-400 text-slate-950 shadow-[0_0_8px_rgba(56,189,248,0.6)]'
-                            : 'border-white/20 bg-black/35 text-transparent group-hover:border-white/40'
-                        "
+                        class="relative aspect-square size-14 shrink-0 overflow-hidden rounded-[2px] border border-white/12 bg-black/45"
                       >
-                        <Check class="size-3" :stroke-width="2.5" />
+                        <img
+                          v-if="resolveDialogAvatarUrl(dialog)"
+                          :src="resolveDialogAvatarUrl(dialog)!"
+                          :alt="dialog.title"
+                          loading="lazy"
+                          class="h-full w-full object-cover transition-transform duration-200 group-hover:scale-105"
+                        />
+                        <div
+                          v-else
+                          class="flex h-full w-full items-center justify-center bg-gradient-to-br from-sky-500/25 via-slate-800 to-slate-950 text-base font-bold text-sky-200"
+                        >
+                          {{ dialog.title.slice(0, 2).toUpperCase() }}
+                        </div>
+                        <span
+                          class="absolute bottom-0.5 right-0.5 rounded-[1px] bg-black/75 px-1 py-0.2 font-mono text-[9px] text-white/85 backdrop-blur-xs"
+                        >
+                          {{ resolveDialogKindLabel(dialog.kind) }}
+                        </span>
                       </div>
-                    </div>
-                  </article>
-                </div>
+
+                      <!-- 中部：Title 与结构化元数据 -->
+                      <div class="min-w-0 flex-1">
+                        <!-- 第一行：Title + 已归档磁贴位置标记 + TG 归档态标签 -->
+                        <div class="flex items-center gap-2">
+                          <h3
+                            class="min-w-0 flex-1 truncate text-[13px] font-medium tracking-wide"
+                            :class="sessionStore.selectedPeerKeys.includes(dialog.key) ? 'text-white' : 'text-white/92'"
+                          >
+                            {{ dialog.title }}
+                          </h3>
+
+                          <!-- 已在磁贴拓扑中的实时标记 -->
+                          <span
+                            v-if="tileStore.archivedSourceMap.get(dialog.key)"
+                            class="flex shrink-0 items-center gap-1 rounded-[2px] border border-emerald-400/40 bg-emerald-500/15 px-1.5 py-0.5 text-[10px] text-emerald-300"
+                            :title="`已归入：${tileStore.archivedSourceMap.get(dialog.key)}`"
+                          >
+                            <CheckCircle2 class="size-2.5" />
+                            <span class="max-w-[140px] truncate">{{ tileStore.archivedSourceMap.get(dialog.key) }}</span>
+                          </span>
+
+                          <!-- TG 侧主列表 / 已归档标记 -->
+                          <span
+                            class="shrink-0 rounded-[2px] border px-1.5 py-0.5 text-[10px]"
+                            :class="
+                              (dialog.folderId ?? 0) === 1
+                                ? 'border-white/15 bg-white/[0.06] text-white/60'
+                                : 'border-sky-400/35 bg-sky-500/15 text-sky-300'
+                            "
+                          >
+                            {{ (dialog.folderId ?? 0) === 1 ? 'TG 已归档' : 'TG 主列表' }}
+                          </span>
+                        </div>
+
+                        <!-- 第二行：展示会话链接前缀段 -->
+                        <div class="mt-0.5 flex items-center gap-1.5 font-mono text-[11px] text-sky-300">
+                          <Link class="size-3 shrink-0 text-sky-400" />
+                          <span class="truncate font-semibold tracking-tight">{{ resolveDialogLinkPrefix(dialog) }}</span>
+                        </div>
+
+                        <!-- 第三行：最近消息摘要 -->
+                        <p class="mt-0.5 truncate text-[11px] text-white/55">
+                          {{
+                            dialog.lastMessage?.text ||
+                              (dialog.username ? `@${dialog.username}` : `${resolveDialogKindLabel(dialog.kind)}会话`)
+                          }}
+                        </p>
+
+                        <!-- 第四行：账号标识、成员数、未读数、活跃日期 -->
+                        <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10px] text-white/40">
+                          <span class="flex items-center gap-1 text-white/65">
+                            <Users class="size-2.5 text-sky-300" />
+                            <span class="max-w-[180px] truncate">
+                              {{ dialog.username ? `@${dialog.username}` : dialog.key }}
+                            </span>
+                          </span>
+
+                          <span v-if="dialog.participantsCount">
+                            {{ dialog.participantsCount.toLocaleString('zh-CN') }} 成员
+                          </span>
+                          <span v-if="dialog.unreadCount > 0" class="text-sky-300">
+                            未读 {{ dialog.unreadCount }}
+                          </span>
+                          <span class="uppercase">{{ dialog.kind }}</span>
+                          <span>{{ formatDialogDate(dialog.date) }}</span>
+                        </div>
+                      </div>
+
+                      <!-- 右端：拖拽把手提示与多选高亮勾选框 -->
+                      <div class="flex shrink-0 items-center gap-1.5 pl-1">
+                        <select
+                          v-if="tileStore.credentialStateByPeerKey.get(dialog.key)"
+                          :value="tileStore.credentialStateByPeerKey.get(dialog.key)"
+                          class="h-6 max-w-[92px] rounded-[2px] border border-white/12 bg-black/40 px-1 text-[10px] text-white/85 outline-none focus:border-sky-400/50"
+                          title="修改该会话的凭据模式：已加入 / 临时自动续期 / 临时免打扰"
+                          @pointerdown.stop
+                          @click.stop
+                          @change="
+                            sessionStore.setSessionCredentialMode(
+                              dialog.key,
+                              ($event.target as HTMLSelectElement).value as any,
+                            )
+                          "
+                        >
+                          <option value="joined" class="bg-slate-900 text-white">🟢 已加入</option>
+                          <option value="temp_auto_renew" class="bg-slate-900 text-white">🔵 自动续期</option>
+                          <option value="temp_ephemeral" class="bg-slate-900 text-white">🟡 临时免打扰</option>
+                        </select>
+                        <span
+                          v-else
+                          class="shrink-0 rounded-[2px] border border-white/10 px-1.5 py-0.5 text-[10px] text-white/35"
+                          title="该会话尚未收纳为磁贴，请先收纳后再修改凭据模式"
+                        >
+                          未收纳
+                        </span>
+                        <GripVertical
+                          class="size-3.5 text-white/20 opacity-0 transition-opacity group-hover:opacity-100"
+                        />
+                        <div
+                          class="flex size-4 items-center justify-center rounded-[2px] border transition-colors"
+                          :class="
+                            sessionStore.selectedPeerKeys.includes(dialog.key)
+                              ? 'border-sky-400 bg-sky-400 text-slate-950 shadow-[0_0_8px_rgba(56,189,248,0.6)]'
+                              : 'border-white/20 bg-black/35 text-transparent group-hover:border-white/40'
+                          "
+                        >
+                          <Check class="size-3" :stroke-width="2.5" />
+                        </div>
+                      </div>
+                    </article>
+                  </div>
+                </template>
               </div>
             </main>
 
@@ -770,9 +1098,23 @@ onUnmounted(() => {
                       >
                         {{ cred.status === 'healthy' ? '凭据有效' : '待续期/已失效' }}
                       </span>
-                      <span class="rounded-[2px] border border-white/12 bg-white/[0.06] px-1.5 py-0.5 text-[10px] text-white/70">
-                        {{ cred.autoRenew ? '🔵 自动续期' : '🟡 单次快照' }}
-                      </span>
+                      <select
+                        :value="cred.state"
+                        class="h-6 rounded-[2px] border border-white/12 bg-black/40 px-1 text-[10px] text-white/85 outline-none focus:border-sky-400/50"
+                        title="修改该临时凭据模式：转正加入 / 自动续期 / 单次快照"
+                        @pointerdown.stop
+                        @click.stop
+                        @change="
+                          sessionStore.setTempCredentialMode(
+                            cred.id,
+                            ($event.target as HTMLSelectElement).value as any,
+                          )
+                        "
+                      >
+                        <option value="joined" class="bg-slate-900 text-white">🟢 转正加入</option>
+                        <option value="temp_auto_renew" class="bg-slate-900 text-white">🔵 自动续期</option>
+                        <option value="temp_ephemeral" class="bg-slate-900 text-white">🟡 单次快照</option>
+                      </select>
                     </div>
                     <p class="font-mono text-[10px] text-white/45">
                       {{ cred.username ? `@${cred.username}` : `Invite +${cred.inviteHash}` }}
